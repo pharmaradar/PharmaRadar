@@ -176,6 +176,9 @@ async def update_user(user_id: int, body: UpdateUserBody,
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
     protected = bool(getattr(user, "is_superadmin", False))
+    if protected and not bool(getattr(admin, "is_superadmin", False)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Only the super admin can modify the super admin account")
     if body.name is not None:
         user.name = body.name.strip() or None
     if body.email is not None:

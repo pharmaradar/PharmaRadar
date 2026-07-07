@@ -7,7 +7,7 @@ import { useAuthStore } from "@/store/auth";
 const FEATURES = [
   { icon: Activity, title: "KOL monitoring", desc: "Track what 100 key opinion leaders publish, weekly." },
   { icon: Flame, title: "Social & web trends", desc: "Surface emerging signals across platforms in real time." },
-  { icon: Sparkles, title: "AI synthesis", desc: "Turn raw activity into a Roche-focused intelligence brief." },
+  { icon: Sparkles, title: "AI synthesis", desc: "Turn raw activity into a pharma-focused intelligence brief." },
 ];
 
 export default function Login() {
@@ -60,7 +60,7 @@ export default function Login() {
           {/* logo pinned tight to the top-left corner */}
           <div className="absolute top-7 left-8 xl:left-10 flex items-center gap-3 fade-up">
             <div className="relative w-11 h-11 rounded-xl bg-white/15 backdrop-blur flex items-center justify-center text-lg font-bold">
-              RR
+              PR
               <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5">
                 <span className="ping-ring absolute inset-0 rounded-full bg-cyan-300" />
                 <span className="absolute inset-0 rounded-full bg-cyan-300" />
@@ -77,7 +77,7 @@ export default function Login() {
                 <span className="w-1.5 h-1.5 rounded-full bg-cyan-300" /> Pharma intelligence platform
               </span>
               <h1 className="fade-up text-4xl xl:text-5xl font-bold leading-[1.1] tracking-tight" style={{ animationDelay: "0.1s" }}>
-                Intelligence that finds<br />the signal for Roche.
+                Intelligence that finds<br />the signal in the noise.
               </h1>
               <p className="fade-up mt-6 text-lg text-white/70 leading-relaxed max-w-lg mx-auto" style={{ animationDelay: "0.18s" }}>
                 Monitor the people and conversations shaping your therapeutic areas — distilled into one weekly brief.
@@ -129,7 +129,7 @@ export default function Login() {
           <div className="rounded-2xl bg-white dark:bg-[#0f1729] border border-slate-200/80 dark:border-white/10 shadow-xl shadow-slate-300/40 dark:shadow-black/40 p-10">
             {/* logo mark + live heartbeat trace */}
             <div className="flex items-center gap-4 mb-7">
-              <div className="w-14 h-14 rounded-2xl bg-pharma-blue text-white flex items-center justify-center text-xl font-bold shadow-md shadow-pharma-blue/30 shrink-0">RR</div>
+              <div className="w-14 h-14 rounded-2xl bg-pharma-blue text-white flex items-center justify-center text-xl font-bold shadow-md shadow-pharma-blue/30 shrink-0">PR</div>
               <svg viewBox="0 0 120 40" className="h-9 w-32 overflow-visible" fill="none" aria-hidden="true">
                 {/* faint baseline waveform */}
                 <path d="M0,20 L20,20 L24,18 L28,22 L33,5 L38,35 L43,13 L47,20 L70,20 L74,20 L78,16 L82,24 L86,20 L120,20"

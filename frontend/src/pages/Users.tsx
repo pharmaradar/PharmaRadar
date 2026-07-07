@@ -168,9 +168,12 @@ function UserRow({ u, self, onUpdate, onDelete, busy }: {
 
   useEffect(() => { setName(u.name ?? ""); setEmail(u.email); }, [u.name, u.email]);
 
+  const viewer = useAuthStore((s) => s.user);
   const detailsChanged = name.trim() !== (u.name ?? "") || email.trim() !== u.email;
   const protectedAcct = !!u.is_superadmin;   // super admin: can't be demoted, deactivated, or deleted
-  const field = "w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-[#1e3a5f] bg-white dark:bg-[#0f2744] text-sm focus:outline-none focus:ring-2 focus:ring-pharma-blue/30";
+  // Only the super admin can touch the super admin account (name/email/password too)
+  const locked = protectedAcct && !viewer?.is_superadmin;
+  const field = "w-full px-3 py-2 rounded-lg border border-slate-200 dark:border-[#1e3a5f] bg-white dark:bg-[#0f2744] text-sm focus:outline-none focus:ring-2 focus:ring-pharma-blue/30 disabled:opacity-50 disabled:cursor-not-allowed";
 
   return (
     <div>
@@ -211,18 +214,22 @@ function UserRow({ u, self, onUpdate, onDelete, busy }: {
           <div className="grid sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Name</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} className={field} placeholder="Full name" />
+              <input value={name} onChange={(e) => setName(e.target.value)} className={field} placeholder="Full name" disabled={locked} />
             </div>
             <div>
               <label className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Email</label>
-              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={field} />
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={field} disabled={locked} />
             </div>
           </div>
-          <button disabled={!detailsChanged || busy}
-            onClick={() => onUpdate({ name: name.trim(), email: email.trim() })}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-pharma-blue hover:bg-pharma-light text-white text-xs font-semibold disabled:opacity-40">
-            <Check size={13} /> Save details
-          </button>
+          {locked ? (
+            <p className="text-[10px] text-amber-600 dark:text-amber-400">Only the super admin can edit this account.</p>
+          ) : (
+            <button disabled={!detailsChanged || busy}
+              onClick={() => onUpdate({ name: name.trim(), email: email.trim() })}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-pharma-blue hover:bg-pharma-light text-white text-xs font-semibold disabled:opacity-40">
+              <Check size={13} /> Save details
+            </button>
+          )}
 
           {/* Role + status */}
           <div className="grid sm:grid-cols-2 gap-4 pt-1">
@@ -261,8 +268,8 @@ function UserRow({ u, self, onUpdate, onDelete, busy }: {
             <label className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1.5">Reset password</label>
             <div className="flex gap-2 max-w-md">
               <input type="text" value={pw} onChange={(e) => setPw(e.target.value)}
-                placeholder="New password (min 8)" className={field} />
-              <button disabled={pw.length < 8 || busy}
+                placeholder="New password (min 8)" className={field} disabled={locked} />
+              <button disabled={pw.length < 8 || busy || locked}
                 onClick={() => { onUpdate({ password: pw }); setPw(""); }}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-200 dark:border-[#1e3a5f] text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-white/5 disabled:opacity-40 shrink-0">
                 <KeyRound size={13} /> Set

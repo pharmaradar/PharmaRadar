@@ -49,7 +49,7 @@ function AuthedApp() {
         </button>
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded bg-blue-100 text-blue-700 dark:bg-[#2563eb]/30 dark:text-[#93c5fd] flex items-center justify-center text-[10px] font-bold">
-            RR
+            PR
           </div>
           <span className="font-bold text-sm text-slate-800 dark:text-white">PharmaRadar</span>
         </div>
