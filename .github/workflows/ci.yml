@@ -11,7 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        # pgvector-enabled Postgres — migration 008 runs CREATE EXTENSION vector
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: pharmaradar
           POSTGRES_PASSWORD: pharmaradar
