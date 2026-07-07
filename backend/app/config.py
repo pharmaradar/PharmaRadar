@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,7 +7,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # DB — Railway provides DATABASE_URL as postgresql://... we convert to asyncpg
-    database_url: str = "postgresql+asyncpg://pharmaradar:pharmaradar@localhost:5432/pharmaradar"
+    database_url: str = Field(
+        default="postgresql+asyncpg://pharmaradar:pharmaradar@localhost:5432/pharmaradar",
+        validation_alias="DATABASE_URL"
+    )
 
     # Redis / Celery
     redis_url: str = "redis://localhost:6379/0"
@@ -66,6 +70,7 @@ class Settings(BaseSettings):
     daily_run_minute: int = 0
     agent_budget_per_run: int = 250
     llm_budget_hard_stop: int = 500
+
     @property
     def async_database_url(self) -> str:
         """Convert Railway's postgresql:// URL to asyncpg format."""
@@ -98,3 +103,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
