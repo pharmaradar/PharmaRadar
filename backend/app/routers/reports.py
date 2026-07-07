@@ -118,7 +118,11 @@ async def serve_local_pdf(file_path: str):
     """Serve a PDF directly from the local filesystem (dev only)."""
     from pathlib import Path
     from fastapi.responses import FileResponse
-    pdf_path = Path(settings.reports_dir) / file_path
+    base = Path(settings.reports_dir).resolve()
+    pdf_path = (base / file_path).resolve()
+    # Reject ../ traversal — only files inside the reports dir are servable
+    if not pdf_path.is_relative_to(base):
+        raise HTTPException(status_code=404, detail="File not found")
     if not pdf_path.exists() or not pdf_path.suffix == ".pdf":
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(pdf_path), media_type="application/pdf")

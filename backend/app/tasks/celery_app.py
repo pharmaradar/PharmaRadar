@@ -60,6 +60,7 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    result_expires=3600,  # drop task results after 1h — no beat/UI consumes them after that; keeps Redis memory flat across the weekly burst
     # ── Hard guards against wedged tasks ────────────────────────────────
     # Soft limit raises SoftTimeLimitExceeded → task can cleanup / log.
     # Hard limit SIGKILLs the worker child process if it ignores soft.

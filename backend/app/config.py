@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     reports_dir: str = "./reports"
 
+    # CORS — comma-separated origins. "*" (default) allows any origin; pin this
+    # to the Vercel frontend URL (+ localhost for dev) once it's known.
+    allowed_origins: str = "*"
+
     # Internal trigger URL — on Railway set to https://your-backend.railway.app/api/runs/trigger
     run_trigger_url: str = "http://localhost:8009/api/runs/trigger"
 
@@ -83,6 +87,12 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def allowed_origins_list(self) -> list[str]:
+        if self.allowed_origins.strip() == "*":
+            return ["*"]
+        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
 
 @lru_cache

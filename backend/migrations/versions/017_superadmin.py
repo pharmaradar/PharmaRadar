@@ -7,6 +7,8 @@ Create Date: 2026-05-29
 The super admin cannot be deleted, deactivated, or demoted by anyone.
 Idempotent — guarded by inspector check.
 """
+import os
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import text
@@ -17,7 +19,8 @@ down_revision = "016"
 branch_labels = None
 depends_on = None
 
-SUPERADMIN_EMAIL = "admin@pharmaradar.com"
+# Must match whatever 016 seeded: SEED_ADMIN_EMAIL when set, else the dev fallback.
+SUPERADMIN_EMAIL = (os.environ.get("SEED_ADMIN_EMAIL") or "admin@pharmaradar.com").strip().lower()
 
 
 def _has_col(table: str, col: str) -> bool:

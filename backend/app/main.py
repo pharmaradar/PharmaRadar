@@ -275,7 +275,7 @@ async def require_auth(request, call_next):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_settings.allowed_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -576,7 +576,7 @@ class BriefDetailRequest(BaseModel):
 
 
 @app.post("/api/stats/brief-detail")
-async def brief_detail(body: BriefDetailRequest):
+async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user)):
     """Expand a brief point into full detail: KOL evidence, social evidence, so-what, links."""
     from datetime import datetime, timezone, timedelta
     import json as _json
@@ -1194,7 +1194,7 @@ class SocialDetailRequest(BaseModel):
 
 
 @app.post("/api/stats/social-detail")
-async def social_detail(body: SocialDetailRequest):
+async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user)):
     """Deep-dive on a social trend point — engagement stats, platform breakdown, pharma so-what."""
     import json as _json, re as _re
     from collections import defaultdict
