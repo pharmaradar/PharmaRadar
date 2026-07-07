@@ -144,7 +144,17 @@ async def _seed_defaults() -> None:
                 provider, model = "openrouter", "openai/gpt-4o-mini"
             else:
                 provider, model = "vertex", "gemini-2.5-flash"
-            sess.add(AppSettings(id=1, llm_provider=provider, llm_model=model))
+            # on_conflict_do_nothing: with multiple uvicorn workers, two processes
+            # can both see no row on startup and race to insert id=1 — a plain
+            # INSERT crashes one worker with UniqueViolationError (and uvicorn
+            # kills the whole server if any worker fails to start). This makes
+            # the seed atomic at the DB level instead of relying on the
+            # check-then-insert above.
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            stmt = pg_insert(AppSettings).values(
+                id=1, llm_provider=provider, llm_model=model
+            ).on_conflict_do_nothing(index_elements=["id"])
+            await sess.execute(stmt)
             await sess.commit()
             logger.info("seeded_app_settings", provider=provider)
             s = await sess.get(AppSettings, 1)
