@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "pharmaradar-backend"
+    static_configs:
+      - targets: ["backend:8008"]
+    metrics_path: /metrics
+
+  - job_name: "celery"
+    static_configs:
+      - targets: ["worker-scrape:9808", "worker-llm:9808", "worker-pdf:9808", "worker-embed:9808"]

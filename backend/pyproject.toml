@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pharmaradar-backend"
+version = "3.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    # Web
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.9",
+
+    # DB
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+
+    # Task queue
+    "celery[redis]>=5.4.0",
+    "redis>=5.2.0",
+
+    # LLM
+    "litellm>=1.55.0",
+    "google-cloud-aiplatform>=1.71.0",
+
+    # Scraping
+    "httpx>=0.28.0",
+
+    # PDF
+    "weasyprint>=63.0",
+    "jinja2>=3.1.0",
+
+    # Storage
+    "vercel_blob>=0.4.1",
+
+    # Embeddings
+    "voyageai>=0.3.0",
+    "fastembed>=0.4.0",
+    "pgvector>=0.3.0",
+
+    # Social scraping
+    "apify-client>=1.7.0",
+
+    # Auth
+    "pyjwt>=2.10.0",
+    "bcrypt>=4.2.0",
+
+    # Utils
+    "pydantic-settings>=2.7.0",
+    "structlog>=24.4.0",
+    "sentry-sdk[fastapi]>=2.19.0",
+    "tenacity>=9.0.0",
+    "python-dotenv>=1.0.0",
+    "orjson>=3.10.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "testcontainers[postgres]>=4.8.0",
+    "httpx>=0.28.0",
+    "factory-boy>=3.3.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

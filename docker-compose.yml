@@ -1,0 +1,96 @@
+name: pharmaradar
+version: "3.9"
+
+x-backend-env: &backend-env
+  env_file: .env
+  environment:
+    DATABASE_URL: postgresql+asyncpg://pharmaradar:pharmaradar@postgres:5432/pharmaradar
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/1
+    CELERY_RESULT_BACKEND: redis://redis:6379/2
+    RUN_TRIGGER_URL: http://backend:8008/api/runs/trigger
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: pharmaradar
+      POSTGRES_PASSWORD: pharmaradar
+      POSTGRES_DB: pharmaradar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pharmaradar -d pharmaradar"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  backend:
+    build: ./backend
+    <<: *backend-env
+    volumes:
+      - reports:/app/reports
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/secrets/gcp-sa.json:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8008 --workers 2"
+
+  worker-scrape:
+    build: ./backend
+    <<: *backend-env
+    command: celery -A app.tasks.celery_app.celery_app worker -Q scrape -c 4 -n scrape@%h
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/secrets/gcp-sa.json:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-llm:
+    build: ./backend
+    <<: *backend-env
+    command: celery -A app.tasks.celery_app.celery_app worker -Q llm -c 2 -n llm@%h
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/secrets/gcp-sa.json:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-pdf:
+    build: ./backend
+    <<: *backend-env
+    command: celery -A app.tasks.celery_app.celery_app worker -Q pdf -c 2 -n pdf@%h
+    volumes:
+      - reports:/app/reports
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/secrets/gcp-sa.json:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  celery-beat:
+    build: ./backend
+    <<: *backend-env
+    command: celery -A app.tasks.celery_app.celery_app beat -s /tmp/celerybeat-schedule
+    depends_on:
+      redis: { condition: service_healthy }
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  redisdata:
+  reports:

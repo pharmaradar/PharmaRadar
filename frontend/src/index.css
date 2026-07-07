@@ -1,0 +1,122 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 210 40% 98%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+    --border: 214 32% 91%;
+    --ring: 221 83% 53%;
+    --glass-bg: rgba(255, 255, 255, 0.7);
+    --glass-border: rgba(255, 255, 255, 0.5);
+  }
+  
+  .dark {
+    --background: 222 47% 11%;
+    --foreground: 214 32% 91%;
+    --card: 222 47% 14%;
+    --card-foreground: 214 32% 91%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --muted: 223 47% 11%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --border: 216 34% 17%;
+    --ring: 224.3 76.3% 48%;
+    --glass-bg: rgba(17, 24, 39, 0.6);
+    --glass-border: rgba(255, 255, 255, 0.08);
+  }
+}
+
+* { box-sizing: border-box; }
+body { 
+  font-family: "Inter", "Outfit", system-ui, sans-serif; 
+}
+
+@layer utilities {
+  .glass {
+    @apply bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm;
+  }
+  .glass-panel {
+    @apply bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800;
+  }
+}
+
+/* Subtle film-grain / noise overlay for the app background */
+.bg-noise::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;   /* never intercept clicks/focus on content above */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  opacity: 0.035;
+}
+.dark .bg-noise::after {
+  opacity: 0.07;
+}
+
+/* ── Login landing flourishes ─────────────────────────── */
+
+/* Rotating radar sweep beam (PharmaRadar) */
+@keyframes radar-spin { to { transform: rotate(360deg); } }
+.radar-sweep {
+  background: conic-gradient(from 0deg, rgba(255,255,255,0.22), rgba(255,255,255,0.04) 22%, transparent 42%);
+  animation: radar-spin 7s linear infinite;
+}
+
+/* Faint dot-grid texture (on dark surfaces) */
+.dot-grid {
+  background-image: radial-gradient(rgba(255,255,255,0.10) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* Dot-grid for light surfaces (login form side) */
+.dot-grid-slate {
+  background-image: radial-gradient(rgba(100,116,139,0.22) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.dark .dot-grid-slate {
+  background-image: radial-gradient(rgba(255,255,255,0.07) 1px, transparent 1px);
+}
+
+/* Brighter (pharma-blue) dots — revealed under the cursor spotlight */
+.dot-grid-bright {
+  background-image: radial-gradient(rgba(37,99,235,0.55) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.dark .dot-grid-bright {
+  background-image: radial-gradient(rgba(96,165,250,0.55) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Staggered entrance */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: none; }
+}
+.fade-up { animation: fade-up 0.6s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* ECG trace — one smooth pulse. pathLength="100" normalizes the path so the
+   dash period (14+100=114) and the offset travel match exactly → seamless loop,
+   no flutter at the wrap. */
+@keyframes ecg-trace { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -114; } }
+.ecg-trace { stroke-dasharray: 14 100; animation: ecg-trace 3s linear infinite; }
+
+/* Pulsing ring (radar ping) */
+@keyframes ping-ring {
+  0%   { transform: scale(0.6); opacity: 0.7; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+.ping-ring { animation: ping-ring 2.4s cubic-bezier(0, 0, 0.2, 1) infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .radar-sweep, .ping-ring, .ecg-trace { animation: none; }
+  .fade-up { animation: none; }
+}

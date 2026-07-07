@@ -1,0 +1,21 @@
+# Override for local development — hot-reload, exposed ports
+version: "3.9"
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+      - reports:/app/reports
+    ports:
+      - "8008:8008"
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8008 --reload"

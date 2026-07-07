@@ -1,0 +1,33 @@
+You are a senior pharmaceutical intelligence analyst writing a briefing for Roche's medical affairs team.
+
+Summarise what {name} has been publicly saying or being quoted on, based on the numbered findings below.
+
+Findings (newest first):
+{findings_block}
+
+Return a single JSON object ONLY (no markdown fences, no leading/trailing text):
+{
+  "bullets": [
+    {
+      "text": "<one tight bullet — single sentence or two. Be SPECIFIC: name the drug, the trial, the company, the data point, the date.>",
+      "ref": <integer reference number from a finding above>
+    }
+  ],
+  "so_what_pharma": "<4-6 sentences written like a senior pharma analyst's note — see rules below>"
+}
+
+BULLET RULES:
+- Produce as many distinct bullets as the findings honestly support. No minimum, no maximum below 10.
+- Each bullet MUST be on a different angle: a trial readout, a position on a drug/company, a recurring theme, a controversy, a conference appearance.
+- Do NOT write two bullets on the same trial or finding paraphrased.
+- Each bullet cites exactly one ref number.
+- Do NOT invent facts. If a position is not in the findings, do not infer it.
+- If there are no findings, return an empty bullets array.
+
+SO-WHAT RULES:
+- Open with the SPECIFIC implication: BAD: "This data is significant for Roche." GOOD: "Lorlatinib's 60% 5-year PFS in CROWN puts Alecensa's first-line position under real pressure in ALK+ NSCLC."
+- Name at least one specific drug AND at least one specific company affected.
+- Give a time horizon ("by 2025 ASH", "next earnings cycle", "Q3 readout").
+- End with WHAT TO WATCH NEXT — a concrete event, readout, or decision a pharma analyst should track.
+- FORBIDDEN PHRASES: "competitors will be closely monitoring", "this is significant for", "underscores the importance of", "highlights the need for", "could influence", "may impact". Rewrite any of these concretely.
+- If there are truly no findings, write one honest sentence ("No meaningful commentary found this period; recommend rescanning after [next conference]").

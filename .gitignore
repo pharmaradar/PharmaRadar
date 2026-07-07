@@ -1,0 +1,69 @@
+# ── Secrets ────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+backend/.env          # symlink — never push
+/secrets/
+*.pem
+*.key
+*.p12
+*.json.key
+gcp-sa.json
+
+# ── Claude Code / AI assistants — local-only, NEVER push ───
+# Project context, memory pointers, local permissions & MCP config can leak
+# infra details — keep them out of the remote entirely.
+.claude/
+CLAUDE.md
+.mcp.json
+.cursor/
+.aider*
+.continue/
+
+# ── Python ─────────────────────────────────────────────────
+.venv/
+venv/
+**/.venv/
+**/venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.sqlite3
+*.db
+
+# ── Reports / data ─────────────────────────────────────────
+reports/
+backend/reports/
+/tmp/
+
+# ── Celery ─────────────────────────────────────────────────
+celerybeat-schedule
+celerybeat.pid
+/tmp/celery*.log
+/tmp/backend.log
+/tmp/vite.log
+
+# ── Node / Frontend ────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.env
+frontend/.env.local
+
+# ── OS ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# ── IDE ────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.code-workspace
+
+# ── Logs ───────────────────────────────────────────────────
+*.log
