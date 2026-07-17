@@ -17,7 +17,9 @@ from app.routers import discovery as discovery_router
 from app.routers import social as social_router
 from app.routers import auth as auth_router
 from app.routers import burning_topics as burning_topics_router
+from app.routers import congress as congress_router
 from app.auth import require_admin, daily_gen_guard, get_current_user, daily_generation_available
+from app.services.ae_filter import insight_not_ae, post_not_ae, social_not_ae
 
 _settings = get_settings()
 
@@ -321,6 +323,7 @@ app.include_router(agent.router)
 app.include_router(discovery_router.router)
 app.include_router(social_router.router)
 app.include_router(burning_topics_router.router)
+app.include_router(congress_router.router)
 
 
 @app.get("/health")
@@ -347,6 +350,8 @@ async def stats_topics(days: int = 7, disease_area: str | None = None):
             .join(Target, ExtractedInsight.target_id == Target.id)
             .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
             .where(ExtractedInsight.extracted_at >= since)
+            .where(post_not_ae())
+            .where(Target.target_type == "kol")   # competitor content has its own surfaces
             .order_by(desc(ExtractedInsight.extracted_at))
         )
         if disease_area and disease_area != "all":
@@ -432,10 +437,15 @@ async def stats():
 
     async with AsyncSessionLocal() as sess:
         active_targets = await sess.execute(select(func.count()).select_from(Target).where(Target.active == True))
-        total_insights = await sess.execute(select(func.count()).select_from(ExtractedInsight))
+        # AE-derived insights are hidden everywhere — keep the dashboard
+        # counters consistent with what's actually visible.
+        total_insights = await sess.execute(
+            select(func.count()).select_from(ExtractedInsight).where(insight_not_ae())
+        )
         today_insights = await sess.execute(
             select(func.count()).select_from(ExtractedInsight)
             .where(ExtractedInsight.extracted_at >= today_start_utc)
+            .where(insight_not_ae())
         )
         last_run = await sess.execute(
             select(RunLog).order_by(desc(RunLog.started_at)).limit(1)
@@ -520,6 +530,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
             .where(ExtractedInsight.extracted_at >= six_months)
+            .where(insight_not_ae())
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(60)
         )
@@ -528,6 +539,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         social_rows = await sess.execute(
             select(SocialPost)
             .where(SocialPost.scraped_at >= six_months)
+            .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2))
             .limit(20)
         )
@@ -635,6 +647,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
                 *[func.lower(ExtractedInsight.topic).contains(kw) for kw in keywords[:4]],
                 *[func.lower(ExtractedInsight.what_they_said).contains(kw) for kw in keywords[:4]],
             ))
+            .where(insight_not_ae())
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(8)
         )
@@ -647,6 +660,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
                 *[func.lower(SocialPost.text).contains(kw) for kw in keywords[:4]],
                 *[func.lower(SocialPost.topic).contains(kw) for kw in keywords[:4]],
             ))
+            .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2))
             .limit(6)
         )
@@ -758,6 +772,7 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
         rows = await sess.execute(
             select(SocialPost)
             .where(SocialPost.scraped_at >= six_months)
+            .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2 + SocialPost.shares * 1.5))
             .limit(200)
         )
@@ -889,6 +904,8 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
             .where(ExtractedInsight.extracted_at >= six_months)
+            .where(insight_not_ae())
+            .where(Target.target_type == "kol")   # competitor content must NOT bleed into the KOL brief
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(60)
         )
@@ -954,6 +971,159 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
     return result
 
 
+@app.get("/api/stats/competitor-brief")
+async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("competitor_brief"))):
+    """Competitor-only brief — same mechanism as the KOL brief, scoped to
+    target_type='competitor'. Cached 6h."""
+    import json as _json
+    from datetime import datetime, timezone, timedelta
+
+    _KEY = "competitor_brief:v1"
+    _UKEY = f"{_KEY}:u{user.id}"
+    r = None
+    try:
+        import redis as _redis
+        from app.config import get_settings as _gs
+        r = _redis.Redis.from_url(_gs().redis_url, socket_timeout=2)
+        if not refresh:
+            cached = r.get(_UKEY) or r.get(_KEY)
+            if cached:
+                result = _json.loads(cached)
+                if isinstance(result, dict):
+                    result["cached"] = True
+                return result
+    except Exception:
+        r = None
+
+    from app.database import AsyncSessionLocal
+    from app.models import ExtractedInsight, Target
+    from sqlalchemy import select, desc
+
+    now = datetime.now(timezone.utc)
+    six_months = now - timedelta(days=180)
+
+    async with AsyncSessionLocal() as sess:
+        ins_rows = await sess.execute(
+            select(ExtractedInsight, Target.name)
+            .join(Target, ExtractedInsight.target_id == Target.id)
+            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(insight_not_ae())
+            .where(Target.target_type == "competitor")
+            .order_by(desc(ExtractedInsight.extracted_at))
+            .limit(60)
+        )
+        insights = ins_rows.all()
+
+    if not insights:
+        return {"points": [], "generated_at": None, "cached": False, "kol_count": 0,
+                "social_count": 0,
+                "error": "No competitor insights yet — add competitor targets and run a scrape."}
+
+    insights_text = "\n".join(
+        f"- COMPETITOR:{name} | topic:{ins.topic} | sentiment:{ins.sentiment or 'neutral'} | "
+        f"category:{ins.category or ''} | said:\"{(ins.what_they_said or '')[:200]}\""
+        for ins, name in insights
+    )
+
+    from app.services.llm_router import call_pro
+    import structlog as _sl
+    _log = _sl.get_logger("competitor_brief")
+
+    prompt = (
+        "You are a senior competitive-intelligence analyst for Roche's oncology strategy team.\n\n"
+        f"Below are {len(insights)} statements/publications from monitored COMPETITOR accounts "
+        "(rival pharma companies) over the last 6 months.\n"
+        "Generate sharp, SPECIFIC competitive-intelligence points — exactly 3 to 5 points "
+        "(never fewer than 3), the MOST important ones only.\n\n"
+        "Rules:\n"
+        "- Focus on what competitors are launching, claiming, trialing, or signalling\n"
+        "- Name the competitor company and drug/trial explicitly\n"
+        "- Say what each move means for Roche France and what to watch or counter\n"
+        "- Do NOT write generic statements — trace every point back to the data\n"
+        "- Each point max 30 words\n\n"
+        f"COMPETITOR STATEMENTS:\n{insights_text}\n\n"
+        "Return ONLY a JSON array of at least 3 (up to 5) strings. No markdown:\n"
+        '["point 1", "point 2", "point 3"]'
+    )
+
+    llm_error = None
+    points = []
+    try:
+        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2048)
+        _log.info("competitor_brief.llm_raw", raw=raw[:400])
+        strings = _extract_brief_strings(raw)
+        points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:7]]
+        if not points:
+            llm_error = f"No strings extracted: {raw[:200]}"
+    except Exception as exc:
+        llm_error = str(exc)[:300]
+        _log.warning("competitor_brief.failed", exc=llm_error)
+
+    result = {
+        "points": points,
+        "generated_at": now.isoformat(),
+        "cached": False,
+        "kol_count": len(insights),
+        "social_count": 0,
+        "error": llm_error,
+    }
+    try:
+        if r and points:
+            r.set(_UKEY if refresh else _KEY, _json.dumps(result), ex=21600)
+    except Exception:
+        pass
+    return result
+
+
+@app.get("/api/stats/competitor-publications")
+async def competitor_publications(days: int = 90, limit: int = 20, user=Depends(get_current_user)):
+    """Top competitor publications ranked by engagement.
+
+    Engagement fields that actually exist on scraped posts: `likes` and `views`
+    (nullable — captured only where the source page exposed them; no
+    comments/shares column exists). Ranked by likes+views, recency as
+    tiebreak/fallback where engagement is missing."""
+    from datetime import datetime, timezone, timedelta
+    from app.database import AsyncSessionLocal
+    from app.models import ScrapedPost, Target
+    from sqlalchemy import select, desc, func
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    engagement = func.coalesce(ScrapedPost.likes, 0) + func.coalesce(ScrapedPost.views, 0)
+
+    async with AsyncSessionLocal() as sess:
+        rows = await sess.execute(
+            select(ScrapedPost, Target.name, engagement.label("engagement"))
+            .join(Target, ScrapedPost.target_id == Target.id)
+            .where(Target.target_type == "competitor")
+            .where(ScrapedPost.scraped_at >= since)
+            .where(post_not_ae())
+            .order_by(desc("engagement"), desc(ScrapedPost.scraped_at))
+            .limit(max(1, min(limit, 100)))
+        )
+        results = rows.all()
+
+    return {
+        "period_days": days,
+        "total": len(results),
+        "publications": [
+            {
+                "id": post.id,
+                "competitor": name,
+                "title": post.title,
+                "url": post.source_url,
+                "source": post.source_name or post.source_type or "web",
+                "published_date": post.published_date,
+                "likes": post.likes or 0,
+                "views": post.views or 0,
+                "engagement": int(eng or 0),
+                "excerpt": (post.raw_content or "")[:280],
+            }
+            for post, name, eng in results
+        ],
+    }
+
+
 @app.get("/api/stats/synthesis")
 async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard("synthesis"))):
     """Holistic AI synthesis over the WHOLE database — KOL insights + social posts.
@@ -995,6 +1165,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
             .where(ExtractedInsight.extracted_at >= wide)
+            .where(insight_not_ae())
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(80)
         )
@@ -1004,6 +1175,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
             ins_rows = await sess.execute(
                 select(ExtractedInsight, Target.name)
                 .join(Target, ExtractedInsight.target_id == Target.id)
+                .where(insight_not_ae())
                 .order_by(desc(ExtractedInsight.extracted_at))
                 .limit(80)
             )
@@ -1011,6 +1183,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
 
         social_rows = await sess.execute(
             select(SocialPost)
+            .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2 + SocialPost.shares * 1.5))
             .limit(30)
         )
@@ -1092,7 +1265,8 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
 
 
 _GEN_FEATURES = ["daily_brief", "kol_brief", "social_brief", "synthesis",
-                 "comparison_brief", "social_synthesis", "discovery_synthesis"]
+                 "comparison_brief", "social_synthesis", "discovery_synthesis",
+                 "competitor_brief", "global_synthesis"]
 
 
 @app.get("/api/me/gen-quota")
@@ -1142,6 +1316,7 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
+            .where(insight_not_ae())
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(30)
         )
@@ -1150,6 +1325,7 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         social_rows = await sess.execute(
             select(SocialPost)
             .where(SocialPost.scraped_at >= now - timedelta(days=30))
+            .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2))
             .limit(20)
         )
@@ -1244,6 +1420,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
                 *[_func.lower(SocialPost.text).contains(kw) for kw in keywords[:4]],
                 *[_func.lower(SocialPost.topic).contains(kw) for kw in keywords[:3]],
             ))
+            .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2))
             .limit(20)
         )

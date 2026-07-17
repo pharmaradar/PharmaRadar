@@ -524,6 +524,103 @@ async def history(db: AsyncSession = Depends(get_db),
     return {"queries": queries[:20]}
 
 
+@router.get("/emerging-voices")
+async def emerging_voices(q: str | None = None, days: int = 90, language: str = "all",
+                          platform: str = "all", limit: int = 25,
+                          db: AsyncSession = Depends(get_db),
+                          user: User = Depends(get_current_user)):
+    """Emerging voices: authors talking about our topics who are NOT in the
+    targets list. Read-only aggregation over already-collected data — no new
+    scraping, no LLM, no new personal data (GDPR: re-presents public post rows
+    we already store).
+
+    Author-identity note: only social_posts carries an author field.
+    scraped_posts has no author column at all — its rows ARE the monitored
+    target's own content (attributed via target_id), so by definition it cannot
+    surface a non-target author. Aggregation therefore runs on social_posts;
+    normalization = case-insensitive match of author against target names AND
+    twitter handles (with '@' stripped).
+    """
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import func, or_
+    from app.models import SocialPost, Target
+    from app.services.ae_filter import social_not_ae
+
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, min(days, 365)))
+
+    query = (
+        select(SocialPost)
+        .where(SocialPost.scraped_at >= since)
+        .where(SocialPost.author.is_not(None))
+        .where(social_not_ae())
+    )
+    if q and q.strip():
+        like = f"%{q.strip().lower()}%"
+        query = query.where(or_(
+            func.lower(SocialPost.text).like(like),
+            func.lower(SocialPost.topic).like(like),
+            func.lower(SocialPost.hashtags).like(like),
+        ))
+    if platform and platform != "all":
+        query = query.where(SocialPost.platform == platform)
+    if language and language != "all":
+        query = query.where(SocialPost.language == language)
+
+    rows = await db.execute(query.order_by(desc(SocialPost.scraped_at)).limit(3000))
+    posts = rows.scalars().all()
+
+    # Known identities — a matching author is already tracked, not "emerging"
+    tgt_rows = await db.execute(select(Target.name, Target.twitter_handle))
+    known: set[str] = set()
+    for name, handle in tgt_rows.all():
+        if name:
+            known.add(name.strip().lower())
+        if handle:
+            known.add(handle.strip().lstrip("@").lower())
+
+    def _eng(p: SocialPost) -> int:
+        return (p.likes or 0) + (p.comments or 0) + (p.shares or 0)
+
+    stats: dict[str, dict] = {}
+    for p in posts:
+        author = (p.author or "").strip()
+        key = author.lstrip("@").lower()
+        if not key or key in known:
+            continue
+        s = stats.setdefault(key, {
+            "author": author, "posts": 0, "engagement": 0,
+            "platforms": set(), "examples": [],
+        })
+        s["posts"] += 1
+        s["engagement"] += _eng(p)
+        s["platforms"].add(p.platform)
+        s["examples"].append(p)
+
+    ranked = sorted(stats.values(), key=lambda s: (-s["posts"], -s["engagement"]))
+    out = []
+    for s in ranked[:max(1, min(limit, 100))]:
+        examples = sorted(s["examples"], key=_eng, reverse=True)[:2]
+        out.append({
+            "author": s["author"],
+            "posts": s["posts"],
+            "engagement": s["engagement"],
+            "platforms": sorted(s["platforms"]),
+            "examples": [
+                {
+                    "platform": p.platform,
+                    "text": (p.text or "")[:300],
+                    "url": p.post_url,
+                    "likes": p.likes or 0,
+                    "comments": p.comments or 0,
+                    "posted_at": p.posted_at.isoformat() if p.posted_at else None,
+                }
+                for p in examples
+            ],
+        })
+
+    return {"period_days": days, "total_authors": len(ranked), "voices": out}
+
+
 @router.get("/kol-mentions")
 async def kol_mentions(q: str, db: AsyncSession = Depends(get_db)):
     """Search existing extracted insights for mentions of a topic.
@@ -540,6 +637,7 @@ async def kol_mentions(q: str, db: AsyncSession = Depends(get_db)):
     term = q.strip().lower()
     cutoff = datetime.now(timezone.utc) - timedelta(days=180)
 
+    from app.services.ae_filter import insight_not_ae
     rows = await db.execute(
         select(ExtractedInsight)
         .where(or_(
@@ -547,6 +645,7 @@ async def kol_mentions(q: str, db: AsyncSession = Depends(get_db)):
             func.lower(ExtractedInsight.what_they_said).contains(term),
             func.lower(ExtractedInsight.context).contains(term),
         ))
+        .where(insight_not_ae())
         .order_by(desc(ExtractedInsight.extracted_at))
         .limit(300)
     )
@@ -664,12 +763,14 @@ async def synthesis(body: SynthesisRequest, db: AsyncSession = Depends(get_db),
 
     # KOL mentions (context only — not pickable)
     term = query.lower()
+    from app.services.ae_filter import insight_not_ae
     kol_rows = await db.execute(
         select(ExtractedInsight)
         .where(or_(
             func.lower(ExtractedInsight.topic).contains(term),
             func.lower(ExtractedInsight.what_they_said).contains(term),
         ))
+        .where(insight_not_ae())
         .order_by(desc(ExtractedInsight.extracted_at))
         .limit(20)
     )

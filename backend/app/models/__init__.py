@@ -10,6 +10,7 @@ from app.models.social_post import SocialPost
 from app.models.user import User
 from app.models.search_history import SearchHistory
 from app.models.burning_topic import BurningTopic, BurningTopicReport
+from app.models.congress import Congress, CongressQuestion
 
 __all__ = [
     "Target",
@@ -26,4 +27,6 @@ __all__ = [
     "SearchHistory",
     "BurningTopic",
     "BurningTopicReport",
+    "Congress",
+    "CongressQuestion",
 ]

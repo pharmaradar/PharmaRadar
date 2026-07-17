@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -24,6 +24,11 @@ class ScrapedPost(Base):
 
     likes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     views: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Pharmacovigilance: NULL = not yet classified, True = adverse-event report
+    # (specific patient harmed by a drug). True rows are stored but NEVER shown
+    # to a human — see services/ae_filter.py. Never delete these rows.
+    is_adverse_event: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    ae_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     idempotency_key: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
 

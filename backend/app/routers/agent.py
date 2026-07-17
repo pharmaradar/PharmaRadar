@@ -1,7 +1,7 @@
 """Hermes AI chat endpoint — RAG over extracted insights + social posts."""
 import asyncio
 import re
-from functools import partial
+from functools import lru_cache, partial
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import AgentMessage, ExtractedInsight, Target, SocialPost, User
 from app.auth import get_current_user
+from app.services.ae_filter import insight_not_ae, social_not_ae
 
 router = APIRouter(prefix="/api/agent", tags=["agent"])
 
@@ -49,6 +50,7 @@ async def _fetch_social_context(message: str, db: AsyncSession) -> str | None:
     rows = await db.execute(
         select(SocialPost)
         .where(or_(*conditions))
+        .where(social_not_ae())
         .order_by(desc(SocialPost.scraped_at))
         .limit(_MAX_SOCIAL_CONTEXT)
     )
@@ -72,20 +74,27 @@ class ChatRequest(BaseModel):
     message: str
 
 
+@lru_cache(maxsize=1)
+def _agent_system_prompt() -> str:
+    """The prompt file is static — read it once instead of doing blocking disk
+    I/O on the event loop for every chat request."""
+    from pathlib import Path
+    prompt_path = Path(__file__).parent.parent / "prompts" / "agent.txt"
+    return prompt_path.read_text(encoding="utf-8")
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, db: AsyncSession = Depends(get_db),
                user: User = Depends(get_current_user)):
-    from pathlib import Path
     from app.services.llm_router import call_pro
 
-    # Load agent system prompt
-    prompt_path = Path(__file__).parent.parent / "prompts" / "agent.txt"
-    system_prompt = prompt_path.read_text(encoding="utf-8")
+    system_prompt = _agent_system_prompt()
 
     # Retrieve recent KOL insights as RAG context
     rows = await db.execute(
         select(ExtractedInsight, Target)
         .join(Target, ExtractedInsight.target_id == Target.id)
+        .where(insight_not_ae())
         .order_by(desc(ExtractedInsight.extracted_at))
         .limit(_MAX_CONTEXT_INSIGHTS)
     )

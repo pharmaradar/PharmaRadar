@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import SocialPost, SearchHistory, User
 from app.auth import get_current_user, require_admin, daily_gen_guard
+from app.services.ae_filter import social_not_ae
 
 router = APIRouter(prefix="/api/social", tags=["social"])
 
@@ -140,7 +141,7 @@ async def trends(
     else:
         until = now
 
-    q = select(SocialPost).where(SocialPost.scraped_at >= since, SocialPost.scraped_at <= until)
+    q = select(SocialPost).where(SocialPost.scraped_at >= since, SocialPost.scraped_at <= until).where(social_not_ae())
     if platform and platform != "all":
         q = q.where(SocialPost.platform == platform)
     if kind and kind != "all":
@@ -210,7 +211,7 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
 
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
-    q = select(SocialPost).where(SocialPost.scraped_at >= since)
+    q = select(SocialPost).where(SocialPost.scraped_at >= since).where(social_not_ae())
     if lang and lang != "all":
         q = q.where(SocialPost.language == lang)
     q = q.order_by(desc(SocialPost.scraped_at)).limit(1000)
@@ -297,7 +298,7 @@ async def timeseries(days: int = 180, top: int = 6, db: AsyncSession = Depends(g
     now = datetime.now(timezone.utc)
     since = now - timedelta(days=days)
     rows = await db.execute(
-        select(SocialPost).where(SocialPost.scraped_at >= since).limit(5000)
+        select(SocialPost).where(SocialPost.scraped_at >= since).where(social_not_ae()).limit(5000)
     )
     posts = rows.scalars().all()
     if not posts:
@@ -353,7 +354,7 @@ async def discover(q: str, fresh: bool = True, lang: str | None = None,
         func.lower(SocialPost.topic).like(like),
         func.lower(SocialPost.query).like(like),
         func.lower(SocialPost.hashtags).like(like),
-    ))
+    )).where(social_not_ae())
     # Filter cached posts by language when not in "all" mode
     if lang and lang != "all":
         base = base.where(SocialPost.language == lang)
@@ -428,7 +429,9 @@ def _split_description(raw: str) -> tuple[str, str | None]:
 @router.post("/describe")
 async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
     post = await db.get(SocialPost, body.id)
-    if not post:
+    # AE posts are invisible everywhere — a direct describe on one 404s like it
+    # doesn't exist (its id can only come from stale/hand-crafted requests).
+    if not post or post.is_adverse_event is True:
         raise HTTPException(status_code=404, detail="Post not found")
     if post.llm_description and _SEPARATOR in post.llm_description:
         what, so_what = _split_description(post.llm_description)

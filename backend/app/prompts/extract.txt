@@ -1,6 +1,6 @@
 You are a pharmaceutical intelligence analyst monitoring key opinion leaders.
 
-Given the web content below from/about {name}, do TWO things:
+Given the web content below from/about {name}, do THREE things:
 
 (A) Extract POST METADATA from the content itself:
 - published_date: ISO YYYY-MM-DD of the publication date. Search exhaustively:
@@ -53,12 +53,25 @@ For each insight include rich detail:
 - context: 1-2 sentences explaining WHAT the post/article is about, WHEN it happened, and WHY it matters
 - what_they_said: 3-5 sentences capturing the actual opinion, claim, data point, or argument. Quote directly where possible. Be specific about drugs, numbers, trial names, dates.
 
+(C) ADVERSE EVENT CLASSIFICATION (pharmacovigilance — mandatory):
+Decide whether this content REPORTS A SPECIFIC PATIENT experiencing a negative
+reaction, side effect, or harm from a drug (an individual case report — e.g.
+"my mother developed severe neuropathy on drug X", "patient died after
+infusion"). General discussion of side-effect PROFILES in studies, trials,
+labels, or reviews is NOT an adverse event report.
+- is_adverse_event: true or false (never null)
+- ae_reason: if true, one short sentence naming the drug + reaction; else null
+
 Return a single JSON object ONLY (no other text, no markdown fences):
 {
   "post_metadata": {
     "published_date": "YYYY-MM-DD or null",
     "title": "string or null",
     "source_name": "string or null"
+  },
+  "adverse_event": {
+    "is_adverse_event": false,
+    "ae_reason": null
   },
   "insights": [
     {
@@ -71,4 +84,4 @@ Return a single JSON object ONLY (no other text, no markdown fences):
   ]
 }
 
-If no genuine pharma/medical opinion exists, return: {"post_metadata": {"published_date": null, "title": null, "source_name": null}, "insights": []}
+If no genuine pharma/medical opinion exists, return: {"post_metadata": {"published_date": null, "title": null, "source_name": null}, "adverse_event": {"is_adverse_event": false, "ae_reason": null}, "insights": []}

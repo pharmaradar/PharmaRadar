@@ -6,7 +6,7 @@ stays browsable/downloadable afterwards.
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -34,17 +34,30 @@ class BurningTopic(Base):
 class BurningTopicReport(Base):
     __tablename__ = "burning_topic_reports"
 
+    __table_args__ = (
+        CheckConstraint(
+            "(topic_id IS NOT NULL AND congress_id IS NULL) OR "
+            "(topic_id IS NULL AND congress_id IS NOT NULL)",
+            name="ck_burning_topic_reports_one_owner",
+        ),
+    )
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    topic_id: Mapped[int] = mapped_column(
+    topic_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("burning_topics.id", ondelete="CASCADE"),
-        nullable=False, index=True)
+        nullable=True, index=True)
+    congress_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("congresses.id", ondelete="CASCADE"),
+        nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")  # pending|running|done|failed
     summary_md: Mapped[str | None] = mapped_column(Text)
     key_findings: Mapped[str | None] = mapped_column(Text)      # JSON list[str]
     so_what: Mapped[str | None] = mapped_column(Text)
     important_posts: Mapped[str | None] = mapped_column(Text)   # JSON list[{url,title,author,engagement,platform,why}]
     main_authors: Mapped[str | None] = mapped_column(Text)      # JSON list[{author,posts,engagement,platforms,note}]
+    question_answers: Mapped[str | None] = mapped_column(Text)  # JSON list[{question_id,question,answer}]
     pdf_url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     topic: Mapped["BurningTopic"] = relationship(back_populates="reports")
+    congress: Mapped["Congress"] = relationship(back_populates="reports")  # noqa: F821

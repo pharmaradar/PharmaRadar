@@ -41,8 +41,45 @@ export interface Target {
   notes: string | null;
   active: boolean;
   disease_area: string | null;
+  target_type: "kol" | "competitor";
   twitter_handle: string | null;
   linkedin_url: string | null;
+}
+
+export interface CompetitorPublication {
+  id: number;
+  competitor: string;
+  title: string | null;
+  url: string;
+  source: string;
+  published_date: string | null;
+  likes: number;
+  views: number;
+  engagement: number;
+  excerpt: string;
+}
+
+export interface EmergingVoice {
+  author: string;
+  posts: number;
+  engagement: number;
+  platforms: string[];
+  examples: {
+    platform: string; text: string; url: string;
+    likes: number; comments: number; posted_at: string | null;
+  }[];
+}
+
+export interface GlobalSynthesis {
+  exec_summary: string;
+  kol_takeaways: string[];
+  population_takeaways: string[];
+  topic_takeaways: string[];
+  so_what: string;
+  important_posts: (BurningTopicImportantPost & { why?: string })[];
+  sections_present: { kol: boolean; population: boolean; burning_topics: number };
+  generated_at: string;
+  pdf_url: string | null;
 }
 
 export interface RunOut {
@@ -280,6 +317,7 @@ export interface BurningTopicImportantPost {
   author: string | null;
   engagement: number;
   platform?: string;
+  kind?: string;
   why?: string;
 }
 
@@ -291,17 +329,45 @@ export interface BurningTopicAuthor {
   note?: string | null;
 }
 
+export interface ReportQuestionAnswer {
+  question_id: number;
+  question: string;
+  answer: string;
+}
+
 export interface BurningTopicReport {
   id: number;
-  topic_id: number;
+  topic_id: number | null;
+  congress_id: number | null;
   status: "pending" | "running" | "done" | "failed";
   summary_md: string | null;
   key_findings: string[];
   so_what: string | null;
   important_posts: BurningTopicImportantPost[];
   main_authors: BurningTopicAuthor[];
+  question_answers: ReportQuestionAnswer[];
   pdf_url: string | null;
   created_at: string;
+}
+
+export interface CongressQuestion {
+  id: number;
+  congress_id: number;
+  question_text: string;
+  created_at: string;
+}
+
+export interface Congress {
+  id: number;
+  name: string;
+  hashtags: string[];
+  start_date: string;
+  end_date: string;
+  disease_area: string | null;
+  is_active: boolean;
+  created_at: string;
+  questions: CongressQuestion[];
+  latest_report: { id: number; status: string; created_at: string; pdf_url: string | null } | null;
 }
 
 export interface TopicsData {
@@ -358,6 +424,18 @@ export const api = {
     links: { url: string; title: string }[];
   }>("/stats/brief-detail", { method: "POST", body: JSON.stringify({ point }) }),
   topics: (days = 7, diseaseArea?: string) => req<TopicsData>(`/stats/topics?days=${days}${diseaseArea && diseaseArea !== "all" ? `&disease_area=${diseaseArea}` : ""}`),
+  competitorBrief: (refresh = false) => req<{
+    points: DailyBriefPoint[];
+    kol_count: number;
+    social_count: number;
+    generated_at: string | null;
+    cached: boolean;
+    error?: string | null;
+  }>(`/stats/competitor-brief${refresh ? "?refresh=true" : ""}`),
+  competitorPublications: (days = 90, limit = 20) =>
+    req<{ period_days: number; total: number; publications: CompetitorPublication[] }>(
+      `/stats/competitor-publications?days=${days}&limit=${limit}`
+    ),
 
   targets: {
     list: () => req<Target[]>("/targets/"),
@@ -365,6 +443,7 @@ export const api = {
     update: (id: number, body: Partial<Target>) =>
       req<Target>(`/targets/${id}`, { method: "PUT", body: JSON.stringify(body) }),
     deactivate: (id: number) => req<void>(`/targets/${id}`, { method: "DELETE" }),
+    remove: (id: number) => req<void>(`/targets/${id}?purge=true`, { method: "DELETE" }),
   },
 
   runs: {
@@ -380,6 +459,22 @@ export const api = {
   reports: {
     latest: (limit = 20) => req<Insight[]>(`/reports/latest?limit=${limit}`),
     list: () => req<{ path: string; name: string; size: number; url: string; uploadedAt?: string }[]>("/reports/"),
+    triggerGlobalSynthesis: () =>
+      req<{ status: string }>("/reports/global-synthesis", { method: "POST" }),
+    globalSynthesis: () =>
+      req<{ status: "idle" | "running" | "done" | "failed"; error?: string | null; result: GlobalSynthesis | null }>(
+        "/reports/global-synthesis"
+      ),
+    // Blob URLs are public; local-dev /api/... PDF paths need the auth header
+    openPdf: async (url: string) => {
+      if (!url.startsWith("/api/")) { window.open(url, "_blank", "noopener,noreferrer"); return; }
+      const res = await fetch(`${BASE}${url.slice(4)}`, { headers: authHeaders() });
+      if (!res.ok) throw new Error(`${res.status}: PDF not available`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      window.open(objectUrl, "_blank", "noopener,noreferrer");
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    },
   },
 
   settings: {
@@ -425,6 +520,16 @@ export const api = {
       historical: KolInsight[];
       total: number;
     }>(`/discovery/kol-mentions?q=${encodeURIComponent(q)}`),
+    emergingVoices: (params: { q?: string; days?: number; language?: string; platform?: string } = {}) => {
+      const qs = new URLSearchParams();
+      if (params.q) qs.set("q", params.q);
+      if (params.days) qs.set("days", String(params.days));
+      if (params.language && params.language !== "all") qs.set("language", params.language);
+      if (params.platform && params.platform !== "all") qs.set("platform", params.platform);
+      return req<{ period_days: number; total_authors: number; voices: EmergingVoice[] }>(
+        `/discovery/emerging-voices?${qs.toString()}`
+      );
+    },
     synthesis: (query: string, lang = "all", refresh = false) =>
       req<DiscoverySynthesis>("/discovery/synthesis", {
         method: "POST",
@@ -485,6 +590,39 @@ export const api = {
     // Dev/blob-less fallback: stream the PDF through the backend with auth
     downloadPdf: async (topicId: number, reportId: number): Promise<Blob> => {
       const res = await fetch(`${BASE}/burning-topics/${topicId}/reports/${reportId}/pdf`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`${res.status}: PDF not available`);
+      return res.blob();
+    },
+  },
+
+  congress: {
+    list: () => req<Congress[]>("/congress/"),
+    create: (body: {
+      name: string; hashtags: string[]; start_date: string; end_date: string; disease_area?: string | null;
+    }) => req<Congress>("/congress/", { method: "POST", body: JSON.stringify(body) }),
+    update: (id: number, body: Partial<{
+      name: string; hashtags: string[]; start_date: string; end_date: string;
+      disease_area: string | null; is_active: boolean;
+    }>) => req<Congress>(`/congress/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+    remove: (id: number) => req<void>(`/congress/${id}`, { method: "DELETE" }),
+    questions: (id: number) => req<CongressQuestion[]>(`/congress/${id}/questions`),
+    addQuestion: (id: number, question_text: string) =>
+      req<CongressQuestion>(`/congress/${id}/questions`, {
+        method: "POST", body: JSON.stringify({ question_text }),
+      }),
+    updateQuestion: (id: number, questionId: number, question_text: string) =>
+      req<CongressQuestion>(`/congress/${id}/questions/${questionId}`, {
+        method: "PUT", body: JSON.stringify({ question_text }),
+      }),
+    removeQuestion: (id: number, questionId: number) =>
+      req<void>(`/congress/${id}/questions/${questionId}`, { method: "DELETE" }),
+    generate: (id: number) =>
+      req<{ report_id: number; status: string }>(`/congress/${id}/generate-report`, { method: "POST" }),
+    reports: (id: number) => req<BurningTopicReport[]>(`/congress/${id}/reports`),
+    downloadPdf: async (id: number, reportId: number): Promise<Blob> => {
+      const res = await fetch(`${BASE}/congress/${id}/reports/${reportId}/pdf`, {
         headers: authHeaders(),
       });
       if (!res.ok) throw new Error(`${res.status}: PDF not available`);

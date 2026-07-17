@@ -10,6 +10,7 @@ import SettingsPage from "@/pages/Settings";
 import Agent from "@/pages/Agent";
 import TopicExplorer from "@/pages/TopicExplorer";
 import BurningTopics from "@/pages/BurningTopics";
+import Competitors from "@/pages/Competitors";
 import SocialPage from "@/pages/Social";
 import Login from "@/pages/Login";
 import Users from "@/pages/Users";
@@ -68,12 +69,15 @@ function AuthedApp() {
           <Route path="/"          element={<Navigate to="/dashboard" replace />} />
           <Route path="/topics"    element={<TopicExplorer />} />
           <Route path="/burning-topics" element={<Padded><BurningTopics /></Padded>} />
+          {/* Congress was merged into Burning Topics — keep old bookmarks/links alive */}
+          <Route path="/congress" element={<Navigate to="/burning-topics" replace />} />
           <Route path="/dashboard" element={<Padded><Dashboard /></Padded>} />
           <Route path="/social"    element={<SocialPage />} />
           <Route path="/reports"   element={<Padded><Reports /></Padded>} />
           <Route path="/agent"     element={<Padded><Agent /></Padded>} />
           <Route path="/profile"   element={<Padded><Profile /></Padded>} />
           <Route path="/targets"   element={<Padded><Targets /></Padded>} />
+          <Route path="/competitors" element={<Padded><Competitors /></Padded>} />
           {/* Admin-only */}
           <Route path="/history"   element={<AdminRoute><Padded><RunHistory /></Padded></AdminRoute>} />
           <Route path="/settings"  element={<AdminRoute><Padded><SettingsPage /></Padded></AdminRoute>} />

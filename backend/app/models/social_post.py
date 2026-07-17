@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -39,4 +39,7 @@ class SocialPost(Base):
 
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    # Pharmacovigilance — same semantics as ScrapedPost.is_adverse_event.
+    is_adverse_event: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    ae_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     scraped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

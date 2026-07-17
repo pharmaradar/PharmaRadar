@@ -71,6 +71,7 @@ class ExtractorService:
             return {"insights_saved": 0, "error": "json_parse_failed"}
 
         meta = parsed.get("post_metadata", {})
+        ae = parsed.get("adverse_event") or {}
 
         async with CelerySessionLocal() as sess:
             post = await sess.get(ScrapedPost, post_id)
@@ -81,6 +82,13 @@ class ExtractorService:
                     post.title = meta["title"]
                 if meta.get("source_name"):
                     post.source_name = meta["source_name"]
+
+                # AE classification rides the same LLM call (cost matters).
+                # Only write a definite bool — a missing/malformed block leaves
+                # the post NULL for the backfill sweep to classify later.
+                if isinstance(ae.get("is_adverse_event"), bool):
+                    post.is_adverse_event = ae["is_adverse_event"]
+                    post.ae_reason = (ae.get("ae_reason") or None) if ae["is_adverse_event"] else None
 
                 insights_saved = 0
                 new_insights = []
@@ -135,9 +143,11 @@ class ExtractorService:
             target = await sess.get(Target, target_id)
             target_name = target.name if target else f"Target {target_id}"
 
+            from app.services.ae_filter import insight_not_ae
             rows = await sess.execute(
                 select(ExtractedInsight)
                 .where(ExtractedInsight.target_id == target_id)
+                .where(insight_not_ae())
                 .order_by(ExtractedInsight.extracted_at.desc())
                 .limit(50)
             )

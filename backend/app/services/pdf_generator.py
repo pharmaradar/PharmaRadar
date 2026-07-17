@@ -367,10 +367,12 @@ class PDFService:
                 return {"error": "target_not_found"}
 
             # All insights for this target (sorted by priority)
+            from app.services.ae_filter import post_not_ae
             ins_rows = await sess.execute(
                 select(ExtractedInsight, ScrapedPost)
                 .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
                 .where(ExtractedInsight.target_id == target_id)
+                .where(post_not_ae())
                 .order_by(ExtractedInsight.extracted_at.desc())
                 .limit(100)
             )
@@ -493,11 +495,13 @@ class PDFService:
 
         async with CelerySessionLocal() as sess:
             # Insights from the last 7 days (this week's findings)
+            from app.services.ae_filter import post_not_ae
             ins_rows = await sess.execute(
                 select(ExtractedInsight, ScrapedPost, Target)
                 .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
                 .join(Target, ExtractedInsight.target_id == Target.id)
                 .where(ExtractedInsight.extracted_at >= window_cutoff)
+                .where(post_not_ae())
                 .order_by(Target.name, ExtractedInsight.extracted_at)
             )
             all_insights = ins_rows.all()
@@ -510,18 +514,22 @@ class PDFService:
                     select(ExtractedInsight, ScrapedPost, Target)
                     .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
                     .join(Target, ExtractedInsight.target_id == Target.id)
+                    .where(post_not_ae())
                     .order_by(Target.name, ExtractedInsight.extracted_at)
                 )
                 all_insights = ins_rows.all()
 
-            # Latest PersonSummary per target
+            # Latest PersonSummary per target — Postgres DISTINCT ON fetches
+            # exactly one row per target instead of loading the entire history
+            # into memory (that grew unbounded week over week).
             sum_rows = await sess.execute(
-                select(PersonSummary).order_by(PersonSummary.generated_at.desc())
+                select(PersonSummary)
+                .distinct(PersonSummary.target_id)
+                .order_by(PersonSummary.target_id, PersonSummary.generated_at.desc())
             )
-            summaries: dict[int, PersonSummary] = {}
-            for ps in sum_rows.scalars().all():
-                if ps.target_id not in summaries:
-                    summaries[ps.target_id] = ps
+            summaries: dict[int, PersonSummary] = {
+                ps.target_id: ps for ps in sum_rows.scalars().all()
+            }
 
             # All active targets (render all, not just those with today's insights)
             tgt_rows = await sess.execute(

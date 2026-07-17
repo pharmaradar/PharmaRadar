@@ -8,6 +8,7 @@ Vercel Blob API and Vercel returned 403 for every request regardless of
 how valid the token was.
 """
 import os
+import threading
 from datetime import date
 
 import structlog
@@ -15,18 +16,36 @@ import vercel_blob
 
 logger = structlog.get_logger(__name__)
 
+# `vercel_blob` reads its token from the BLOB_READ_WRITE_TOKEN env var, and
+# os.environ is process-wide — two threads mutating it concurrently can hand
+# each other's call the wrong (or no) token. Every blob operation in the app
+# must go through run_blob_op so the mutate→call→restore sequence is atomic.
+_ENV_LOCK = threading.Lock()
+
+
+def run_blob_op(fn, token: str):
+    """Run a `vercel_blob` call with BLOB_READ_WRITE_TOKEN set, thread-safely.
+
+    Serialises blob operations across threads (uploads + list/head lookups) —
+    acceptable at this scale, and the only race-free option while the package's
+    `options.token` field stays finicky across versions.
+    """
+    with _ENV_LOCK:
+        previous = os.environ.get("BLOB_READ_WRITE_TOKEN")
+        os.environ["BLOB_READ_WRITE_TOKEN"] = token
+        try:
+            return fn()
+        finally:
+            if previous is None:
+                os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
+            else:
+                os.environ["BLOB_READ_WRITE_TOKEN"] = previous
+
 
 def _put(pathname: str, body: bytes, token: str) -> str:
-    """Upload bytes to Vercel Blob at the given pathname; return the public URL.
-
-    `vercel_blob.put` reads the token from the BLOB_READ_WRITE_TOKEN env var,
-    so we set it for the duration of this call instead of passing it via
-    options (the package's `options.token` field is finicky across versions).
-    """
-    previous = os.environ.get("BLOB_READ_WRITE_TOKEN")
-    os.environ["BLOB_READ_WRITE_TOKEN"] = token
-    try:
-        result = vercel_blob.put(
+    """Upload bytes to Vercel Blob at the given pathname; return the public URL."""
+    result = run_blob_op(
+        lambda: vercel_blob.put(
             pathname,
             body,
             options={
@@ -35,12 +54,9 @@ def _put(pathname: str, body: bytes, token: str) -> str:
                 "allowOverwrite": "true",
                 "cacheControlMaxAge": "31536000",
             },
-        )
-    finally:
-        if previous is None:
-            os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
-        else:
-            os.environ["BLOB_READ_WRITE_TOKEN"] = previous
+        ),
+        token,
+    )
 
     url = result.get("url") if isinstance(result, dict) else None
     if not url:
@@ -73,6 +89,18 @@ def upload_daily_summary_to_vercel_blob(
         logger.error("vercel_blob.daily_upload_failed", error=str(e), date=str(run_date))
         raise
     logger.info("vercel_blob.daily_summary_uploaded", date=str(run_date), url=url)
+    return url
+
+
+def upload_global_synthesis_pdf(pdf_binary: bytes, stamp: str, vercel_token: str) -> str:
+    """Upload a global-synthesis PDF; stamp keeps successive syntheses distinct."""
+    pathname = f"global-synthesis/Global_Synthesis_{stamp}.pdf"
+    try:
+        url = _put(pathname, pdf_binary, vercel_token)
+    except Exception as e:
+        logger.error("vercel_blob.global_synthesis_upload_failed", error=str(e), stamp=stamp)
+        raise
+    logger.info("vercel_blob.global_synthesis_uploaded", stamp=stamp, url=url)
     return url
 
 

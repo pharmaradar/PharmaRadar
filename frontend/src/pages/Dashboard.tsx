@@ -163,6 +163,38 @@ export default function Dashboard() {
   });
   const synth = synthMut.data;
 
+  // Competitor brief — same mechanism as the KOL brief, competitor targets only
+  const { data: compBrief, isLoading: compBriefLoading } = useQuery({
+    queryKey: ["competitor-brief"],
+    queryFn: () => api.competitorBrief(),
+    staleTime: 6 * 60 * 60 * 1000,
+    gcTime: 6 * 60 * 60 * 1000,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const compBriefMut = useMutation({
+    mutationFn: () => api.competitorBrief(true),
+    onSuccess: (data) => { qc.setQueryData(["competitor-brief"], data); qc.invalidateQueries({ queryKey: ["gen-quota"] }); },
+  });
+
+  // Global synthesis — merges KOL brief + population brief + burning-topic reports.
+  // Poll every 3s only while a generation is running.
+  const { data: globalSynth } = useQuery({
+    queryKey: ["global-synthesis"],
+    queryFn: api.reports.globalSynthesis,
+    refetchInterval: (q) => (q.state.data?.status === "running" ? 3000 : false),
+  });
+  const globalSynthMut = useMutation({
+    mutationFn: api.reports.triggerGlobalSynthesis,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["global-synthesis"] });
+      qc.invalidateQueries({ queryKey: ["gen-quota"] });
+    },
+  });
+  const gsRunning = globalSynth?.status === "running" || globalSynthMut.isPending;
+  const gs = globalSynth?.result;
+
   // Daily AI-generation quota (1 regenerate/user/day; admins unlimited)
   const { can: canGen } = useGenQuota();
 
@@ -686,6 +718,158 @@ export default function Dashboard() {
             {kolBrief && kolBrief.kol_count > 0 ? "Click Generate to create KOL brief." : "No KOL insights yet — run a pipeline first."}
           </p>
         ))}
+      </div>
+
+      {/* Competitor Intelligence Brief */}
+      <div className="glass rounded-xl p-5">
+        <div className={cn("flex items-center justify-between", openBriefs.competitor && "mb-4")}
+          onClick={() => toggleBrief("competitor")}>
+          <div className="flex items-center gap-2 cursor-pointer">
+            {openBriefs.competitor ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
+            <div className="p-2 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
+              <BarChart2 size={16} className="text-orange-600 dark:text-orange-400"/>
+            </div>
+            <div>
+              <h2 className="font-semibold text-sm">Competitor Brief</h2>
+              <p className="text-xs text-gray-400">What rival companies are launching and signalling — last 6 months</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            {compBrief && compBrief.kol_count > 0 && (
+              <span className="text-[10px] text-gray-400">{compBrief.kol_count} publications analysed</span>
+            )}
+            {canGen("competitor_brief") && (
+              <button onClick={() => compBriefMut.mutate()} disabled={compBriefMut.isPending || compBriefLoading}
+                title="Regenerate (1 per day)"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-orange-300 dark:border-orange-800 text-orange-600 dark:text-orange-400 rounded-lg hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-50 transition-colors">
+                {compBriefMut.isPending ? <Loader2 size={11} className="animate-spin"/> : <RefreshCw size={11}/>}
+                Regenerate
+              </button>
+            )}
+          </div>
+        </div>
+        {openBriefs.competitor && (compBriefLoading || compBriefMut.isPending ? (
+          <div className="flex items-center gap-2 text-sm text-gray-400">
+            <Loader2 size={14} className="animate-spin"/>Analysing competitor content…
+          </div>
+        ) : compBrief && compBrief.points.length > 0 ? (
+          <div className="space-y-2">
+            {compBrief.points.map((p, i) => (
+              <div key={i} className="flex items-start gap-3 p-3 rounded-xl border bg-orange-50/40 dark:bg-orange-900/5 border-orange-200/50 dark:border-orange-800/20">
+                <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 bg-orange-500"/>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
+                  <span className="text-[10px] font-semibold mt-0.5 inline-block text-orange-500">Competitor signal</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-400">
+            {compBrief?.error || "No competitor content yet — add competitor targets and run a scrape."}
+          </p>
+        ))}
+      </div>
+
+      {/* Global Synthesis — KOL + population + burning topics in one report */}
+      <div className="glass rounded-xl p-5">
+        <div className={cn("flex items-center justify-between", openBriefs.global && "mb-4")}
+          onClick={() => toggleBrief("global")}>
+          <div className="flex items-center gap-2 cursor-pointer">
+            {openBriefs.global ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
+            <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+              <Sparkles size={16} className="text-purple-600 dark:text-purple-400"/>
+            </div>
+            <div>
+              <h2 className="font-semibold text-sm">Global Synthesis</h2>
+              <p className="text-xs text-gray-400">
+                One report merging the KOL brief, all-population brief and burning-topic reports
+                {gs?.generated_at ? ` — last generated ${formatDateTime(gs.generated_at)}` : ""}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            {gs?.pdf_url && (
+              <button onClick={() => api.reports.openPdf(gs.pdf_url!).catch(() => alert("PDF not available"))}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-purple-300 dark:border-purple-800 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors">
+                <FileText size={11}/> PDF
+              </button>
+            )}
+            {canGen("global_synthesis") && (
+              <button onClick={() => { setOpenBriefs(s => ({ ...s, global: true })); globalSynthMut.mutate(); }} disabled={gsRunning}
+                title="Generate (1 per day)"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-purple-300 dark:border-purple-800 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-50 transition-colors">
+                {gsRunning ? <Loader2 size={11} className="animate-spin"/> : <Sparkles size={11}/>}
+                {gsRunning ? "Generating…" : gs ? "Regenerate" : "Generate"}
+              </button>
+            )}
+          </div>
+        </div>
+        {openBriefs.global && (
+          gsRunning && !gs ? (
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <Loader2 size={14} className="animate-spin"/>Merging the three report layers…
+            </div>
+          ) : globalSynth?.status === "failed" && !gs ? (
+            <p className="text-xs text-red-400">Error: {globalSynth.error || "generation failed"}</p>
+          ) : gs ? (
+            <div className="space-y-4">
+              {gsRunning && (
+                <div className="flex items-center gap-2 text-xs text-purple-500">
+                  <Loader2 size={12} className="animate-spin"/>A fresh synthesis is generating — showing the previous one meanwhile.
+                </div>
+              )}
+              {gs.exec_summary && (
+                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap leading-relaxed">{gs.exec_summary}</p>
+              )}
+              <div className="grid md:grid-cols-3 gap-3">
+                {([
+                  ["KOL takeaways", gs.kol_takeaways],
+                  ["All-population takeaways", gs.population_takeaways],
+                  ["Burning-topic takeaways", gs.topic_takeaways],
+                ] as const).map(([label, items]) => (
+                  <div key={label} className="rounded-lg border border-slate-200/60 dark:border-white/10 p-3">
+                    <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">{label}</div>
+                    {items.length > 0 ? (
+                      <ul className="space-y-1">
+                        {items.map((t, i) => (
+                          <li key={i} className="text-xs text-gray-600 dark:text-gray-300 flex gap-1.5">
+                            <span className="text-purple-400 shrink-0">•</span>{t}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-gray-400">No data this period.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {gs.so_what && (
+                <div className="rounded-lg bg-purple-50/60 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-900/30 px-4 py-3">
+                  <div className="text-[10px] font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider mb-1">So what</div>
+                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap">{gs.so_what}</p>
+                </div>
+              )}
+              {gs.important_posts.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Important posts</div>
+                  {gs.important_posts.map((p, i) => (
+                    <a key={i} href={p.url} target="_blank" rel="noreferrer"
+                      className="block text-xs text-gray-600 dark:text-gray-300 hover:text-purple-600 truncate">
+                      <ExternalLink size={10} className="inline mr-1 text-gray-300"/>
+                      {(p.title || p.url)}{p.why ? ` — ${p.why}` : ""}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400">
+              Generates one merged synthesis from the latest KOL brief, all-population brief and every
+              active burning topic's latest report. Generate those first for the richest result.
+            </p>
+          )
+        )}
       </div>
 
 

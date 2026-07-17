@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, FileText, History, Settings, Bot, Compass,
-  Flame, Zap, ChevronLeft, ChevronRight, Sun, Moon, X, LogOut, ShieldCheck,
+  Flame, Zap, Building2, ChevronLeft, ChevronRight, Sun, Moon, X, LogOut, ShieldCheck,
 } from "lucide-react";
 import { useAppStore } from "@/store";
 import { useAuthStore } from "@/store/auth";
@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 const NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard"      },
   { to: "/targets",   icon: Users,           label: "Targets"        },
+  { to: "/competitors", icon: Building2,     label: "Competitors"    },
   { to: "/reports",   icon: FileText,        label: "Reports"        },
   { to: "/topics",    icon: Compass,         label: "Topic Explorer" },
   { to: "/burning-topics", icon: Zap,        label: "Burning Topics" },

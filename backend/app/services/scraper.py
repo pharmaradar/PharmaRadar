@@ -312,6 +312,25 @@ def _tf_fetch(url: str) -> str:
     return ""
 
 
+def _note_tf_outcome(returncode: int, stderr: str, key: str) -> None:
+    """Health bookkeeping for a completed tinyfish CLI call — mirrors _run_tf.
+    Without this, credit exhaustion during Discovery / burning-topic searches
+    never reached the provider-health dashboard."""
+    try:
+        if returncode == 0:
+            from app.services.provider_health import record_tinyfish_usage, clear_exhausted
+            record_tinyfish_usage(key)
+            clear_exhausted(f"tinyfish:{key[-12:]}")
+            return
+        snippet = (stderr or "")[:300]
+        if "insufficient credits" in snippet.lower() or "0 credits remaining" in snippet.lower():
+            logger.warning("tinyfish.discovery_credits_exhausted", key=key[-12:] if key else "")
+            from app.services.provider_health import flag_exhausted
+            flag_exhausted(f"tinyfish:{key[-12:]}", snippet[:200])
+    except Exception:
+        pass
+
+
 def _tf_search_discovery(query: str) -> list[dict]:
     """Discovery-aware search — uses dedicated key when pipeline is running."""
     key = _discovery_key()
@@ -323,14 +342,9 @@ def _tf_search_discovery(query: str) -> list[dict]:
     try:
         r = _sp.run(["tinyfish", "search", "query", query],
                     capture_output=True, text=True, timeout=120, env=env)
+        _note_tf_outcome(r.returncode, r.stderr, key)
         out = r.stdout.strip()
         data = _json.loads(out) if out else {}
-        if r.returncode == 0:
-            try:
-                from app.services.provider_health import record_tinyfish_usage
-                record_tinyfish_usage(key)
-            except Exception:
-                pass
         return data.get("results", [])
     except Exception:
         return []
@@ -347,14 +361,9 @@ def _tf_fetch_discovery(url: str) -> str:
     try:
         r = _sp.run(["tinyfish", "fetch", "content", "get", url],
                     capture_output=True, text=True, timeout=120, env=env)
+        _note_tf_outcome(r.returncode, r.stderr, key)
         out = r.stdout.strip()
         data = _json.loads(out) if out else {}
-        if r.returncode == 0:
-            try:
-                from app.services.provider_health import record_tinyfish_usage
-                record_tinyfish_usage(key)
-            except Exception:
-                pass
         results = data.get("results", [])
         if results:
             return results[0].get("text") or results[0].get("content") or ""

@@ -15,6 +15,9 @@ class Target(Base):
     known_urls: Mapped[str | None] = mapped_column(Text, default="[]")
     notes: Mapped[str | None] = mapped_column(Text)
     disease_area: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 'kol' | 'competitor' — same scrape/extract pipeline, separated at
+    # synthesis/brief level so competitor content never bleeds into KOL briefs.
+    target_type: Mapped[str] = mapped_column(String(16), nullable=False, default="kol", index=True)
     twitter_handle: Mapped[str | None] = mapped_column(String(128), nullable=True)  # e.g. @DrJohnSmith
     linkedin_url: Mapped[str | None] = mapped_column(String(512), nullable=True)    # full profile URL
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)

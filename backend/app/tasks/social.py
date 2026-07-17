@@ -194,6 +194,9 @@ async def _run_scan(lang_override: str | None = None) -> dict:
 
     async def _run_one(term: str, kind: str, platform: str) -> None:
         nonlocal done_count, inserted_count
+        local_inserted = 0
+        # Fetch AND insert stay inside the semaphore so concurrent DB
+        # connections are bounded to 4 alongside the Apify runs.
         async with sem:
             # Always scrape worldwide — language is detected per post and
             # stored. The UI's FR/EN/Global filter is display-only, so the
@@ -206,42 +209,46 @@ async def _run_scan(lang_override: str | None = None) -> dict:
                     lang_filter=None,
                 ),
             )
-        local_inserted = 0
-        for post in posts:
-            post["topic"] = term  # ensure topic is set before relevance check
-            if not _is_pharma_relevant(post):
-                logger.debug("social_scan.filtered_irrelevant", platform=post.get("platform"), url=post.get("post_url", "")[:80])
-                continue
-            # NOTE: posts saved regardless of language to maximize Apify ROI.
-            # Language is detected and stored; UI filters by language at display time.
-            ch = sha256_hash(post["post_url"])
-            stmt = pg_insert(SocialPost).values(
-                platform=post["platform"],
-                post_url=post["post_url"],
-                author=post.get("author"),
-                text=post.get("text"),
-                thumbnail_url=post.get("thumbnail_url"),
-                likes=post.get("likes", 0),
-                comments=post.get("comments", 0),
-                views=post.get("views", 0),
-                shares=post.get("shares", 0),
-                hashtags=json.dumps(post.get("hashtags", [])),
-                query=term,
-                kind=kind,
-                topic=term,
-                language=_detect_lang(post.get("text", "")),
-                posted_at=post.get("posted_at"),
-                content_hash=ch,
-            ).on_conflict_do_nothing(index_elements=["content_hash"])
+            # ONE session (= one engine + one connection) for the whole batch —
+            # the old per-post CelerySessionLocal opened and tore down a fresh
+            # engine + TCP connection for every single post. Commit stays
+            # per-post (cheap on an open connection) so one bad row never
+            # discards its siblings.
             async with CelerySessionLocal() as wsess:
-                try:
-                    res = await wsess.execute(stmt)
-                    await wsess.commit()
-                    if res.rowcount:
-                        local_inserted += 1
-                except Exception as exc:
-                    await wsess.rollback()
-                    logger.debug("social_scan.insert_failed", exc=str(exc)[:120])
+                for post in posts:
+                    post["topic"] = term  # ensure topic is set before relevance check
+                    if not _is_pharma_relevant(post):
+                        logger.debug("social_scan.filtered_irrelevant", platform=post.get("platform"), url=post.get("post_url", "")[:80])
+                        continue
+                    # NOTE: posts saved regardless of language to maximize Apify ROI.
+                    # Language is detected and stored; UI filters by language at display time.
+                    ch = sha256_hash(post["post_url"])
+                    stmt = pg_insert(SocialPost).values(
+                        platform=post["platform"],
+                        post_url=post["post_url"],
+                        author=post.get("author"),
+                        text=post.get("text"),
+                        thumbnail_url=post.get("thumbnail_url"),
+                        likes=post.get("likes", 0),
+                        comments=post.get("comments", 0),
+                        views=post.get("views", 0),
+                        shares=post.get("shares", 0),
+                        hashtags=json.dumps(post.get("hashtags", [])),
+                        query=term,
+                        kind=kind,
+                        topic=term,
+                        language=_detect_lang(post.get("text", "")),
+                        posted_at=post.get("posted_at"),
+                        content_hash=ch,
+                    ).on_conflict_do_nothing(index_elements=["content_hash"])
+                    try:
+                        res = await wsess.execute(stmt)
+                        await wsess.commit()
+                        if res.rowcount:
+                            local_inserted += 1
+                    except Exception as exc:
+                        await wsess.rollback()
+                        logger.debug("social_scan.insert_failed", exc=str(exc)[:120])
         async with lock:
             done_count += 1
             inserted_count += local_inserted
@@ -404,27 +411,30 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
 
     # LLM-generated hashtags ARE the relevance gate — no additional pharma filter needed.
     # We still deduplicate on content_hash via ON CONFLICT DO NOTHING.
+    # ONE session for the whole ingest — the old code created a fresh engine +
+    # TCP connection per post. Per-post commit on the open connection keeps
+    # one bad row from discarding the rest.
     inserted = 0
-    for posts in fetch_results:
-        if isinstance(posts, Exception) or not posts:
-            continue
-        for post in posts:
-            # Tag with primary keyword as topic for display in trend chips
-            post["topic"] = keywords[0] if keywords else query
-            # Posts saved regardless of language — UI filters at display time
-            ch = sha256_hash(post["post_url"])
-            stmt = pg_insert(SocialPost).values(
-                platform=post["platform"], post_url=post["post_url"],
-                author=post.get("author"), text=post.get("text"),
-                thumbnail_url=post.get("thumbnail_url"),
-                likes=post.get("likes", 0), comments=post.get("comments", 0),
-                views=post.get("views", 0), shares=post.get("shares", 0),
-                hashtags=json.dumps(post.get("hashtags", [])),
-                query=query, kind="field", topic=post["topic"],
-                language=_detect_lang(post.get("text", "")),
-                posted_at=post.get("posted_at"), content_hash=ch,
-            ).on_conflict_do_nothing(index_elements=["content_hash"])
-            async with CelerySessionLocal() as wsess:
+    async with CelerySessionLocal() as wsess:
+        for posts in fetch_results:
+            if isinstance(posts, Exception) or not posts:
+                continue
+            for post in posts:
+                # Tag with primary keyword as topic for display in trend chips
+                post["topic"] = keywords[0] if keywords else query
+                # Posts saved regardless of language — UI filters at display time
+                ch = sha256_hash(post["post_url"])
+                stmt = pg_insert(SocialPost).values(
+                    platform=post["platform"], post_url=post["post_url"],
+                    author=post.get("author"), text=post.get("text"),
+                    thumbnail_url=post.get("thumbnail_url"),
+                    likes=post.get("likes", 0), comments=post.get("comments", 0),
+                    views=post.get("views", 0), shares=post.get("shares", 0),
+                    hashtags=json.dumps(post.get("hashtags", [])),
+                    query=query, kind="field", topic=post["topic"],
+                    language=_detect_lang(post.get("text", "")),
+                    posted_at=post.get("posted_at"), content_hash=ch,
+                ).on_conflict_do_nothing(index_elements=["content_hash"])
                 try:
                     r = await wsess.execute(stmt)
                     await wsess.commit()

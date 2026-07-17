@@ -100,7 +100,7 @@ def _register_for_wave2(run_id: int, target_id: int,
     default_retry_delay=30,
     acks_late=True,
     soft_time_limit=1800,
-    time_limit=20000,
+    time_limit=1920,   # aligned with the celery_app task_annotations (which win)
 )
 def wave2_rescue(self, run_id: int) -> dict:
     """Wave 2 — agent rescue for all targets that got 0 posts in Wave 1.
@@ -108,15 +108,28 @@ def wave2_rescue(self, run_id: int) -> dict:
     import json
     log = logger.bind(run_id=run_id, task_id=self.request.id)
 
-    # Read Wave 2 targets from Redis
+    # Read Wave 2 targets from Redis. The list is atomically RENAMEd to a
+    # :processing key instead of read-then-DELETEd: with acks_late a killed
+    # attempt gets redelivered, and the old delete-first pattern meant the
+    # retry found an empty list and silently skipped every rescue target.
+    # Now a retry re-reads the :processing key; it is deleted only after the
+    # rescue loop actually completes.
     targets_to_rescue = []
+    r = None
+    processing_key = None
     try:
         import redis as _redis
         from app.config import get_settings
         r = _redis.Redis.from_url(get_settings().redis_url, socket_timeout=2)
         key = _WAVE2_KEY.format(run_id=run_id)
-        raw_list = r.lrange(key, 0, -1)
-        r.delete(key)
+        processing_key = key + ":processing"
+        if r.exists(key):
+            try:
+                r.rename(key, processing_key)   # atomic hand-off (overwrites a stale one)
+                r.expire(processing_key, 86400)
+            except Exception:
+                pass   # key vanished between exists() and rename — fall through
+        raw_list = r.lrange(processing_key, 0, -1)
         targets_to_rescue = [json.loads(x) for x in raw_list]
     except Exception as exc:
         log.warning("wave2.redis_read_failed", exc=str(exc))
@@ -167,6 +180,13 @@ def wave2_rescue(self, run_id: int) -> dict:
             log.warning("wave2.summary_pdf_timeout", target_id=target_id, timeout=180)
         except Exception as exc:
             log.warning("wave2.summary_pdf_failed", target_id=target_id, exc=str(exc))
+
+    # Rescue loop finished — NOW it's safe to drop the queue snapshot.
+    if r is not None and processing_key:
+        try:
+            r.delete(processing_key)
+        except Exception:
+            pass   # TTL cleans it up
 
     log.info("wave2_rescue.done", total_rescued=total_rescued)
     return {"rescued": total_rescued}

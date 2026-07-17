@@ -14,6 +14,7 @@ import { DescribeModal as SocialDescribeModal } from "./SocialTrends";
 import { SynthesisPanel } from "@/components/SynthesisPanel";
 import { useGenQuota } from "@/hooks/useGenQuota";
 import { Flame, Heart } from "lucide-react";
+import EmergingVoices from "@/components/EmergingVoices";
 
 /* ─── constants ──────────────────────────────────────────── */
 
@@ -528,6 +529,9 @@ export default function TopicExplorer() {
                   <p className="text-xs mt-1 opacity-60">Try broader terms</p>
                 </div>
               )}
+
+              {/* Emerging voices — authors on this topic who aren't tracked targets */}
+              <EmergingVoices query={submitted} />
             </div>
           )}
         </div>

@@ -6,7 +6,7 @@ its own `/tmp/reports` and uploads them to Vercel Blob, while the BACKEND
 container's `/tmp/reports` stays empty — the two services don't share a
 filesystem on Railway. Listing/downloading must go through Blob.
 """
-import os
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,42 +14,45 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import ExtractedInsight, Target
+from app.services.vercel_blob_storage import run_blob_op
 
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 settings = get_settings()
 
 
-def _with_blob_token(fn):
-    """Run a `vercel_blob` call with BLOB_READ_WRITE_TOKEN set from settings."""
+async def _blob_call(fn):
+    """Run a synchronous `vercel_blob` call without blocking the event loop.
+
+    The blob SDK does blocking HTTP; run it in the thread pool (run_blob_op
+    also makes the token env-var handling thread-safe)."""
     if not settings.vercel_blob_token:
         return None
-    previous = os.environ.get("BLOB_READ_WRITE_TOKEN")
-    os.environ["BLOB_READ_WRITE_TOKEN"] = settings.vercel_blob_token
-    try:
-        return fn()
-    finally:
-        if previous is None:
-            os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
-        else:
-            os.environ["BLOB_READ_WRITE_TOKEN"] = previous
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, lambda: run_blob_op(fn, settings.vercel_blob_token)
+    )
 
 
 @router.get("/")
 async def list_pdfs() -> list[dict[str, Any]]:
-    """List all PDF reports — from Vercel Blob in production, local filesystem locally."""
+    """List all PDF reports — from Vercel Blob in production, local filesystem locally.
+
+    Covers every report family: pipeline reports (reports/), burning-topic +
+    congress reports (burning-topics/) and global syntheses (global-synthesis/)."""
     if not settings.vercel_blob_token:
         return _list_local_pdfs()
 
     import vercel_blob
 
-    result = _with_blob_token(lambda: vercel_blob.list({"prefix": "reports/", "limit": 1000}))
-    if not result:
-        return []
-
-    blobs = result.get("blobs", []) if isinstance(result, dict) else []
+    blobs: list[dict] = []
+    for prefix in ("reports/", "burning-topics/", "global-synthesis/"):
+        result = await _blob_call(lambda p=prefix: vercel_blob.list({"prefix": p, "limit": 1000}))
+        if isinstance(result, dict):
+            blobs.extend(result.get("blobs", []))
     pdfs = [b for b in blobs if b.get("pathname", "").endswith(".pdf")]
     pdfs.sort(key=lambda b: b.get("uploadedAt") or "", reverse=True)
     return [
@@ -88,11 +91,13 @@ def _list_local_pdfs() -> list[dict[str, Any]]:
 async def latest_insights(limit: int = 20, db: AsyncSession = Depends(get_db)):
     """Return most recent extracted insights across all targets, sorted by post published date."""
     from app.models import ScrapedPost
+    from app.services.ae_filter import post_not_ae
     from sqlalchemy import nulls_last
     rows = await db.execute(
         select(ExtractedInsight, Target, ScrapedPost)
         .join(Target, ExtractedInsight.target_id == Target.id)
         .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
+        .where(post_not_ae())
         .order_by(nulls_last(desc(ScrapedPost.published_date)))
         .limit(limit)
     )
@@ -111,6 +116,60 @@ async def latest_insights(limit: int = 20, db: AsyncSession = Depends(get_db)):
         }
         for ins, target, post in rows.all()
     ]
+
+
+# ── Global synthesis (dashboard) ──────────────────────────
+
+@router.post("/global-synthesis", status_code=202)
+async def trigger_global_synthesis(user=Depends(get_current_user)):
+    """Enqueue the global synthesis (KOL brief + population brief + burning-topic
+    reports merged in one LLM pass). Non-admins: one fresh generation per day —
+    the stored result stays readable for free."""
+    import json
+
+    from app.auth import enforce_daily_generation
+    from app.tasks.llm import (GLOBAL_SYNTH_STATUS_KEY, generate_global_synthesis,
+                               set_global_synth_status, _gs_redis)
+
+    try:
+        raw = _gs_redis().get(GLOBAL_SYNTH_STATUS_KEY)
+        if raw and json.loads(raw).get("status") == "running":
+            raise HTTPException(status_code=409, detail="A global synthesis is already running")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    enforce_daily_generation(user, "global_synthesis")
+    set_global_synth_status(status="running")
+    generate_global_synthesis.delay()
+    return {"status": "running"}
+
+
+@router.get("/global-synthesis")
+async def get_global_synthesis(user=Depends(get_current_user)):
+    """Status + last stored result. The result persists until the next
+    generation replaces it (dashboard shows it without regenerating)."""
+    import json
+
+    from app.tasks.llm import GLOBAL_SYNTH_RESULT_KEY, GLOBAL_SYNTH_STATUS_KEY, _gs_redis
+
+    status: dict = {"status": "idle"}
+    result = None
+    try:
+        r = _gs_redis()
+        raw = r.get(GLOBAL_SYNTH_STATUS_KEY)
+        if raw:
+            status = json.loads(raw)
+        raw = r.get(GLOBAL_SYNTH_RESULT_KEY)
+        if raw:
+            result = json.loads(raw)
+    except Exception:
+        pass
+    if status.get("status") == "running" and result is not None:
+        # keep showing the previous result while a new one cooks
+        pass
+    return {"status": status.get("status", "idle"), "error": status.get("error"), "result": result}
 
 
 @router.get("/local/{file_path:path}")
@@ -139,7 +198,7 @@ async def download_pdf(file_path: str, inline: bool = False):
     import vercel_blob
 
     try:
-        result = _with_blob_token(lambda: vercel_blob.head(file_path))
+        result = await _blob_call(lambda: vercel_blob.head(file_path))
     except Exception:
         result = None
     if not result:

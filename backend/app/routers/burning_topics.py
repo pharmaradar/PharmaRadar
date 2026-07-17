@@ -61,7 +61,8 @@ def _loads(raw: str | None) -> list:
         return []
 
 
-def _topic_out(t: BurningTopic, latest: BurningTopicReport | None = None) -> dict:
+def _topic_out(t: BurningTopic, latest=None) -> dict:
+    """`latest` is any object with id/status/created_at/pdf_url (ORM row or Row tuple)."""
     return {
         "id": t.id,
         "name": t.name,
@@ -86,12 +87,14 @@ def _report_out(r: BurningTopicReport) -> dict:
     return {
         "id": r.id,
         "topic_id": r.topic_id,
+        "congress_id": r.congress_id,
         "status": r.status,
         "summary_md": r.summary_md,
         "key_findings": _loads(r.key_findings),
         "so_what": r.so_what,
         "important_posts": _loads(r.important_posts),
         "main_authors": _loads(r.main_authors),
+        "question_answers": _loads(r.question_answers),
         "pdf_url": r.pdf_url,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
@@ -117,16 +120,20 @@ async def list_topics(db: AsyncSession = Depends(get_db),
     rows = await db.execute(select(BurningTopic).order_by(desc(BurningTopic.created_at)))
     topics = rows.scalars().all()
 
-    # Latest report per topic in one query (small table — fetch and bucket)
-    latest_by_topic: dict[int, BurningTopicReport] = {}
+    # Latest report per topic via DISTINCT ON — the list is polled by the UI,
+    # so don't drag every historical report row (with its big text columns)
+    # across the wire just to keep one badge fresh.
+    latest_by_topic: dict[int, object] = {}
     if topics:
         rep_rows = await db.execute(
-            select(BurningTopicReport)
+            select(BurningTopicReport.topic_id, BurningTopicReport.id,
+                   BurningTopicReport.status, BurningTopicReport.created_at,
+                   BurningTopicReport.pdf_url)
             .where(BurningTopicReport.topic_id.in_([t.id for t in topics]))
+            .distinct(BurningTopicReport.topic_id)
             .order_by(BurningTopicReport.topic_id, desc(BurningTopicReport.created_at))
         )
-        for r in rep_rows.scalars().all():
-            latest_by_topic.setdefault(r.topic_id, r)
+        latest_by_topic = {r.topic_id: r for r in rep_rows.all()}
 
     return [_topic_out(t, latest_by_topic.get(t.id)) for t in topics]
 

@@ -81,11 +81,16 @@ celery_app.conf.update(
         "app.tasks.burning_topics.*": {"queue": "scrape"},
     },
     # ── Per-task overrides where the default is wrong ───────────────────
-    # Agent rescue can hit 180s timeouts repeatedly; give it more room.
+    # NOTE: these annotations OVERRIDE the decorators' own soft/time_limit args
+    # (Celery gives task_annotations precedence) — keep them in sync with the
+    # decorators or the decorator values silently never apply.
+    # Agent rescue processes MANY targets sequentially (agent calls are 120s+
+    # each), so it needs the full 30 min — the old 600/720 here was silently
+    # SIGKILLing large rescue batches at 12 min.
     task_annotations={
         "app.tasks.scrape.wave2_rescue": {
-            "soft_time_limit": 600,   # 10 min
-            "time_limit":      720,   # 12 min
+            "soft_time_limit": 1800,  # 30 min — matches the decorator's intent
+            "time_limit":      1920,  # 32 min hard kill
         },
         "app.tasks.scrape.scrape_target": {
             "soft_time_limit": 480,   # 8 min  — many parallel fetches
@@ -113,6 +118,21 @@ celery_app.conf.update(
         "reap-stale-runs": {
             "task": "app.tasks.maintenance.reap_stale_runs",
             "schedule": 300.0,
+        },
+        # Same idea for burning_topic_reports (Burning Topics + Congress): a
+        # report stuck in pending/running past its own task time limit was
+        # orphaned by a dead worker, and the in-flight check would otherwise
+        # block that topic/congress from ever generating again.
+        "reap-stale-reports": {
+            "task": "app.tasks.maintenance.reap_stale_reports",
+            "schedule": 300.0,
+        },
+        # Pharmacovigilance: classify unclassified posts (esp. social — those
+        # never get a per-post LLM call at ingest) in small batches. ≤2 cheap
+        # LLM calls per sweep; a fully-classified DB makes this a no-op query.
+        "classify-ae-backfill": {
+            "task": "app.tasks.maintenance.classify_ae_backfill",
+            "schedule": 4 * 3600.0,
         },
     },
 )
