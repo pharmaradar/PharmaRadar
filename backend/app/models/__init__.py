@@ -9,6 +9,7 @@ from app.models.discovery_result import DiscoveryResult
 from app.models.social_post import SocialPost
 from app.models.user import User
 from app.models.search_history import SearchHistory
+from app.models.burning_topic import BurningTopic, BurningTopicReport
 
 __all__ = [
     "Target",
@@ -23,4 +24,6 @@ __all__ = [
     "SocialPost",
     "User",
     "SearchHistory",
+    "BurningTopic",
+    "BurningTopicReport",
 ]

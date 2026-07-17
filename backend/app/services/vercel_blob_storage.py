@@ -74,3 +74,22 @@ def upload_daily_summary_to_vercel_blob(
         raise
     logger.info("vercel_blob.daily_summary_uploaded", date=str(run_date), url=url)
     return url
+
+
+def upload_burning_topic_pdf(
+    pdf_binary: bytes, topic_slug: str, report_id: int, vercel_token: str
+) -> str:
+    """Upload a burning-topic report PDF and return its public URL.
+
+    Pathname includes the report id so successive reports for the same topic
+    never overwrite each other (unlike the per-day report paths above)."""
+    pathname = f"burning-topics/{topic_slug}/report_{report_id}.pdf"
+    try:
+        url = _put(pathname, pdf_binary, vercel_token)
+    except Exception as e:
+        logger.error("vercel_blob.burning_topic_upload_failed", error=str(e),
+                     topic=topic_slug, report_id=report_id)
+        raise
+    logger.info("vercel_blob.burning_topic_uploaded", topic=topic_slug,
+                report_id=report_id, url=url)
+    return url

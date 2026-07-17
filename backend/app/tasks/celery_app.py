@@ -6,8 +6,10 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# Silence noisy libraries so celery logs stay readable
-for _lib in ("fonttools", "weasyprint", "PIL", "httpx", "httpcore", "urllib3"):
+# Silence noisy libraries so celery logs stay readable. Note: the package is
+# "fontTools" (capital T) — logger names are case-sensitive, so "fonttools"
+# here never matched and every glyph-subsetting debug line leaked through.
+for _lib in ("fontTools", "weasyprint", "PIL", "httpx", "httpcore", "urllib3"):
     logging.getLogger(_lib).setLevel(logging.WARNING)
 
 # ── Sentry (worker-side) ──────────────────────────────────
@@ -37,6 +39,7 @@ celery_app = Celery(
         "app.tasks.scheduler",
         "app.tasks.maintenance",  # reap_stale_runs
         "app.tasks.social",       # social_scan (Apify)
+        "app.tasks.burning_topics",  # generate_topic_report
     ],
 )
 
@@ -49,6 +52,7 @@ import app.tasks.pdf             # noqa: E402,F401
 import app.tasks.scheduler       # noqa: E402,F401
 import app.tasks.maintenance     # noqa: E402,F401
 import app.tasks.social          # noqa: E402,F401
+import app.tasks.burning_topics  # noqa: E402,F401
 
 celery_app.conf.update(
     task_serializer="json",
@@ -74,6 +78,7 @@ celery_app.conf.update(
         "app.tasks.scheduler.*": {"queue": "llm"},
         "app.tasks.maintenance.*": {"queue": "llm"},
         "app.tasks.social.*": {"queue": "scrape"},
+        "app.tasks.burning_topics.*": {"queue": "scrape"},
     },
     # ── Per-task overrides where the default is wrong ───────────────────
     # Agent rescue can hit 180s timeouts repeatedly; give it more room.
@@ -85,6 +90,12 @@ celery_app.conf.update(
         "app.tasks.scrape.scrape_target": {
             "soft_time_limit": 480,   # 8 min  — many parallel fetches
             "time_limit":      600,   # 10 min
+        },
+        # Burning-topic report = DB query + one TinyFish search + LLM + PDF in
+        # a single task; the 5-min default is too tight for that chain.
+        "app.tasks.burning_topics.generate_topic_report": {
+            "soft_time_limit": 600,   # 10 min
+            "time_limit":      720,   # 12 min
         },
     },
     # Beat schedule

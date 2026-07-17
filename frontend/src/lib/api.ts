@@ -260,6 +260,50 @@ export interface DiscoveryContent {
   thumbnail_url?: string | null;
 }
 
+export interface BurningTopic {
+  id: number;
+  name: string;
+  description: string | null;
+  language_filter: string | null;
+  period_days: number;
+  exclusion_words: string[];
+  restriction_terms: string[];
+  created_by: number | null;
+  is_active: boolean;
+  created_at: string;
+  latest_report: { id: number; status: string; created_at: string; pdf_url: string | null } | null;
+}
+
+export interface BurningTopicImportantPost {
+  url: string;
+  title: string | null;
+  author: string | null;
+  engagement: number;
+  platform?: string;
+  why?: string;
+}
+
+export interface BurningTopicAuthor {
+  author: string;
+  posts: number;
+  engagement: number;
+  platforms: string[];
+  note?: string | null;
+}
+
+export interface BurningTopicReport {
+  id: number;
+  topic_id: number;
+  status: "pending" | "running" | "done" | "failed";
+  summary_md: string | null;
+  key_findings: string[];
+  so_what: string | null;
+  important_posts: BurningTopicImportantPost[];
+  main_authors: BurningTopicAuthor[];
+  pdf_url: string | null;
+  created_at: string;
+}
+
 export interface TopicsData {
   period_days: number;
   total: number;
@@ -418,6 +462,34 @@ export const api = {
       req<SocialSynthesis>(
         `/social/synthesis?days=${days}&lang=${lang}${refresh ? "&refresh=true" : ""}`
       ),
+  },
+
+  burningTopics: {
+    list: () => req<BurningTopic[]>("/burning-topics/"),
+    create: (body: {
+      name: string; description?: string | null; language_filter?: string | null;
+      period_days?: number; exclusion_words?: string[]; restriction_terms?: string[];
+    }) => req<BurningTopic>("/burning-topics/", { method: "POST", body: JSON.stringify(body) }),
+    update: (id: number, body: Partial<{
+      name: string; description: string | null; language_filter: string | null;
+      period_days: number; exclusion_words: string[]; restriction_terms: string[]; is_active: boolean;
+    }>) => req<BurningTopic>(`/burning-topics/${id}`, { method: "PUT", body: JSON.stringify(body) }),
+    remove: (id: number) => req<void>(`/burning-topics/${id}`, { method: "DELETE" }),
+    generate: (id: number) =>
+      req<{ report_id: number; status: string }>(`/burning-topics/${id}/generate-report`, { method: "POST" }),
+    reports: (id: number) => req<BurningTopicReport[]>(`/burning-topics/${id}/reports`),
+    followup: (topicId: number, reportId: number, question: string, history: { role: string; content: string }[]) =>
+      req<{ answer: string }>(`/burning-topics/${topicId}/reports/${reportId}/followup`, {
+        method: "POST", body: JSON.stringify({ question, history }),
+      }),
+    // Dev/blob-less fallback: stream the PDF through the backend with auth
+    downloadPdf: async (topicId: number, reportId: number): Promise<Blob> => {
+      const res = await fetch(`${BASE}/burning-topics/${topicId}/reports/${reportId}/pdf`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`${res.status}: PDF not available`);
+      return res.blob();
+    },
   },
 
   health: {

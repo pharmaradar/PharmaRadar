@@ -9,6 +9,7 @@ import RunHistory from "@/pages/RunHistory";
 import SettingsPage from "@/pages/Settings";
 import Agent from "@/pages/Agent";
 import TopicExplorer from "@/pages/TopicExplorer";
+import BurningTopics from "@/pages/BurningTopics";
 import SocialPage from "@/pages/Social";
 import Login from "@/pages/Login";
 import Users from "@/pages/Users";
@@ -66,6 +67,7 @@ function AuthedApp() {
         <Routes>
           <Route path="/"          element={<Navigate to="/dashboard" replace />} />
           <Route path="/topics"    element={<TopicExplorer />} />
+          <Route path="/burning-topics" element={<Padded><BurningTopics /></Padded>} />
           <Route path="/dashboard" element={<Padded><Dashboard /></Padded>} />
           <Route path="/social"    element={<SocialPage />} />
           <Route path="/reports"   element={<Padded><Reports /></Padded>} />

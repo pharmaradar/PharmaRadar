@@ -16,6 +16,7 @@ from app.routers import targets, runs, reports, settings as settings_router, age
 from app.routers import discovery as discovery_router
 from app.routers import social as social_router
 from app.routers import auth as auth_router
+from app.routers import burning_topics as burning_topics_router
 from app.auth import require_admin, daily_gen_guard, get_current_user, daily_generation_available
 
 _settings = get_settings()
@@ -125,9 +126,28 @@ async def _seed_defaults() -> None:
     """Seed AppSettings singleton and optional target pre-load from targets.json."""
     from app.database import AsyncSessionLocal
     from app.models import AppSettings, Target
+    from sqlalchemy import text
     import json
 
     async with AsyncSessionLocal() as sess:
+        # Serialize this whole routine across concurrent uvicorn workers. On
+        # first boot against an empty DB, two workers can both see empty
+        # tables at once and race to insert the same rows — whichever worker
+        # loses a unique-constraint race crashes, and uvicorn kills the whole
+        # server if any worker fails to start. This advisory lock makes the
+        # second worker simply wait, then find everything already seeded.
+        await sess.execute(text("SELECT pg_advisory_lock(727271)"))
+        try:
+            await _seed_defaults_locked(sess)
+        finally:
+            await sess.execute(text("SELECT pg_advisory_unlock(727271)"))
+
+
+async def _seed_defaults_locked(sess) -> None:
+    from app.models import AppSettings, Target
+    import json
+
+    if True:
         s = await sess.get(AppSettings, 1)
         if not s:
             # Pick the best available provider based on which API key is in .env
@@ -300,6 +320,7 @@ app.include_router(settings_router.router)
 app.include_router(agent.router)
 app.include_router(discovery_router.router)
 app.include_router(social_router.router)
+app.include_router(burning_topics_router.router)
 
 
 @app.get("/health")
