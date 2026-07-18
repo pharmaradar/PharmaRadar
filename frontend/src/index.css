@@ -116,7 +116,15 @@ body {
 }
 .ping-ring { animation: ping-ring 2.4s cubic-bezier(0, 0, 0.2, 1) infinite; }
 
+/* Left-to-right pulse sweep — used on the pipeline progress bar */
+@keyframes pipeline-h-pulse {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .radar-sweep, .ping-ring, .ecg-trace { animation: none; }
   .fade-up { animation: none; }
+  /* Disable pipeline shimmer for motion-sensitive users */
+  [style*="pipeline-h-pulse"] { animation: none !important; }
 }
