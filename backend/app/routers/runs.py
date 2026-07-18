@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import RunLog, RunStatus, Target
-from app.auth import require_admin
+from app.auth import require_admin, require_admin_or_internal
 from app.config import get_settings
 settings = get_settings()
 
@@ -52,7 +52,10 @@ def _run_to_out(r: RunLog) -> RunOut:
     )
 
 
-@router.post("/trigger", dependencies=[Depends(require_admin)])
+# require_admin_or_internal: the beat scheduler calls this endpoint with the
+# internal token — a plain require_admin made every scheduled run 401 (latent
+# until beat was actually deployed).
+@router.post("/trigger", dependencies=[Depends(require_admin_or_internal)])
 async def trigger_run(body: TriggerRequest, db: AsyncSession = Depends(get_db)):
     from celery import chain, chord, group
     from app.tasks.scrape import scrape_target, wave2_rescue
@@ -205,6 +208,14 @@ async def generate_pdfs(db: AsyncSession = Depends(get_db)):
     from app.tasks.pdf import generate_target_pdf, generate_daily_summary_pdf
     from app.models import RunLog, RunStatus
 
+    # Same guard as /trigger — a double-click here used to stack two concurrent
+    # chord runs and leave an extra 'running' RunLog blocking the UI.
+    existing = await db.execute(
+        select(RunLog).where(RunLog.status == RunStatus.running).limit(1)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="A run is already in progress")
+
     rows = await db.execute(select(Target).where(Target.active == True).order_by(Target.name))
     targets = rows.scalars().all()
     if not targets:
@@ -236,14 +247,18 @@ async def get_run(run_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/reset-all", dependencies=[Depends(require_admin)])
 async def reset_all(db: AsyncSession = Depends(get_db)):
-    """Delete all operational data (posts, insights, summaries, runs, blobs) — keeps targets and settings."""
-    import os
-    from app.models import ExtractedInsight, PersonSummary, ScrapedPost, AgentMessage
+    """Delete all operational data (posts, insights, summaries, runs, reports, blobs)
+    — keeps targets, burning topics/congresses (config) and settings."""
+    import asyncio
+    from app.models import (AgentMessage, BurningTopicReport, ExtractedInsight,
+                            PersonSummary, ScrapedPost)
     from app.models.discovery_result import DiscoveryResult
     from app.models.social_post import SocialPost
     from app.config import get_settings
 
-    # 1. DB: delete in FK-safe order — all operational + discovery + chat + social
+    # 1. DB: delete in FK-safe order — all operational + discovery + chat + social.
+    # BurningTopicReport rows are generated output (topics/congresses themselves
+    # are configuration, like targets — those stay).
     await db.execute(delete(ExtractedInsight))
     await db.execute(delete(PersonSummary))
     await db.execute(delete(ScrapedPost))
@@ -251,37 +266,42 @@ async def reset_all(db: AsyncSession = Depends(get_db)):
     await db.execute(delete(AgentMessage))
     await db.execute(delete(DiscoveryResult))
     await db.execute(delete(SocialPost))
+    await db.execute(delete(BurningTopicReport))
     await db.commit()
 
-    # 2. Vercel Blob: delete all reports/ blobs
+    # 2. Vercel Blob: delete every report family (burning-topic/congress and
+    # global-synthesis PDFs used to survive a destroy). Runs in the thread pool
+    # via run_blob_op — thread-safe token handling, event loop stays free.
     blob_deleted = 0
     settings = get_settings()
     if settings.vercel_blob_token:
-        try:
-            import vercel_blob
-            prev = os.environ.get("BLOB_READ_WRITE_TOKEN")
-            os.environ["BLOB_READ_WRITE_TOKEN"] = settings.vercel_blob_token
+        import vercel_blob
+        from app.services.vercel_blob_storage import run_blob_op
+
+        def _delete_prefix(prefix: str) -> int:
+            deleted = 0
+            cursor = None
+            while True:
+                opts: dict = {"prefix": prefix, "limit": 1000}
+                if cursor:
+                    opts["cursor"] = cursor
+                result = vercel_blob.list(opts)
+                blobs = result.get("blobs", []) if isinstance(result, dict) else []
+                for b in blobs:
+                    vercel_blob.delete(b["url"])
+                    deleted += 1
+                if not result.get("hasMore"):
+                    return deleted
+                cursor = result.get("cursor")
+
+        loop = asyncio.get_event_loop()
+        for prefix in ("reports/", "burning-topics/", "global-synthesis/"):
             try:
-                cursor = None
-                while True:
-                    opts: dict = {"prefix": "reports/", "limit": 1000}
-                    if cursor:
-                        opts["cursor"] = cursor
-                    result = vercel_blob.list(opts)
-                    blobs = result.get("blobs", []) if isinstance(result, dict) else []
-                    for b in blobs:
-                        vercel_blob.delete(b["url"])
-                        blob_deleted += 1
-                    if not result.get("hasMore"):
-                        break
-                    cursor = result.get("cursor")
-            finally:
-                if prev is None:
-                    os.environ.pop("BLOB_READ_WRITE_TOKEN", None)
-                else:
-                    os.environ["BLOB_READ_WRITE_TOKEN"] = prev
-        except Exception as exc:
-            pass  # non-fatal — DB is already clean
+                blob_deleted += await loop.run_in_executor(
+                    None, lambda p=prefix: run_blob_op(lambda: _delete_prefix(p),
+                                                       settings.vercel_blob_token))
+            except Exception:
+                pass  # non-fatal — DB is already clean
 
     # 3. Redis: flush ALL databases (DB0=app, DB1=Celery broker, DB2=Celery results)
     redis_reset = False

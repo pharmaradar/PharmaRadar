@@ -251,11 +251,11 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
         "Reference real drug names, hashtags and platforms. Be specific."
     )
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     err = None
     parsed = {"takeaway": "", "so_what": "", "picks": []}
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2500)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2500)
         parsed = parse_synthesis(raw)
     except Exception as exc:
         err = str(exc)[:300]
@@ -441,9 +441,7 @@ async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
         post.llm_description = None
         await db.commit()
 
-    import asyncio
-    from functools import partial
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
 
     hashtags = json.loads(post.hashtags) if post.hashtags else []
     prompt = (
@@ -463,9 +461,8 @@ async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
     )
     messages = [{"role": "user", "content": prompt}]
 
-    loop = asyncio.get_running_loop()
     try:
-        reply = await loop.run_in_executor(None, partial(call_pro, messages, max_tokens=900))
+        reply = await call_llm_async(messages, max_tokens=900)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(exc)[:200]}")
 

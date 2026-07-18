@@ -442,7 +442,6 @@ export const api = {
     create: (body: Partial<Target>) => req<Target>("/targets/", { method: "POST", body: JSON.stringify(body) }),
     update: (id: number, body: Partial<Target>) =>
       req<Target>(`/targets/${id}`, { method: "PUT", body: JSON.stringify(body) }),
-    deactivate: (id: number) => req<void>(`/targets/${id}`, { method: "DELETE" }),
     remove: (id: number) => req<void>(`/targets/${id}?purge=true`, { method: "DELETE" }),
   },
 
@@ -607,7 +606,6 @@ export const api = {
       disease_area: string | null; is_active: boolean;
     }>) => req<Congress>(`/congress/${id}`, { method: "PUT", body: JSON.stringify(body) }),
     remove: (id: number) => req<void>(`/congress/${id}`, { method: "DELETE" }),
-    questions: (id: number) => req<CongressQuestion[]>(`/congress/${id}/questions`),
     addQuestion: (id: number, question_text: string) =>
       req<CongressQuestion>(`/congress/${id}/questions`, {
         method: "POST", body: JSON.stringify({ question_text }),

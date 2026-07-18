@@ -811,11 +811,11 @@ async def synthesis(body: SynthesisRequest, db: AsyncSession = Depends(get_db),
         "Reference real drug names, sources and findings. Be specific."
     )
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     err = None
     parsed = {"takeaway": "", "so_what": "", "picks": []}
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2500)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2500)
         parsed = parse_synthesis(raw)
     except Exception as exc:
         err = str(exc)[:300]
@@ -869,7 +869,7 @@ async def describe_discovery(body: DescribeDiscoveryRequest, db: AsyncSession = 
     if not text.strip():
         return {"description": "No content available.", "so_what": None, "cached": False}
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     prompt = (
         "You are a pharma intelligence analyst for Roche.\n"
         f"Source: {row.source_name or row.url}\n\n"
@@ -878,7 +878,7 @@ async def describe_discovery(body: DescribeDiscoveryRequest, db: AsyncSession = 
         "\"so_what\": \"1-2 sentence takeaway specifically relevant to Roche and oncology\"}"
     )
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=512)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=512)
         import json as _json, re as _re
         m = _re.search(r'\{.*\}', raw, _re.DOTALL)
         parsed = _json.loads(m.group(0)) if m else {}

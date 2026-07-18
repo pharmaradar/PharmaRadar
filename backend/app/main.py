@@ -294,6 +294,12 @@ async def require_auth(request, call_next):
             or path.startswith(_PUBLIC_PREFIXES)):
         return await call_next(request)
 
+    # Internal service calls (beat scheduler → /api/runs/trigger) authenticate
+    # with the SECRET_KEY-derived token instead of a user JWT.
+    from app.auth import check_internal_token
+    if check_internal_token(request.headers.get("X-Internal-Token")):
+        return await call_next(request)
+
     header = request.headers.get("Authorization", "")
     token = header[7:].strip() if header[:7].lower() == "bearer " else ""
     if not token:
@@ -558,7 +564,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         for p in social_posts
     ) or "No social posts."
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     import structlog as _sl
     _log = _sl.get_logger("combined_brief")
 
@@ -585,7 +591,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
     llm_error = None
     points = []
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2048)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
         _log.info("combined_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
         points = [{"text": s, "source": "both", "priority": _brief_priority(s)} for s in strings[:7]]
@@ -688,7 +694,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
         for p in social_posts
     ) or "No matching social posts."
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     import re as _re2
 
     def _extract_sec(text: str, marker: str) -> str:
@@ -713,7 +719,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
 
     detail = {}
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
         detail = {
             "summary": _extract_sec(raw, "SUMMARY") or point_text,
             "so_what": _extract_sec(raw, "SO_WHAT"),
@@ -803,7 +809,7 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
         for p in posts[:80] if (p.topic or p.query) in topic_set
     )
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     import structlog as _sl
     _log = _sl.get_logger("social_brief")
 
@@ -829,7 +835,7 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
     llm_error = None
     sections = []
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
         _log.info("social_brief.llm_raw", raw=raw[:500])
         raw_clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
         m = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
@@ -919,7 +925,7 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         for ins, name in insights
     )
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     import structlog as _sl
     _log = _sl.get_logger("kol_brief")
 
@@ -945,7 +951,7 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
     llm_error = None
     points = []
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2048)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
         _log.info("kol_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
         points = [{"text": s, "source": "kol", "priority": _brief_priority(s)} for s in strings[:7]]
@@ -1025,7 +1031,7 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         for ins, name in insights
     )
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     import structlog as _sl
     _log = _sl.get_logger("competitor_brief")
 
@@ -1049,7 +1055,7 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     llm_error = None
     points = []
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2048)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
         _log.info("competitor_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
         points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:7]]
@@ -1205,7 +1211,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
         for p in social_posts
     ) or "(no social posts)"
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
     import structlog as _sl
     _log = _sl.get_logger("combined_synth")
@@ -1233,7 +1239,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
     takeaway = so_what = conclusion = ""
     focus: list[str] = []
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=4000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=4000)
         _log.info("combined_synth.llm_raw", raw=raw[:400])
         takeaway = trim_incomplete(extract_section(raw, "TAKEAWAY"))
         so_what = trim_incomplete(extract_section(raw, "SO_WHAT"))
@@ -1344,7 +1350,7 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         for p in social_posts
     ) or "No social data."
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
     import structlog as _sl
     _log = _sl.get_logger("comparison_brief")
 
@@ -1368,7 +1374,7 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     llm_error = None
     points = []
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=2048)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
         _log.info("comparison_brief.llm_raw", raw=raw[:400])
         strings = _re.findall(r'"((?:[^"\\]|\\.)+[.!?])"', raw)
         if not strings:
@@ -1440,7 +1446,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
         for p in posts[:12]
     ) or "No matching posts found."
 
-    from app.services.llm_router import call_pro
+    from app.services.llm_router import call_llm_async
 
     def _extract_section(text: str, marker: str) -> str:
         """Extract content between ##MARKER## and next ## or end."""
@@ -1466,7 +1472,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
 
     detail: dict = {}
     try:
-        raw = call_pro([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
         detail = {
             "summary":  _extract_section(raw, "SUMMARY") or point_text,
             "so_what":  _extract_section(raw, "SO_WHAT"),

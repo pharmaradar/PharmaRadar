@@ -70,8 +70,10 @@ async def _check() -> None:
 
     import httpx
     try:
+        from app.auth import internal_token
         settings = get_settings()
-        r = httpx.post(settings.run_trigger_url, json={}, timeout=10)
+        r = httpx.post(settings.run_trigger_url, json={},
+                       headers={"X-Internal-Token": internal_token()}, timeout=10)
         if r.status_code >= 400:
             logger.warning("scheduler.trigger_failed",
                            status=r.status_code, body=(r.text or "")[:200])

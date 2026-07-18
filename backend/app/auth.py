@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -203,6 +203,37 @@ def daily_gen_guard(feature: str):
             enforce_daily_generation(user, feature)
         return user
     return _dep
+
+
+# ── Internal service auth ─────────────────────────────────
+# Beat/worker → backend calls (scheduler → /api/runs/trigger) can't carry a
+# user JWT. They authenticate with a deterministic token derived from
+# SECRET_KEY instead; the auth middleware and require_admin_or_internal both
+# accept it. Server-side only — never expose to the frontend.
+
+def internal_token() -> str:
+    import hashlib
+    return hashlib.sha256(f"pharmaradar-internal:{settings.secret_key}".encode()).hexdigest()
+
+
+def check_internal_token(value: str | None) -> bool:
+    import hmac
+    return bool(value) and hmac.compare_digest(value, internal_token())
+
+
+async def require_admin_or_internal(request: Request, db: AsyncSession = Depends(get_db)):
+    """Admin JWT OR X-Internal-Token — for endpoints the scheduler must call."""
+    if check_internal_token(request.headers.get("X-Internal-Token")):
+        return None
+    header = request.headers.get("Authorization", "")
+    token = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    if not token:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not authenticated")
+    payload = _decode(token)
+    user = await db.get(User, int(payload.get("sub", 0)))
+    if not user or not user.is_active or user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
+    return user
 
 
 # ── Seeding ───────────────────────────────────────────────

@@ -82,7 +82,16 @@ def _extra_kwargs(provider: str, settings_row) -> dict[str, Any]:
 # ── DB settings loader (sync) ─────────────────────────────
 
 def _load_settings():
-    """Load AppSettings synchronously — called from sync Celery context."""
+    """Load AppSettings synchronously — safe from BOTH calling contexts.
+
+    - Sync Celery worker (no event loop in this thread): plain asyncio.run.
+    - Async FastAPI handler thread: asyncio.run() raises "cannot be called from
+      a running event loop", which used to be swallowed (with a "coroutine was
+      never awaited" RuntimeWarning) and returned None — silently ignoring the
+      DB-configured provider/model for every backend LLM endpoint, i.e. the
+      Settings-page provider switch was a no-op there. Run the loader in a
+      throwaway thread in that case.
+    """
     import asyncio
     from app.database import CelerySessionLocal
     from app.models import AppSettings
@@ -92,7 +101,13 @@ def _load_settings():
             return await sess.get(AppSettings, 1)
 
     try:
-        return asyncio.run(_get())
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(_get())   # normal path: worker thread, no loop
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _get()).result(timeout=10)
     except Exception:
         return None
 
@@ -154,6 +169,21 @@ def _dispatch(
 def call_llm(messages: list[dict], temperature: float = 0.2, max_tokens: int = 4096) -> str:
     """Call the configured model."""
     return _dispatch(messages=messages, temperature=temperature, max_tokens=max_tokens)
+
+
+async def call_llm_async(messages: list[dict], temperature: float = 0.2,
+                         max_tokens: int = 4096) -> str:
+    """Awaitable wrapper for async FastAPI handlers.
+
+    call_llm blocks for the full LLM round-trip (~10s on Gemini) — calling it
+    directly inside an `async def` route freezes the whole event loop and every
+    concurrent request with it. This runs it in the default thread pool.
+    """
+    import asyncio
+    from functools import partial
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, partial(call_llm, messages, temperature=temperature, max_tokens=max_tokens))
 
 
 # Aliases kept for backward compat with existing task imports
