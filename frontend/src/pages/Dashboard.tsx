@@ -272,8 +272,17 @@ export default function Dashboard() {
             <span className="text-sm text-blue-700 dark:text-blue-300 font-medium">{currentRun.targets_processed}/{currentRun.total_targets} targets</span>
           </div>
           <div className="w-full bg-slate-200/50 dark:bg-slate-800/50 rounded-full h-2 overflow-hidden shadow-inner">
-            <div className="bg-gradient-to-r from-blue-400 to-indigo-500 h-2 rounded-full transition-all duration-500 relative" style={{ width: `${progress}%` }}>
-              <div className="absolute inset-0 bg-white/20 animate-pulse" />
+            <div
+              className="h-2 rounded-full transition-all duration-500 relative overflow-hidden"
+              style={{ width: `${progress}%`, backgroundColor: '#00308F' }}
+            >
+              <div
+                className="absolute inset-0"
+                style={{
+                  background: 'linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.45) 50%, transparent 100%)',
+                  animation: 'pipeline-h-pulse 1.8s ease-in-out infinite',
+                }}
+              />
             </div>
           </div>
           <div className="flex gap-4 mt-3 text-xs font-medium text-slate-500 dark:text-slate-400">
