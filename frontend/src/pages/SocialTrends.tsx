@@ -170,12 +170,19 @@ export default function SocialTrends() {
   });
   const searchMut = useMutation({
     mutationFn: () => api.social.discover(submitted, true, language),
-    onSuccess: () => {
+    // onMutate (not onSuccess): setSubmitted() enables the searchData query
+    // immediately, which returns an empty cache hit in ~50ms. If `searching` is
+    // still false at that moment the empty state renders "No posts found" for the
+    // few seconds the trigger POST is in flight, then flips to "Pulling posts…".
+    // Setting the flag synchronously before the request closes that window.
+    onMutate: () => {
       setPolls(0);
       setSearching(true);
       searchStartedAt.current = Date.now();
       seenRunning.current = false;
     },
+    // Without this a failed trigger would spin until the 2-min hard cap.
+    onError: () => setSearching(false),
   });
 
   // Poll discover status — this tells us when Apify actually finishes
