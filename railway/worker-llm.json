@@ -5,10 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "sh -c \"celery -A app.tasks.celery_app.celery_app worker -Q llm --concurrency=2 --loglevel=info -n llm@railway\"",
+    "startCommand": "sh -c \"celery -A app.tasks.celery_app.celery_app worker -Q llm --concurrency=2 --loglevel=info -n llm@railway --max-tasks-per-child=100 --max-memory-per-child=400000\"",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 3,
-    "sleepApplication": true
+    "restartPolicyMaxRetries": 3
   }
 }
-
