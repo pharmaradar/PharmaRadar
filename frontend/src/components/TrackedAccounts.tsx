@@ -23,11 +23,12 @@ const PLATFORM_LABELS: Record<string, string> = {
   facebook: "Facebook",
 };
 
-/** Instagram's current Apify actor is hashtag-only, so a named profile cannot
- *  be fetched yet. Saying so beats letting someone add accounts that are
- *  silently never scraped. */
+/** Per-platform caveats, shown so nobody adds an account that is silently
+ *  never collected. Instagram is now scraped by profile; LinkedIn is reached
+ *  through its French locale rather than per-account. */
 const PLATFORM_NOTE: Record<string, string> = {
-  instagram: "Stored, but not yet scraped — the Instagram actor is hashtag-only.",
+  instagram: "Posts and their comments are collected for these accounts.",
+  linkedin: "Collected via fr.linkedin.com search rather than per-account.",
 };
 
 export default function TrackedAccounts() {

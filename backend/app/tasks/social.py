@@ -117,6 +117,13 @@ logger = structlog.get_logger(__name__)
 
 _STATUS_KEY = "social_scan:status"
 
+# Comments are billed per post, so only the most-discussed posts are worth
+# scraping — the long tail has none.
+_COMMENT_POST_LIMIT = 10
+# Patient comments are the most sensitive material the platform touches.
+# They are stored through the same AE classification as every other post.
+_COMMENTS_ENABLED = True
+
 
 def _set_status(**fields) -> None:
     try:
@@ -170,6 +177,93 @@ async def _tracked_handles(session, platform: str) -> list[str]:
     return [h for h in rows.scalars().all() if h]
 
 
+async def _ingest_posts(session, posts: list[dict], *, kind: str, topic: str,
+                        query: str) -> int:
+    """Insert normalised posts, sharing one code path with the keyword scan.
+
+    Comments come through here too, so they get the same dedup hash, language
+    detection, provenance and — critically — the same adverse-event handling as
+    any other post.
+    """
+    from app.models import SocialPost
+    from app.services.deduplicator import sha256_hash
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    inserted = 0
+    for post in posts:
+        url = post.get("post_url")
+        if not url:
+            continue
+        if not _is_pharma_relevant({**post, "topic": topic}):
+            continue
+        stmt = pg_insert(SocialPost).values(
+            platform=post["platform"], post_url=url,
+            parent_url=post.get("parent_url"),
+            author=post.get("author"), text=post.get("text"),
+            thumbnail_url=post.get("thumbnail_url"),
+            likes=post.get("likes", 0), comments=post.get("comments", 0),
+            views=post.get("views", 0), shares=post.get("shares", 0),
+            hashtags=json.dumps(post.get("hashtags", [])),
+            query=query, kind=kind, topic=topic,
+            language=_detect_lang(post.get("text", "")),
+            domain=normalize_host(url),
+            source_scope=(FR_SCOPE if is_french_source(url) else Scope.GLOBAL.value),
+            posted_at=post.get("posted_at"),
+            content_hash=sha256_hash(url),
+        ).on_conflict_do_nothing(index_elements=["content_hash"])
+        try:
+            result = await session.execute(stmt)
+            await session.commit()
+            if result.rowcount:
+                inserted += 1
+        except Exception as exc:
+            await session.rollback()
+            logger.debug("social_scan.insert_failed", exc=str(exc)[:120])
+    return inserted
+
+
+async def _scan_instagram_accounts(handles: list[str], window: int,
+                                   max_per_account: int, with_comments: bool) -> tuple[int, int]:
+    """Scrape tracked Instagram accounts, then the comments under what they posted.
+
+    Account posts are on-topic by construction, so this is the highest-yield
+    Instagram lane — the hashtag actor can never reach a named account.
+    """
+    from app.database import CelerySessionLocal
+    from app.services import apify_client
+
+    if not handles:
+        return 0, 0
+
+    loop = asyncio.get_running_loop()
+    posts = await loop.run_in_executor(
+        None, lambda: apify_client.fetch_instagram_accounts(
+            handles, max_per_account=max_per_account, window_days=window))
+    if not posts:
+        return 0, 0
+
+    async with CelerySessionLocal() as sess:
+        saved = await _ingest_posts(sess, posts, kind="account",
+                                    topic="tracked account", query="tracked:instagram")
+
+    comments_saved = 0
+    if with_comments and posts:
+        # Comment-scrape the most engaged posts only: comments are billed per
+        # post and the long tail carries almost no discussion.
+        top = sorted(posts, key=lambda p: (p.get("comments") or 0), reverse=True)
+        urls = [p["post_url"] for p in top[:_COMMENT_POST_LIMIT] if (p.get("comments") or 0) > 0]
+        if urls:
+            comments = await loop.run_in_executor(
+                None, lambda: apify_client.fetch_instagram_comments(urls))
+            async with CelerySessionLocal() as sess:
+                comments_saved = await _ingest_posts(
+                    sess, comments, kind="comment", topic="comment",
+                    query="tracked:instagram:comments")
+    logger.info("social_scan.instagram_accounts", accounts=len(handles),
+                posts=saved, comments=comments_saved)
+    return saved, comments_saved
+
+
 async def _run_scan(lang_override: str | None = None) -> dict:
     from datetime import datetime, timezone
     from app.database import CelerySessionLocal
@@ -201,6 +295,7 @@ async def _run_scan(lang_override: str | None = None) -> dict:
         # no session. Facebook pages still come from AppSettings for now; the
         # registry holds them too, so that is the next thing to converge.
         tracked_x = await _tracked_handles(sess, "twitter")
+        tracked_ig = await _tracked_handles(sess, "instagram")
 
         # List of (search_term, platform_hint) for KOL scanning.
         # Prefer twitter_handle over name for Twitter (more precise); name is used as fallback.
@@ -332,6 +427,11 @@ async def _run_scan(lang_override: str | None = None) -> dict:
     ]
     if fb_job:
         jobs.append(_run_one("", "field", "facebook"))
+    # Tracked Instagram accounts use a different actor from the hashtag scan, so
+    # they run as their own job rather than through _run_one.
+    if tracked_ig and "instagram" in platforms:
+        jobs.append(_scan_instagram_accounts(
+            tracked_ig, window, max_per_query, _COMMENTS_ENABLED))
     await asyncio.gather(*jobs, return_exceptions=True)
 
     _set_status(running=False, done=done_count, inserted=inserted_count,

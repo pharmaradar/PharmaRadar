@@ -30,11 +30,16 @@ class SocialPost(Base):
 
     hashtags: Mapped[str | None] = mapped_column(Text)              # JSON list
     query: Mapped[str | None] = mapped_column(String(255), index=True)  # hashtag/keyword/handle that found it
-    kind: Mapped[str] = mapped_column(String(16), default="field")  # kol | field
+    kind: Mapped[str] = mapped_column(String(16), default="field")  # kol | field | account | comment
     disease_area: Mapped[str | None] = mapped_column(String(64), index=True)
     topic: Mapped[str | None] = mapped_column(String(255))          # coarse topic (from query/hashtag)
 
     language: Mapped[str | None] = mapped_column(String(8))           # 'en' | 'fr' | etc.
+    # Set on comments: the post they were left under. Comments are stored as
+    # SocialPost rows on purpose — that way they inherit AE classification, the
+    # dedup hash, language detection and every read-time filter, instead of a
+    # parallel table that could quietly miss the pharmacovigilance guarantee.
+    parent_url: Mapped[str | None] = mapped_column(Text, index=True)
     # Provenance — which source the post came from, recorded at ingest.
     # Distinct from `language`, which is inferred from the text after the fact.
     domain: Mapped[str | None] = mapped_column(String(255), index=True)
