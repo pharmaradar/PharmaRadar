@@ -205,6 +205,45 @@ _NORMALIZERS = {
 
 # ── actor input builders ──────────────────────────────────
 
+# apify/instagram-hashtag-scraper validates every entry against this pattern and
+# rejects the WHOLE run with HTTP 400 if any one term fails. Read from the live
+# 400 response on 2026-08-12: ^\s*#?[^!?.,:;\-+=*&%$#@/\~^|<>()[\]{}"'`]+$
+#
+# Accents and spaces are fine ("immunothérapie", "cancer du poumon" both work and
+# return French accounts). Punctuation is not — a single hyphen or question mark
+# 400s the run, and since fetch_platform_expanded batches every term into one
+# call, one bad term returns zero Instagram posts for the entire search.
+_IG_FORBIDDEN = re.compile(r"""[!?.,:;\-+=*&%$#@/\\~^|<>()\[\]{}"'`]""")
+
+
+def sanitize_ig_term(term: str) -> str:
+    """Make a term safe for the Instagram actor.
+
+    Forbidden punctuation becomes a space rather than being deleted, because the
+    actor accepts spaces: "sous-cutanée" -> "sous cutanée" stays searchable,
+    whereas "souscutanée" is a word that does not exist.
+    """
+    cleaned = _IG_FORBIDDEN.sub(" ", term or "").lstrip("#@")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _ig_run_input(terms: list[str], max_results: int) -> dict | None:
+    """Build the Instagram actor input, or None when nothing survives sanitising.
+
+    Multi-word terms are sent with `keywordSearch` enabled — that input exists on
+    the actor and the codebase never set it. Without it a phrase is matched as a
+    literal hashtag, so anything a user actually types ("immunothérapie sous
+    cutanée") finds nothing, because no such hashtag exists.
+    """
+    cleaned = [t for t in (sanitize_ig_term(x) for x in terms) if t]
+    if not cleaned:
+        return None
+    run_input = {"hashtags": cleaned, "resultsType": "posts", "resultsLimit": max_results}
+    if any(" " in t for t in cleaned):
+        run_input["keywordSearch"] = True
+    return run_input
+
+
 def _build_input(platform: str, term: str, max_results: int, since: str | None,
                  lang_filter: str | None = None) -> dict:
     """Map a search term to the Actor's expected input shape.
@@ -215,7 +254,7 @@ def _build_input(platform: str, term: str, max_results: int, since: str | None,
     """
     tag = re.sub(r"\s+", "", term.lstrip("#@"))
     if platform == "instagram":
-        return {"hashtags": [tag], "resultsType": "posts", "resultsLimit": max_results}
+        return _ig_run_input([term], max_results) or {}
     if platform == "twitter":
         # Native Twitter operator filters by language at search time
         q = f"{term} lang:{lang_filter}" if lang_filter and lang_filter != "all" else term
@@ -275,10 +314,10 @@ def fetch_platform_expanded(
     if platform == "instagram":
         actor_id = ACTORS["instagram"]
         # Actor accepts a list — batch all hashtags in one run (cheaper than N runs)
-        tags = [re.sub(r"\s+", "", t.lstrip("#@")) for t in hashtags if t.strip()]
-        if not tags:
+        run_input = _ig_run_input(hashtags, max_results)
+        if run_input is None:
+            logger.warning("apify.instagram_no_valid_terms", terms=hashtags[:5])
             return []
-        run_input = {"hashtags": tags, "resultsType": "posts", "resultsLimit": max_results}
 
     elif platform == "twitter":
         actor_id = ACTORS["twitter"]
@@ -351,7 +390,7 @@ def fetch_platform_expanded(
 def fetch_platform(platform: str, term: str, max_results: int = 30,
                    window_days: int = 180, timeout_secs: int = 180,
                    page_urls: list[str] | None = None,
-                   lang_filter: str | None = None) -> list[dict]:
+                   lang_filter: str | None = "fr") -> list[dict]:
     """Run one platform Actor.
     Returns normalized posts filtered to the last `window_days`. Never raises."""
     # Twitter + LinkedIn use TinyFish search (Apify deferred)

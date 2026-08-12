@@ -29,6 +29,33 @@ def _strip_fences(raw: str) -> str:
     return s
 
 
+def _call_json(messages: list[dict], *, max_tokens: int, log_event: str, **log_ctx):
+    """call_pro + json.loads with ONE retry.
+
+    gemini-2.5-flash is a thinking model — reasoning tokens come out of the same
+    max_tokens budget, so a long prompt can leave too little room and the JSON
+    gets truncated mid-structure. That failed silently before: the caller logged
+    and returned, the Celery task still reported 'succeeded', and the PDF shipped
+    with an empty summary. Observed 2026-08-08 on the insight-rich KOLs
+    (ZALCMAN 40 / SCHERPEREEL 29 failed; PUJOL 10 was fine).
+    Returns the parsed dict, or None if both attempts fail.
+    """
+    for attempt in (1, 2):
+        try:
+            raw = call_pro(messages, max_tokens=max_tokens)
+        except Exception as exc:
+            logger.warning(f"{log_event}.llm_failed", attempt=attempt, exc=str(exc), **log_ctx)
+            if attempt == 2:
+                raise
+            continue
+        try:
+            return json.loads(_strip_fences(raw))
+        except json.JSONDecodeError:
+            logger.warning(f"{log_event}.json_parse_failed", attempt=attempt,
+                           raw=raw[:200], **log_ctx)
+    return None
+
+
 class ExtractorService:
     def extract(self, post_id: int, ctx: RunContext) -> dict:
         return asyncio.run(self._extract_async(post_id, ctx))
@@ -59,15 +86,11 @@ class ExtractorService:
         ]
 
         try:
-            raw = call_pro(messages)
+            parsed = _call_json(messages, max_tokens=8192,
+                                log_event="extractor", post_id=post_id)
         except Exception as exc:
-            logger.warning("extractor.llm_failed", post_id=post_id, exc=str(exc))
             return {"insights_saved": 0, "error": str(exc)}
-
-        try:
-            parsed = json.loads(_strip_fences(raw))
-        except json.JSONDecodeError:
-            logger.warning("extractor.json_parse_failed", post_id=post_id, raw=raw[:200])
+        if parsed is None:
             return {"insights_saved": 0, "error": "json_parse_failed"}
 
         meta = parsed.get("post_metadata", {})
@@ -149,7 +172,11 @@ class ExtractorService:
                 .where(ExtractedInsight.target_id == target_id)
                 .where(insight_not_ae())
                 .order_by(ExtractedInsight.extracted_at.desc())
-                .limit(50)
+                # 25, not 50: the prompt grows with this and the reply has to fit
+                # in max_tokens alongside the model's reasoning tokens. Bullets are
+                # capped well below 25 anyway, so the extra findings only crowded
+                # out the answer. See _call_json.
+                .limit(25)
             )
             insights = rows.scalars().all()
 
@@ -174,15 +201,11 @@ class ExtractorService:
         ]
 
         try:
-            raw = call_pro(messages, max_tokens=4096)
+            parsed = _call_json(messages, max_tokens=8192,
+                                log_event="summarise", target_id=target_id)
         except Exception as exc:
-            logger.warning("summarise.llm_failed", target_id=target_id, exc=str(exc))
             return {"error": str(exc)}
-
-        try:
-            parsed = json.loads(_strip_fences(raw))
-        except json.JSONDecodeError:
-            logger.warning("summarise.json_parse_failed", target_id=target_id, raw=raw[:200])
+        if parsed is None:
             return {"error": "json_parse_failed"}
 
         bullets = parsed.get("bullets", [])

@@ -331,7 +331,7 @@ export default function SettingsPage() {
             {/* Frequency toggle */}
             <Field label="Frequency">
               <div className="grid grid-cols-2 gap-2">
-                {(["weekly", "daily"] as const).map(f => (
+                {(["weekly", "monthly"] as const).map(f => (
                   <button key={f} type="button" onClick={() => set("cron_frequency", f)}
                     className={cn(
                       "py-2 rounded-lg text-sm font-medium border transition-colors",
@@ -339,7 +339,7 @@ export default function SettingsPage() {
                         ? "bg-pharma-blue text-white border-pharma-blue dark:bg-[#2563eb] dark:border-[#2563eb]"
                         : "border-gray-200 dark:border-[#1e3a5f] text-gray-500 dark:text-[#94a3b8] hover:border-pharma-light"
                     )}>
-                    {f === "weekly" ? "Weekly" : "Daily"}
+                    {f === "weekly" ? "Weekly" : "Monthly"}
                   </button>
                 ))}
               </div>
@@ -361,6 +361,19 @@ export default function SettingsPage() {
                     </button>
                   ))}
                 </div>
+              </Field>
+            )}
+
+            {/* Day of month — capped at 28 so every month has that day */}
+            {frequency === "monthly" && (
+              <Field label="Day of month">
+                <input type="number" min={1} max={28} value={form.cron_day_of_month ?? 1}
+                  onChange={e => set("cron_day_of_month",
+                    Math.min(28, Math.max(1, Number(e.target.value) || 1)))}
+                  className={input} />
+                <p className="text-xs text-gray-400 dark:text-[#64748b] mt-1">
+                  1–28, so the run never skips a short month.
+                </p>
               </Field>
             )}
 

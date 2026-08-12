@@ -70,6 +70,12 @@ if _settings.sentry_dsn:
 
 _DEFAULT_SECRET = "changeme-at-least-32-chars-long!!"
 
+# Standard reporting window for briefs, syntheses and dashboard stats (client
+# spec: reports and summaries default to the last 30 days). This is a *read*
+# window only — the scrape window (AppSettings.social_window_days) stays deeper
+# so widening a view costs nothing, the data is already there.
+BRIEF_WINDOW_DAYS = 30
+
 
 def _verify_secret_key() -> None:
     """Refuse to boot with a forgeable JWT key. The default is public (in the
@@ -201,17 +207,19 @@ async def _seed_defaults_locked(sess) -> None:
                 # French patient communities
                 "https://www.facebook.com/RespirEspoir",                    # Lung cancer France
                 "https://www.facebook.com/Cancer.Info.Service",
-                # Global pharma (for competitive intelligence)
-                "https://www.facebook.com/AstraZenecaGlobal",
-                "https://www.facebook.com/BristolMyersSquibb",
-                "https://www.facebook.com/merck",
-                "https://www.facebook.com/LillyOncology",
-                # Oncology congresses
+                # Oncology congresses — kept despite being international: a
+                # congress is definitionally global, and these pages are the
+                # source for the congress module.
                 "https://www.facebook.com/ASCO.org",
                 "https://www.facebook.com/esmo.oncology",
-                # WHO / global health
-                "https://www.facebook.com/WHO",
             ]
+            # Global pharma and WHO pages were removed from the seed on
+            # 2026-08-12: Facebook is the one platform where the source is
+            # chosen outright, so spending those slots on worldwide corporate
+            # feeds contradicted the France-first requirement. Competitors are
+            # tracked through their French affiliates instead (see
+            # services/fr_sources.FR_PHARMA). Add them back per-page in
+            # Settings if worldwide competitor coverage is wanted.
             s.facebook_page_urls = json.dumps(default_fb_pages)
             await sess.commit()
             logger.info("seeded_facebook_page_urls", count=len(default_fb_pages))
@@ -234,6 +242,11 @@ async def _seed_defaults_locked(sess) -> None:
                 "immunothérapie", "chimiothérapie", "essaiclinique",
                 "rechercheclinique", "rechercheencancérologie", "biomarqueurs",
                 "médecinepersonnalisée", "thérapieciblée", "oncologie",
+                # French clinical shorthand — CBNPC is what French oncologists
+                # write for NSCLC, so an English-only term list cannot reach them.
+                "CBNPC", "cancerbronchique", "oncologiethoracique",
+                "depistagepoumon", "therapieciblee", "soinsdesupport",
+                "survieglobale", "GustaveRoussy", "InstitutCurie", "IFCT",
                 # French patient communities
                 "luttecontrelecancer", "patientsexperts", "cancersurvivants",
                 "octobrerose", "marsbleu", "vaincrelecancer",
@@ -338,7 +351,7 @@ async def health():
 
 
 @app.get("/api/stats/topics")
-async def stats_topics(days: int = 7, disease_area: str | None = None):
+async def stats_topics(days: int = BRIEF_WINDOW_DAYS, disease_area: str | None = None):
     """Return top discussed topics and categories for the dashboard graphs."""
     import math
     from app.database import AsyncSessionLocal
@@ -502,11 +515,11 @@ def _brief_priority(s: str) -> str:
 
 @app.get("/api/stats/daily-brief")
 async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily_brief"))):
-    """Combined KOL + Social brief — 6-month data window. Cached 6h."""
+    """Combined KOL + Social brief — 30-day data window. Cached 6h."""
     import json as _json, re as _re
     from datetime import datetime, timezone, timedelta
 
-    _KEY = "combined_brief:v3"
+    _KEY = "combined_brief:v4"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -529,13 +542,13 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
-            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(ExtractedInsight.extracted_at >= window_start)
             .where(insight_not_ae())
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(60)
@@ -544,7 +557,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
 
         social_rows = await sess.execute(
             select(SocialPost)
-            .where(SocialPost.scraped_at >= six_months)
+            .where(SocialPost.scraped_at >= window_start)
             .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2))
             .limit(20)
@@ -570,7 +583,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
 
     prompt = (
         "You are a senior pharma intelligence analyst for Roche's oncology strategy team.\n\n"
-        "Below are real KOL statements and top social media posts from the last 6 months.\n"
+        "Below are real KOL statements and top social media posts from the last 30 days.\n"
         "Generate sharp, SPECIFIC intelligence points combining both KOL and social signals — "
         "exactly 3 to 5 points (never fewer than 3), the MOST important ones only.\n\n"
         "Rules:\n"
@@ -747,12 +760,12 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
 
 @app.get("/api/stats/social-brief")
 async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("social_brief"))):
-    """Sector-grouped social trends brief — 200 posts, 6-month window."""
+    """Sector-grouped social trends brief — 200 posts, 30-day window."""
     import json as _json, re as _re
     from datetime import datetime, timezone, timedelta
     from collections import defaultdict
 
-    _KEY = "social_brief:v3"
+    _KEY = "social_brief:v4"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -772,12 +785,12 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         rows = await sess.execute(
             select(SocialPost)
-            .where(SocialPost.scraped_at >= six_months)
+            .where(SocialPost.scraped_at >= window_start)
             .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2 + SocialPost.shares * 1.5))
             .limit(200)
@@ -815,7 +828,7 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
 
     prompt = (
         "You are a senior pharma social media intelligence analyst for Roche.\n\n"
-        f"Analyzed {len(posts)} posts from Instagram, X, LinkedIn, Facebook over 6 months.\n\n"
+        f"Analyzed {len(posts)} posts from Instagram, X, LinkedIn, Facebook over the last 30 days.\n\n"
         f"TOP TOPICS BY ENGAGEMENT:\n{topics_detail}\n\n"
         f"SAMPLE POSTS:\n{posts_sample}\n\n"
         "Generate a structured intelligence report organized into 4-5 SECTORS "
@@ -879,11 +892,11 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
 
 @app.get("/api/stats/kol-brief")
 async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_brief"))):
-    """KOL-only brief — 6-month insights window. Cached 6h."""
+    """KOL-only brief — 30-day insights window. Cached 6h."""
     import json as _json, re as _re
     from datetime import datetime, timezone, timedelta
 
-    _KEY = "kol_brief:v3"
+    _KEY = "kol_brief:v4"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -903,13 +916,13 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
-            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(ExtractedInsight.extracted_at >= window_start)
             .where(insight_not_ae())
             .where(Target.target_type == "kol")   # competitor content must NOT bleed into the KOL brief
             .order_by(desc(ExtractedInsight.extracted_at))
@@ -931,7 +944,7 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
 
     prompt = (
         "You are a senior pharma intelligence analyst for Roche's oncology strategy team.\n\n"
-        f"Below are {len(insights)} real KOL statements from the last 6 months.\n"
+        f"Below are {len(insights)} real KOL statements from the last 30 days.\n"
         "Generate sharp, SPECIFIC intelligence points based ONLY on what these KOLs said — "
         "exactly 3 to 5 points (never fewer than 3), the MOST important ones only.\n\n"
         "Rules:\n"
@@ -984,7 +997,7 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     import json as _json
     from datetime import datetime, timezone, timedelta
 
-    _KEY = "competitor_brief:v1"
+    _KEY = "competitor_brief:v2"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -1006,13 +1019,13 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
-            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(ExtractedInsight.extracted_at >= window_start)
             .where(insight_not_ae())
             .where(Target.target_type == "competitor")
             .order_by(desc(ExtractedInsight.extracted_at))
@@ -1038,7 +1051,7 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     prompt = (
         "You are a senior competitive-intelligence analyst for Roche's oncology strategy team.\n\n"
         f"Below are {len(insights)} statements/publications from monitored COMPETITOR accounts "
-        "(rival pharma companies) over the last 6 months.\n"
+        "(rival pharma companies) over the last 30 days.\n"
         "Generate sharp, SPECIFIC competitive-intelligence points — exactly 3 to 5 points "
         "(never fewer than 3), the MOST important ones only.\n\n"
         "Rules:\n"
@@ -1272,7 +1285,12 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
 
 _GEN_FEATURES = ["daily_brief", "kol_brief", "social_brief", "synthesis",
                  "comparison_brief", "social_synthesis", "discovery_synthesis",
-                 "competitor_brief", "global_synthesis"]
+                 "competitor_brief", "global_synthesis",
+                 # The three downloadable dashboard syntheses. Quota keys must
+                 # match the f"synthesis_{scope}" used in routers/reports.py.
+                 "synthesis_kol", "synthesis_competitor", "synthesis_comprehensive",
+                 # Ad-hoc Topic Explorer market-research report.
+                 "market_report"]
 
 
 @app.get("/api/me/gen-quota")

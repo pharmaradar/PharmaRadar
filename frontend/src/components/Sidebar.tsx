@@ -9,15 +9,17 @@ import { cn } from "@/lib/utils";
 
 const NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard"      },
-  { to: "/targets",   icon: Users,           label: "Targets"        },
   { to: "/competitors", icon: Building2,     label: "Competitors"    },
-  { to: "/reports",   icon: FileText,        label: "Reports"        },
+  { to: "/reports",   icon: FileText,        label: "KOL Report"     },
   { to: "/topics",    icon: Compass,         label: "Topic Explorer" },
   { to: "/burning-topics", icon: Zap,        label: "Burning Topics" },
   { to: "/social",    icon: Flame,           label: "Social Trends"  },
-  { to: "/history",   icon: History,         label: "Run History",    admin: true },
+  // Run History exposes raw pipeline internals and the destructive run-delete
+  // action, so it is superadmin-only rather than admin-only.
+  { to: "/history",   icon: History,         label: "Run History",    superadmin: true },
   { to: "/agent",     icon: Bot,             label: "Hermes AI"      },
   { to: "/users",     icon: ShieldCheck,     label: "Users",          admin: true },
+  { to: "/targets",   icon: Users,           label: "Targets"        },
   { to: "/settings",  icon: Settings,        label: "Settings",       admin: true },
 ];
 
@@ -27,7 +29,8 @@ export default function Sidebar() {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const isAdmin = user?.role === "admin";
-  const nav = NAV.filter((n) => !n.admin || isAdmin);
+  const isSuperadmin = !!user?.is_superadmin;
+  const nav = NAV.filter((n) => (!n.admin || isAdmin) && (!n.superadmin || isSuperadmin));
 
   return (
     <>

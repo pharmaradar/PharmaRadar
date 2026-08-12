@@ -40,6 +40,8 @@ celery_app = Celery(
         "app.tasks.maintenance",  # reap_stale_runs
         "app.tasks.social",       # social_scan (Apify)
         "app.tasks.burning_topics",  # generate_topic_report
+        "app.tasks.synthesis",       # dashboard KOL/competitor/comprehensive PDFs
+        "app.tasks.market_report",   # ad-hoc Topic Explorer market-research reports
     ],
 )
 
@@ -53,6 +55,8 @@ import app.tasks.scheduler       # noqa: E402,F401
 import app.tasks.maintenance     # noqa: E402,F401
 import app.tasks.social          # noqa: E402,F401
 import app.tasks.burning_topics  # noqa: E402,F401
+import app.tasks.synthesis       # noqa: E402,F401
+import app.tasks.market_report   # noqa: E402,F401
 
 celery_app.conf.update(
     task_serializer="json",
@@ -64,6 +68,17 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
+    # ── Redelivery after a worker dies mid-task ──────────────────────────
+    # With acks_late on a Redis broker, a task killed mid-flight stays UNACKED
+    # and only redelivers after visibility_timeout. Celery's default is 3600s —
+    # exactly the same as reap_stale_runs' threshold. But the reaper counts from
+    # RUN START while this counts from WORKER DEATH, and the worker always dies
+    # after the run began, so the reaper always won and stranded tasks could
+    # NEVER self-recover. (Cost 3 targets on 2026-08-08 when a Railway env-var
+    # change redeployed the workers mid-run.) 900s puts redelivery comfortably
+    # inside the reaper's window. task_reject_on_worker_lost only covers a dying
+    # CHILD under a live parent — it does nothing when the container is killed.
+    broker_transport_options={"visibility_timeout": 900},
     result_expires=3600,  # drop task results after 1h — no beat/UI consumes them after that; keeps Redis memory flat across the weekly burst
     # ── Hard guards against wedged tasks ────────────────────────────────
     # Soft limit raises SoftTimeLimitExceeded → task can cleanup / log.
@@ -105,8 +120,10 @@ celery_app.conf.update(
     },
     # Beat schedule
     beat_schedule={
-        "check-daily-run": {
-            "task": "app.tasks.scheduler.check_daily_run",
+        # Polls every minute and fires only when the configured weekly/monthly
+        # slot matches — the minute cadence is the poll, not the run cadence.
+        "check-scheduled-run": {
+            "task": "app.tasks.scheduler.check_scheduled_run",
             "schedule": crontab(minute="*"),
         },
         "check-social-scan": {

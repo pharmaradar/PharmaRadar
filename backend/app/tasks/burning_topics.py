@@ -249,10 +249,19 @@ def _scope_search_query(topic=None, congress=None) -> str:
 
 
 def _web_context(topic=None, exclusions: list[str] | None = None, congress=None) -> list[dict]:
-    """Run one best-effort TinyFish discovery search for the report scope."""
+    """Run one best-effort TinyFish discovery search for the report scope.
+
+    Burning topics are the client's own French-market topics, so their web
+    context is searched at the French locale. Congresses are the deliberate
+    exception: ASCO/ESMO/AACR are international events, and pinning them to
+    French sources returns nothing — the report would still be written and
+    marked done, just empty. See services/fr_sources.Scope.
+    """
     try:
+        from app.services.fr_sources import Scope
         from app.services.scraper import _tf_search_discovery
-        hits = _tf_search_discovery(_scope_search_query(topic, congress)) or []
+        scope = Scope.GLOBAL.value if congress is not None else Scope.FR.value
+        hits = _tf_search_discovery(_scope_search_query(topic, congress), scope=scope) or []
     except Exception as exc:
         logger.warning("report.tinyfish_failed", error=str(exc)[:200])
         return []

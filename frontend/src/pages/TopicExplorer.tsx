@@ -15,6 +15,7 @@ import { SynthesisPanel } from "@/components/SynthesisPanel";
 import { useGenQuota } from "@/hooks/useGenQuota";
 import { Flame, Heart } from "lucide-react";
 import EmergingVoices from "@/components/EmergingVoices";
+import MarketResearchReport from "@/components/MarketResearchReport";
 
 /* ─── constants ──────────────────────────────────────────── */
 
@@ -74,7 +75,7 @@ export default function TopicExplorer() {
   const [active, setActive]           = useState<DiscoveryResult | null>(null);
   const [describeResult, setDescribe] = useState<DiscoveryResult | null>(null);
   const [deepOpen, setDeepOpen]       = useState(false);
-  const [langFilter, setLangFilter]   = useState("all");
+  const [langFilter, setLangFilter]   = useState("fr");
   const [fromDate, setFromDate]       = useState("");
   const [toDate, setToDate]           = useState("");
 
@@ -192,7 +193,7 @@ export default function TopicExplorer() {
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input value={query} onChange={e => setQuery(e.target.value)}
               onKeyDown={e => e.key === "Enter" && run()}
-              placeholder="Drug, congress, KOL, trial…"
+              placeholder="Ask a question — e.g. What do doctors think about subcutaneous therapies in lung cancer?"
               className="w-full h-9 pl-8 pr-3 rounded-lg border border-gray-200 dark:border-[#1e3a5f] bg-gray-50 dark:bg-[#111827] text-sm text-gray-900 dark:text-[#e2e8f0] focus:outline-none focus:ring-2 focus:ring-pharma-blue/20 focus:border-pharma-blue transition-all" />
           </div>
           <button onClick={() => run()} disabled={isLoading || !query.trim()}
@@ -362,6 +363,12 @@ export default function TopicExplorer() {
             <div className="p-4 space-y-6">
 
               {/* ── AI synthesis / takeaway ── */}
+              <MarketResearchReport
+                question={submitted}
+                windowDays={30}
+                lang={langFilter}
+              />
+
               <SynthesisPanel
                 takeaway={synth?.takeaway}
                 takeawayLabel="What's happening"

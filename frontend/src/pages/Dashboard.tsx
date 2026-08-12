@@ -9,8 +9,7 @@ import { api, type Insight, type DailyBriefPoint } from "@/lib/api";
 import { formatDateTime, SENTIMENT_COLORS, cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
 import { useAuthStore } from "@/store/auth";
-import SocialTrendsSummary from "./SocialTrendsSummary";
-import { SynthesisPanel } from "@/components/SynthesisPanel";
+import SynthesisExports from "@/components/SynthesisExports";
 import { useGenQuota } from "@/hooks/useGenQuota";
 
 const PIE_COLORS = ["#0066cc", "#0ea5e9", "#14b8a6", "#f59e0b", "#6366f1", "#8b5cf6", "#ec4899", "#f43f5e"];
@@ -45,7 +44,7 @@ export default function Dashboard() {
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
   const authUser = useAuthStore((s) => s.user);
   const greetName = authUser?.name?.trim() || authUser?.email?.split("@")[0] || "there";
-  const [period, setPeriod] = useState(7);
+  const [period, setPeriod] = useState(30);
 
   const { data: stats } = useQuery({ queryKey: ["stats"], queryFn: api.stats, refetchInterval: 10_000 });
   const { data: currentRun } = useQuery({
@@ -155,13 +154,6 @@ export default function Dashboard() {
     mutationFn: () => api.socialBrief(true),
     onSuccess: (data) => { qc.setQueryData(["social-brief"], data); qc.invalidateQueries({ queryKey: ["gen-quota"] }); },
   });
-
-  // On-demand AI synthesis over the WHOLE DB (KOL + social) — always produces output
-  const synthMut = useMutation({
-    mutationFn: (refresh: boolean) => api.combinedSynthesis(refresh),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["gen-quota"] }),
-  });
-  const synth = synthMut.data;
 
   // Competitor brief — same mechanism as the KOL brief, competitor targets only
   const { data: compBrief, isLoading: compBriefLoading } = useQuery({
@@ -293,14 +285,132 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Intelligence Analytics */}
+      {/* Downloadable syntheses — client asked for these at the very top */}
+      <SynthesisExports />
+
+      {/* Global Synthesis — KOL + population + burning topics in one report */}
+      <div className="glass rounded-xl p-5">
+        <div className={cn("flex items-center justify-between", openBriefs.global && "mb-4")}
+          onClick={() => toggleBrief("global")}>
+          <div className="flex items-center gap-2 cursor-pointer">
+            {openBriefs.global ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
+            <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
+              <Sparkles size={16} className="text-purple-600 dark:text-purple-400"/>
+            </div>
+            <div>
+              <h2 className="font-semibold text-sm">Global Synthesis</h2>
+              <p className="text-xs text-gray-400">
+                Last 30 days — merges the KOL brief, all-population brief and burning-topic reports
+                {gs?.generated_at ? ` — last generated ${formatDateTime(gs.generated_at)}` : ""}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            {gs?.pdf_url && (
+              <button onClick={() => api.reports.openPdf(gs.pdf_url!).catch(() => alert("PDF not available"))}
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-purple-300 dark:border-purple-800 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors">
+                <FileText size={11}/> PDF
+              </button>
+            )}
+            {canGen("global_synthesis") && (
+              <button onClick={() => { setOpenBriefs(s => ({ ...s, global: true })); globalSynthMut.mutate(); }} disabled={gsRunning}
+                title="Generate (1 per day)"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-purple-300 dark:border-purple-800 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-50 transition-colors">
+                {gsRunning ? <Loader2 size={11} className="animate-spin"/> : <Sparkles size={11}/>}
+                {gsRunning ? "Generating…" : gs ? "Regenerate" : "Generate"}
+              </button>
+            )}
+          </div>
+        </div>
+        {openBriefs.global && (
+          gsRunning && !gs ? (
+            <div className="flex items-center gap-2 text-sm text-gray-400">
+              <Loader2 size={14} className="animate-spin"/>Merging the three report layers…
+            </div>
+          ) : globalSynth?.status === "failed" && !gs ? (
+            <p className="text-xs text-red-400">Error: {globalSynth.error || "generation failed"}</p>
+          ) : gs ? (
+            <div className="space-y-4">
+              {gsRunning && (
+                <div className="flex items-center gap-2 text-xs text-purple-500">
+                  <Loader2 size={12} className="animate-spin"/>A fresh synthesis is generating — showing the previous one meanwhile.
+                </div>
+              )}
+              {gs.exec_summary && (
+                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap leading-relaxed">{gs.exec_summary}</p>
+              )}
+              <div className="grid md:grid-cols-3 gap-3">
+                {([
+                  ["KOL takeaways", gs.kol_takeaways],
+                  ["All-population takeaways", gs.population_takeaways],
+                  ["Burning-topic takeaways", gs.topic_takeaways],
+                ] as const).map(([label, items]) => (
+                  <div key={label} className="rounded-lg border border-slate-200/60 dark:border-white/10 p-3">
+                    <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">{label}</div>
+                    {items.length > 0 ? (
+                      <ul className="space-y-1">
+                        {items.map((t, i) => (
+                          <li key={i} className="text-xs text-gray-600 dark:text-gray-300 flex gap-1.5">
+                            <span className="text-purple-400 shrink-0">•</span>{t}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-gray-400">No data this period.</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {gs.so_what && (
+                <div className="rounded-lg bg-purple-50/60 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-900/30 px-4 py-3">
+                  <div className="text-[10px] font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider mb-1">So what</div>
+                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap">{gs.so_what}</p>
+                </div>
+              )}
+              {(gs.recommendations?.length ?? 0) > 0 && (
+                <div className="rounded-lg bg-emerald-50/60 dark:bg-emerald-900/10 border border-emerald-100 dark:border-emerald-900/30 px-4 py-3">
+                  <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300 uppercase tracking-wider mb-1.5">Recommendations</div>
+                  <ul className="space-y-1">
+                    {gs.recommendations!.map((t, i) => (
+                      <li key={i} className="text-sm text-gray-700 dark:text-[#e2e8f0] flex gap-1.5">
+                        <span className="text-emerald-500 shrink-0">•</span>{t}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {gs.important_posts.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Important posts</div>
+                  {gs.important_posts.map((p, i) => (
+                    <a key={i} href={p.url} target="_blank" rel="noreferrer"
+                      className="block text-xs text-gray-600 dark:text-gray-300 hover:text-purple-600 truncate">
+                      <ExternalLink size={10} className="inline mr-1 text-gray-300"/>
+                      {(p.title || p.url)}{p.why ? ` — ${p.why}` : ""}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-400">
+              Generates one merged synthesis from the latest KOL brief, all-population brief and every
+              active burning topic's latest report. Generate those first for the richest result.
+            </p>
+          )
+        )}
+      </div>
+
+
+
+      {/* KOL Dashboard (charts over KOL insights) */}
       <div className="glass rounded-xl">
         <div className="flex flex-wrap items-center justify-between gap-2 px-6 pt-6 pb-4 border-b border-slate-200/50 dark:border-slate-800/50">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg">
               <BarChart2 size={18} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
             </div>
-            <h2 className="font-semibold text-sm whitespace-nowrap">Intelligence Analytics</h2>
+            <h2 className="font-semibold text-sm whitespace-nowrap">KOL Dashboard</h2>
           </div>
           <div className="flex gap-1">
             {PERIOD_OPTIONS.map((o) => (
@@ -488,7 +598,119 @@ export default function Dashboard() {
       </div>
 
       {/* Social trending analytics (compact) → full page at /social */}
-      <SocialTrendsSummary />
+
+      {/* KOL Intelligence Brief */}
+      <div className="glass rounded-xl p-5">
+        <div className={cn("flex items-center justify-between", openBriefs.kol && "mb-4")}
+          onClick={() => toggleBrief("kol")}>
+          <div className="flex items-center gap-2 cursor-pointer">
+            {openBriefs.kol ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
+            <div className="p-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+              <Users size={16} className="text-blue-600 dark:text-blue-400"/>
+            </div>
+            <div>
+              <h2 className="font-semibold text-sm">KOL Intelligence Brief</h2>
+              <p className="text-xs text-gray-400">Key insights from monitored KOL statements — last 6 months</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            {kolBrief && kolBrief.kol_count > 0 && (
+              <span className="text-[10px] text-gray-400">{kolBrief.kol_count} insights analysed</span>
+            )}
+            {canGen("kol_brief") && (
+              <button onClick={() => kolBriefMut.mutate()} disabled={kolBriefMut.isPending || kolBriefLoading}
+                title="Regenerate (1 per day)"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-blue-300 dark:border-blue-800 text-blue-600 dark:text-blue-400 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50 transition-colors">
+                {kolBriefMut.isPending ? <Loader2 size={11} className="animate-spin"/> : <RefreshCw size={11}/>}
+                Regenerate
+              </button>
+            )}
+          </div>
+        </div>
+        {openBriefs.kol && (kolBriefLoading || kolBriefMut.isPending ? (
+          <div className="flex items-center gap-2 text-sm text-gray-400">
+            <Loader2 size={14} className="animate-spin"/>Analysing KOL insights…
+          </div>
+        ) : kolBrief && kolBrief.points.length > 0 ? (
+          <div className="space-y-2">
+            {kolBrief.points.map((p, i) => (
+              <button key={i} onClick={() => setSelectedPoint(p.text)}
+                className={cn(
+                  "w-full text-left flex items-start gap-3 p-3 rounded-xl border transition-all group cursor-pointer hover:shadow-sm",
+                  p.priority === "high"
+                    ? "bg-amber-50/60 dark:bg-amber-900/10 border-amber-200/60 dark:border-amber-800/20 hover:border-amber-400/50"
+                    : "bg-gray-50/60 dark:bg-[#0d1424]/40 border-slate-200/50 dark:border-white/5 hover:border-blue-300/50"
+                )}>
+                <span className={cn("w-1.5 h-1.5 rounded-full mt-1.5 shrink-0", p.priority === "high" ? "bg-amber-500" : "bg-blue-400")}/>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
+                  <span className="text-[10px] font-semibold mt-0.5 inline-block text-blue-500">KOL insight</span>
+                </div>
+                <ChevronRight size={14} className="text-gray-300 group-hover:text-blue-500 shrink-0 mt-0.5 transition-colors"/>
+              </button>
+            ))}
+          </div>
+        ) : kolBrief?.error ? (
+          <p className="text-xs text-red-400">Error: {kolBrief.error}</p>
+        ) : (
+          <p className="text-sm text-gray-400">
+            {kolBrief && kolBrief.kol_count > 0 ? "Click Generate to create KOL brief." : "No KOL insights yet — run a pipeline first."}
+          </p>
+        ))}
+      </div>
+
+
+      {/* Competitor Intelligence Brief */}
+      <div className="glass rounded-xl p-5">
+        <div className={cn("flex items-center justify-between", openBriefs.competitor && "mb-4")}
+          onClick={() => toggleBrief("competitor")}>
+          <div className="flex items-center gap-2 cursor-pointer">
+            {openBriefs.competitor ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
+            <div className="p-2 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
+              <BarChart2 size={16} className="text-orange-600 dark:text-orange-400"/>
+            </div>
+            <div>
+              <h2 className="font-semibold text-sm">Competitor Brief</h2>
+              <p className="text-xs text-gray-400">What rival companies are launching and signalling — last 6 months</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+            {compBrief && compBrief.kol_count > 0 && (
+              <span className="text-[10px] text-gray-400">{compBrief.kol_count} publications analysed</span>
+            )}
+            {canGen("competitor_brief") && (
+              <button onClick={() => compBriefMut.mutate()} disabled={compBriefMut.isPending || compBriefLoading}
+                title="Regenerate (1 per day)"
+                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-orange-300 dark:border-orange-800 text-orange-600 dark:text-orange-400 rounded-lg hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-50 transition-colors">
+                {compBriefMut.isPending ? <Loader2 size={11} className="animate-spin"/> : <RefreshCw size={11}/>}
+                Regenerate
+              </button>
+            )}
+          </div>
+        </div>
+        {openBriefs.competitor && (compBriefLoading || compBriefMut.isPending ? (
+          <div className="flex items-center gap-2 text-sm text-gray-400">
+            <Loader2 size={14} className="animate-spin"/>Analysing competitor content…
+          </div>
+        ) : compBrief && compBrief.points.length > 0 ? (
+          <div className="space-y-2">
+            {compBrief.points.map((p, i) => (
+              <div key={i} className="flex items-start gap-3 p-3 rounded-xl border bg-orange-50/40 dark:bg-orange-900/5 border-orange-200/50 dark:border-orange-800/20">
+                <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 bg-orange-500"/>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
+                  <span className="text-[10px] font-semibold mt-0.5 inline-block text-orange-500">Competitor signal</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-gray-400">
+            {compBrief?.error || "No competitor content yet — add competitor targets and run a scrape."}
+          </p>
+        ))}
+      </div>
+
 
       {/* Daily Brief */}
       <div className="glass rounded-xl p-5">
@@ -500,8 +722,8 @@ export default function Dashboard() {
               <Sparkles size={16} className="text-amber-600 dark:text-amber-400"/>
             </div>
             <div>
-              <h2 className="font-semibold text-sm">Today's Intelligence Brief</h2>
-              <p className="text-xs text-gray-400">AI-generated key takeaways from KOL monitoring + social trends</p>
+              <h2 className="font-semibold text-sm">Intelligence Brief</h2>
+              <p className="text-xs text-gray-400">Last 30 days — AI takeaways from KOL monitoring + social trends</p>
             </div>
           </div>
           <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
@@ -556,40 +778,6 @@ export default function Dashboard() {
         ))}
       </div>
 
-      {/* AI Synthesis & takeaway — whole-DB (KOL + social) */}
-      <SynthesisPanel
-        collapsible
-        defaultCollapsed
-        accent="orange"
-        takeaway={synth?.takeaway}
-        takeawayLabel="What's happening"
-        soWhat={synth?.so_what}
-        conclusion={synth?.conclusion}
-        conclusionLabel="The bottom line"
-        generatedAt={synth?.generated_at}
-        cached={synth?.cached}
-        error={synth?.error}
-        isLoading={synthMut.isPending}
-        isError={synthMut.isError}
-        hasRun={!!synth}
-        canRegenerate={canGen("synthesis")}
-        onGenerate={() => synthMut.mutate(!!synth)}
-        picks={synth?.focus && synth.focus.length > 0 ? (
-          <div>
-            <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-2">
-              <Sparkles size={11} className="text-orange-500" /> What to focus on
-            </p>
-            <ul className="space-y-1.5">
-              {synth.focus.map((f, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-gray-700 dark:text-[#e2e8f0]">
-                  <span className="w-1.5 h-1.5 rounded-full bg-orange-500 mt-1.5 shrink-0" />
-                  <span>{f}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : undefined}
-      />
 
       {/* Social Trends Brief */}
       <div className="glass rounded-xl p-5">
@@ -667,218 +855,6 @@ export default function Dashboard() {
           </p>
         )}
         </>)}
-      </div>
-
-      {/* KOL Intelligence Brief */}
-      <div className="glass rounded-xl p-5">
-        <div className={cn("flex items-center justify-between", openBriefs.kol && "mb-4")}
-          onClick={() => toggleBrief("kol")}>
-          <div className="flex items-center gap-2 cursor-pointer">
-            {openBriefs.kol ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
-            <div className="p-2 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-              <Users size={16} className="text-blue-600 dark:text-blue-400"/>
-            </div>
-            <div>
-              <h2 className="font-semibold text-sm">KOL Intelligence Brief</h2>
-              <p className="text-xs text-gray-400">Key insights from monitored KOL statements — last 6 months</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
-            {kolBrief && kolBrief.kol_count > 0 && (
-              <span className="text-[10px] text-gray-400">{kolBrief.kol_count} insights analysed</span>
-            )}
-            {canGen("kol_brief") && (
-              <button onClick={() => kolBriefMut.mutate()} disabled={kolBriefMut.isPending || kolBriefLoading}
-                title="Regenerate (1 per day)"
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-blue-300 dark:border-blue-800 text-blue-600 dark:text-blue-400 rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 disabled:opacity-50 transition-colors">
-                {kolBriefMut.isPending ? <Loader2 size={11} className="animate-spin"/> : <RefreshCw size={11}/>}
-                Regenerate
-              </button>
-            )}
-          </div>
-        </div>
-        {openBriefs.kol && (kolBriefLoading || kolBriefMut.isPending ? (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <Loader2 size={14} className="animate-spin"/>Analysing KOL insights…
-          </div>
-        ) : kolBrief && kolBrief.points.length > 0 ? (
-          <div className="space-y-2">
-            {kolBrief.points.map((p, i) => (
-              <button key={i} onClick={() => setSelectedPoint(p.text)}
-                className={cn(
-                  "w-full text-left flex items-start gap-3 p-3 rounded-xl border transition-all group cursor-pointer hover:shadow-sm",
-                  p.priority === "high"
-                    ? "bg-amber-50/60 dark:bg-amber-900/10 border-amber-200/60 dark:border-amber-800/20 hover:border-amber-400/50"
-                    : "bg-gray-50/60 dark:bg-[#0d1424]/40 border-slate-200/50 dark:border-white/5 hover:border-blue-300/50"
-                )}>
-                <span className={cn("w-1.5 h-1.5 rounded-full mt-1.5 shrink-0", p.priority === "high" ? "bg-amber-500" : "bg-blue-400")}/>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
-                  <span className="text-[10px] font-semibold mt-0.5 inline-block text-blue-500">KOL insight</span>
-                </div>
-                <ChevronRight size={14} className="text-gray-300 group-hover:text-blue-500 shrink-0 mt-0.5 transition-colors"/>
-              </button>
-            ))}
-          </div>
-        ) : kolBrief?.error ? (
-          <p className="text-xs text-red-400">Error: {kolBrief.error}</p>
-        ) : (
-          <p className="text-sm text-gray-400">
-            {kolBrief && kolBrief.kol_count > 0 ? "Click Generate to create KOL brief." : "No KOL insights yet — run a pipeline first."}
-          </p>
-        ))}
-      </div>
-
-      {/* Competitor Intelligence Brief */}
-      <div className="glass rounded-xl p-5">
-        <div className={cn("flex items-center justify-between", openBriefs.competitor && "mb-4")}
-          onClick={() => toggleBrief("competitor")}>
-          <div className="flex items-center gap-2 cursor-pointer">
-            {openBriefs.competitor ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
-            <div className="p-2 bg-orange-50 dark:bg-orange-900/20 rounded-lg">
-              <BarChart2 size={16} className="text-orange-600 dark:text-orange-400"/>
-            </div>
-            <div>
-              <h2 className="font-semibold text-sm">Competitor Brief</h2>
-              <p className="text-xs text-gray-400">What rival companies are launching and signalling — last 6 months</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
-            {compBrief && compBrief.kol_count > 0 && (
-              <span className="text-[10px] text-gray-400">{compBrief.kol_count} publications analysed</span>
-            )}
-            {canGen("competitor_brief") && (
-              <button onClick={() => compBriefMut.mutate()} disabled={compBriefMut.isPending || compBriefLoading}
-                title="Regenerate (1 per day)"
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-orange-300 dark:border-orange-800 text-orange-600 dark:text-orange-400 rounded-lg hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-50 transition-colors">
-                {compBriefMut.isPending ? <Loader2 size={11} className="animate-spin"/> : <RefreshCw size={11}/>}
-                Regenerate
-              </button>
-            )}
-          </div>
-        </div>
-        {openBriefs.competitor && (compBriefLoading || compBriefMut.isPending ? (
-          <div className="flex items-center gap-2 text-sm text-gray-400">
-            <Loader2 size={14} className="animate-spin"/>Analysing competitor content…
-          </div>
-        ) : compBrief && compBrief.points.length > 0 ? (
-          <div className="space-y-2">
-            {compBrief.points.map((p, i) => (
-              <div key={i} className="flex items-start gap-3 p-3 rounded-xl border bg-orange-50/40 dark:bg-orange-900/5 border-orange-200/50 dark:border-orange-800/20">
-                <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 bg-orange-500"/>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
-                  <span className="text-[10px] font-semibold mt-0.5 inline-block text-orange-500">Competitor signal</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="text-sm text-gray-400">
-            {compBrief?.error || "No competitor content yet — add competitor targets and run a scrape."}
-          </p>
-        ))}
-      </div>
-
-      {/* Global Synthesis — KOL + population + burning topics in one report */}
-      <div className="glass rounded-xl p-5">
-        <div className={cn("flex items-center justify-between", openBriefs.global && "mb-4")}
-          onClick={() => toggleBrief("global")}>
-          <div className="flex items-center gap-2 cursor-pointer">
-            {openBriefs.global ? <ChevronDown size={15} className="text-gray-400 shrink-0"/> : <ChevronRight size={15} className="text-gray-400 shrink-0"/>}
-            <div className="p-2 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
-              <Sparkles size={16} className="text-purple-600 dark:text-purple-400"/>
-            </div>
-            <div>
-              <h2 className="font-semibold text-sm">Global Synthesis</h2>
-              <p className="text-xs text-gray-400">
-                One report merging the KOL brief, all-population brief and burning-topic reports
-                {gs?.generated_at ? ` — last generated ${formatDateTime(gs.generated_at)}` : ""}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
-            {gs?.pdf_url && (
-              <button onClick={() => api.reports.openPdf(gs.pdf_url!).catch(() => alert("PDF not available"))}
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-purple-300 dark:border-purple-800 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors">
-                <FileText size={11}/> PDF
-              </button>
-            )}
-            {canGen("global_synthesis") && (
-              <button onClick={() => { setOpenBriefs(s => ({ ...s, global: true })); globalSynthMut.mutate(); }} disabled={gsRunning}
-                title="Generate (1 per day)"
-                className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-purple-300 dark:border-purple-800 text-purple-600 dark:text-purple-400 rounded-lg hover:bg-purple-50 dark:hover:bg-purple-900/20 disabled:opacity-50 transition-colors">
-                {gsRunning ? <Loader2 size={11} className="animate-spin"/> : <Sparkles size={11}/>}
-                {gsRunning ? "Generating…" : gs ? "Regenerate" : "Generate"}
-              </button>
-            )}
-          </div>
-        </div>
-        {openBriefs.global && (
-          gsRunning && !gs ? (
-            <div className="flex items-center gap-2 text-sm text-gray-400">
-              <Loader2 size={14} className="animate-spin"/>Merging the three report layers…
-            </div>
-          ) : globalSynth?.status === "failed" && !gs ? (
-            <p className="text-xs text-red-400">Error: {globalSynth.error || "generation failed"}</p>
-          ) : gs ? (
-            <div className="space-y-4">
-              {gsRunning && (
-                <div className="flex items-center gap-2 text-xs text-purple-500">
-                  <Loader2 size={12} className="animate-spin"/>A fresh synthesis is generating — showing the previous one meanwhile.
-                </div>
-              )}
-              {gs.exec_summary && (
-                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap leading-relaxed">{gs.exec_summary}</p>
-              )}
-              <div className="grid md:grid-cols-3 gap-3">
-                {([
-                  ["KOL takeaways", gs.kol_takeaways],
-                  ["All-population takeaways", gs.population_takeaways],
-                  ["Burning-topic takeaways", gs.topic_takeaways],
-                ] as const).map(([label, items]) => (
-                  <div key={label} className="rounded-lg border border-slate-200/60 dark:border-white/10 p-3">
-                    <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-1.5">{label}</div>
-                    {items.length > 0 ? (
-                      <ul className="space-y-1">
-                        {items.map((t, i) => (
-                          <li key={i} className="text-xs text-gray-600 dark:text-gray-300 flex gap-1.5">
-                            <span className="text-purple-400 shrink-0">•</span>{t}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-xs text-gray-400">No data this period.</p>
-                    )}
-                  </div>
-                ))}
-              </div>
-              {gs.so_what && (
-                <div className="rounded-lg bg-purple-50/60 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-900/30 px-4 py-3">
-                  <div className="text-[10px] font-semibold text-purple-700 dark:text-purple-300 uppercase tracking-wider mb-1">So what</div>
-                  <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap">{gs.so_what}</p>
-                </div>
-              )}
-              {gs.important_posts.length > 0 && (
-                <div className="space-y-1.5">
-                  <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Important posts</div>
-                  {gs.important_posts.map((p, i) => (
-                    <a key={i} href={p.url} target="_blank" rel="noreferrer"
-                      className="block text-xs text-gray-600 dark:text-gray-300 hover:text-purple-600 truncate">
-                      <ExternalLink size={10} className="inline mr-1 text-gray-300"/>
-                      {(p.title || p.url)}{p.why ? ` — ${p.why}` : ""}
-                    </a>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : (
-            <p className="text-sm text-gray-400">
-              Generates one merged synthesis from the latest KOL brief, all-population brief and every
-              active burning topic's latest report. Generate those first for the richest result.
-            </p>
-          )
-        )}
       </div>
 
 

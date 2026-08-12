@@ -60,7 +60,7 @@ def scrape_target(self, target_id: int, run_id: int, idempotency_key: str) -> di
         # All targets run in parallel under the chord+group; clearing it would race
         # with other still-running workers and make the dashboard show "initialising..."
         # while targets are actively being scraped. The final clear happens in
-        # _mark_run_finished (generate_daily_summary_pdf) when the run truly ends.
+        # _mark_run_finished (generate_run_summary_pdf) when the run truly ends.
         patch_run(run_id, **{"+new_posts_found": new_posts, "+targets_processed": 1})
 
         # Register for Wave 2 if no posts found in Wave 1
@@ -166,7 +166,7 @@ def wave2_rescue(self, run_id: int) -> dict:
             log.info("wave2.rescued", target_id=target_id, posts=rescued)
 
         # Chain summary → pdf and wait (max 3 min). If it takes longer, skip and
-        # move on so the daily summary isn't blocked indefinitely.
+        # move on so the run summary isn't blocked indefinitely.
         try:
             from celery import chain as _chain
             from celery.exceptions import TimeoutError as CeleryTimeout

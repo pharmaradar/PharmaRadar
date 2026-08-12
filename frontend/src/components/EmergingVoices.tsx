@@ -61,7 +61,7 @@ function VoiceRow({ voice }: { voice: EmergingVoice }) {
 /** Emerging voices: authors active on our topics who are NOT tracked targets.
  *  Pure re-presentation of already-collected post data — no scraping, no LLM. */
 export default function EmergingVoices({ query }: { query?: string }) {
-  const [days, setDays] = useState(90);
+  const [days, setDays] = useState(30);
   const [platform, setPlatform] = useState("all");
 
   const { data, isLoading } = useQuery({

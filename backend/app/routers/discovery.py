@@ -1,6 +1,7 @@
 """Discovery — real-time TinyFish search + DB cache."""
 import asyncio
 import hashlib
+import json
 import re
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -15,6 +16,14 @@ from app.database import get_db
 from app.models.discovery_result import DiscoveryResult
 from app.models import SearchHistory, User
 from app.auth import get_current_user, enforce_daily_generation
+from app.services.lang import detect_lang as _detect_lang
+from app.services.fr_sources import (
+    Scope,
+    fr_site_groups,
+    is_french_source,
+    localize_platform,
+    normalize_host,
+)
 
 router = APIRouter(prefix="/api/discovery", tags=["discovery"])
 
@@ -205,17 +214,6 @@ def _extract_og_image(html: str) -> str | None:
     return None
 
 
-def _detect_lang(text: str) -> str:
-    if not text or len(text) < 20:
-        return "en"
-    lower = text.lower()[:1000]
-    fr_signals = [" de ", " du ", " le ", " la ", " les ", " des ", " et ",
-                  " en ", " une ", " pour ", " avec ", " dans ", " sur ",
-                  " est ", " sont ", " nous ", " vous ", " ils ", " au ",
-                  "qu'", " l'", " d'", " n'"]
-    return "fr" if sum(1 for w in fr_signals if w in lower) >= 4 else "en"
-
-
 def _to_out(r: DiscoveryResult, from_cache: bool) -> dict:
     return {
         "id": r.id,
@@ -249,43 +247,79 @@ class FetchRequest(BaseModel):
 
 
 def _localize(q: str, lang: str | None) -> str:
-    """Append geographic/language hints to a search query."""
+    """Append a geographic hint to a search query.
+
+    This used to emit ``(site:.fr OR France OR français)``. That disjunction is
+    satisfied by any page merely *containing* the word "France", so it was a
+    content test dressed as a source test — the exact thing the client rejected —
+    and it measurably destroyed the scoping. Measured 2026-08-11 on TinyFish:
+
+        "immunothérapie cancer du poumon (site:.fr OR France OR français)"  3/10 .fr
+        "immunothérapie cancer du poumon site:.fr"                         10/10 .fr
+
+    The French scope now relies on a hard ``site:.fr`` plus the CLI's
+    ``--location France --language fr`` flags, with registry-scoped variants
+    emitted separately by _variant_queries / _deep_queries.
+    """
     if not lang or lang == "all":
         return q
     if lang == "fr":
-        # French TLD restriction + French-language keyword bias
-        return f"{q} (site:.fr OR France OR français)"
+        return f"{q} site:.fr"
     if lang == "en":
         return f"{q} -site:.fr -site:.de -site:.it -site:.es"
     return q
 
 
 def _variant_queries(query: str, lang: str | None = "fr") -> list[str]:
-    """Standard search variants — 5 queries for regular search."""
+    """Standard search variants — 5 queries for regular search.
+
+    Under the French scope, platform variants use the French locale
+    (fr.linkedin.com) and two slots are given to the curated French source
+    registry. Only the unscoped slots get `_localize`: appending `site:.fr` to a
+    query that already carries `site:linkedin.com` yields two contradictory
+    scopes and returns nothing.
+    """
     q = query.strip()
-    base = [
-        q,
-        f"{q} site:linkedin.com",
+    fr = lang == "fr"
+    linkedin = localize_platform("linkedin.com") if fr else "linkedin.com"
+    scoped = [
+        f"{q} site:{linkedin}",
         f"{q} site:twitter.com OR site:x.com",
+    ]
+    if fr:
+        # Registry-pinned slots — these can only return French sources.
+        scoped += [f"{q} {group}" for group in fr_site_groups()[:2]]
+    unscoped = [
+        q,
         f"{q} 2025 2024 news",
         f"{q} clinical trial research study",
     ]
-    return [_localize(v, lang) for v in base]
+    return [_localize(v, lang) for v in unscoped] + scoped
 
 
 def _deep_queries(query: str, lang: str | None = "fr") -> list[str]:
-    """Comprehensive query list for deep search — covers all platforms and angles."""
+    """Comprehensive query list for deep search — covers all platforms and angles.
+
+    Same split as _variant_queries: `_localize` applies only to the unscoped
+    slots, while platform and registry slots carry their own `site:` scope.
+    """
     q = query.strip()
-    base = [
-        q,
-        f"{q} 2025",
-        f"{q} 2024",
-        f"{q} 2023",
-        f"{q} site:linkedin.com",
+    fr = lang == "fr"
+    linkedin = localize_platform("linkedin.com") if fr else "linkedin.com"
+    scoped = [
+        f"{q} site:{linkedin}",
         f"{q} site:twitter.com",
         f"{q} site:youtube.com",
         f"{q} site:pubmed.ncbi.nlm.nih.gov",
         f"{q} site:researchgate.net",
+    ]
+    if fr:
+        scoped += [f"{q} {group}" for group in fr_site_groups()]
+    unscoped = [
+        q,
+        f"{q} 2025",
+        f"{q} 2024",
+        f"{q} 2023",
         f"{q} news article",
         f"{q} clinical trial results",
         f"{q} conference presentation ASCO ESMO",
@@ -293,7 +327,7 @@ def _deep_queries(query: str, lang: str | None = "fr") -> list[str]:
         f"{q} latest update",
         f"{q} discussion forum",
     ]
-    return [_localize(v, lang) for v in base]
+    return [_localize(v, lang) for v in unscoped] + scoped
 
 
 async def _save_hit(db, query: str, hit: dict, seen_urls: set) -> dict | None:
@@ -323,6 +357,8 @@ async def _save_hit(db, query: str, hit: dict, seen_urls: set) -> dict | None:
         media_type=media_type,
         thumbnail_url=thumbnail_url,
         language=_detect_lang((hit.get("title") or "") + " " + (hit.get("snippet") or "")),
+        domain=normalize_host(url),
+        source_scope=Scope.FR.value if is_french_source(url) else Scope.GLOBAL.value,
     )
     db.add(row)
     try:
@@ -369,7 +405,8 @@ async def search(body: SearchRequest, db: AsyncSession = Depends(get_db),
 
     results: list[dict] = []
     seen_urls: set = set()
-    queries = _variant_queries(query, body.lang or "fr")
+    scope = body.lang or "fr"
+    queries = _variant_queries(query, scope)
     loop = asyncio.get_event_loop()
 
     # Run primary query first, then variants until we hit MAX_RESULTS
@@ -378,7 +415,9 @@ async def search(body: SearchRequest, db: AsyncSession = Depends(get_db),
             break
         needed = MAX_RESULTS - len(results)
         async with _DISCOVERY_SEM:
-            hits = await loop.run_in_executor(None, _tf_search_discovery, vq)
+            hits = await loop.run_in_executor(
+                None, lambda v=vq: _tf_search_discovery(v, scope=scope)
+            )
         hits = hits[:needed + 5]
         for hit in hits:
             if len(results) >= MAX_RESULTS:
@@ -481,11 +520,14 @@ async def deep_search(body: SearchRequest, db: AsyncSession = Depends(get_db)):
     deep_key = f"__deep__{query}"  # separate cache key for deep results
     loop = asyncio.get_event_loop()
 
-    for vq in _deep_queries(query, body.lang or "fr"):
+    scope = body.lang or "fr"
+    for vq in _deep_queries(query, scope):
         if len(all_results) >= DEEP_MAX_RESULTS:
             break
         async with _DISCOVERY_SEM:
-            hits = await loop.run_in_executor(None, _tf_search_discovery, vq)
+            hits = await loop.run_in_executor(
+                None, lambda v=vq: _tf_search_discovery(v, scope=scope)
+            )
         hits = hits[:12]
         for hit in hits:
             if len(all_results) >= DEEP_MAX_RESULTS:
@@ -525,7 +567,7 @@ async def history(db: AsyncSession = Depends(get_db),
 
 
 @router.get("/emerging-voices")
-async def emerging_voices(q: str | None = None, days: int = 90, language: str = "all",
+async def emerging_voices(q: str | None = None, days: int = 30, language: str = "fr",
                           platform: str = "all", limit: int = 25,
                           db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
@@ -891,3 +933,112 @@ async def describe_discovery(body: DescribeDiscoveryRequest, db: AsyncSession = 
     row.llm_description = description + ("\n\n@@SO_WHAT@@\n\n" + so_what if so_what else "")
     await db.commit()
     return {"description": description, "so_what": so_what, "cached": False}
+
+
+# ── Market-research reports (ad-hoc, Topic Explorer) ──────
+# The client asked Topic Explorer to answer a question with a structured
+# 3-5 page report rather than return a list of links. Generation is async
+# because it runs an LLM pass and a PDF render; the UI polls the row.
+
+class MarketReportRequest(BaseModel):
+    question: str
+    window_days: int = 30
+    lang: str | None = "fr"
+
+
+@router.post("/report", status_code=202)
+async def create_market_report(body: MarketReportRequest,
+                               db: AsyncSession = Depends(get_db),
+                               user: User = Depends(get_current_user)):
+    """Queue a market-research report for one question."""
+    from app.models import MarketReport
+    from app.tasks.market_report import generate_market_report
+
+    question = (body.question or "").strip()
+    if len(question) < 5:
+        raise HTTPException(status_code=422, detail="Ask a fuller question (at least 5 characters)")
+
+    # One LLM call + PDF per report, so it draws on the same daily quota as the
+    # other generated artefacts.
+    enforce_daily_generation(user, "market_report")
+
+    window = max(1, min(int(body.window_days or 30), 365))
+    row = MarketReport(
+        question=question,
+        status="pending",
+        window_days=window,
+        language=(body.lang or "fr"),
+        created_by=user.id,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    db.add(SearchHistory(user_id=user.id, kind="market_report", query=question))
+    await db.commit()
+
+    generate_market_report.delay(row.id)
+    return {"id": row.id, "status": "pending"}
+
+
+def _report_out(row) -> dict:
+    def _loads(raw, fallback):
+        try:
+            return json.loads(raw) if raw else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    return {
+        "id": row.id,
+        "question": row.question,
+        "status": row.status,
+        "error": row.error,
+        "window_days": row.window_days,
+        "language": row.language,
+        "exec_summary": row.exec_summary or "",
+        "so_what": row.so_what or "",
+        "what_is_said": row.what_is_said or "",
+        "voices_note": row.voices_note or "",
+        "volume_note": row.volume_note or "",
+        "subtopics": _loads(row.subtopics, []),
+        "voice_rows": _loads(row.voice_rows, []),
+        "volume": _loads(row.volume, {}),
+        "key_posts": _loads(row.key_posts, []),
+        "sources": _loads(row.sources, []),
+        "item_count": row.item_count,
+        "voice_exact_share": row.voice_exact_share,
+        "pdf_url": row.pdf_url,
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+    }
+
+
+@router.get("/report/{report_id}")
+async def get_market_report(report_id: int, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    from app.models import MarketReport
+
+    row = await db.get(MarketReport, report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return _report_out(row)
+
+
+@router.get("/reports")
+async def list_market_reports(limit: int = 20, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(get_current_user)):
+    """Recent reports, newest first — so a user can reopen one without paying again."""
+    from app.models import MarketReport
+
+    rows = await db.execute(
+        select(MarketReport)
+        .order_by(desc(MarketReport.created_at))
+        .limit(max(1, min(limit, 50)))
+    )
+    return {"reports": [
+        {
+            "id": r.id, "question": r.question, "status": r.status,
+            "item_count": r.item_count, "pdf_url": r.pdf_url,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+        }
+        for r in rows.scalars().all()
+    ]}

@@ -70,12 +70,62 @@ export interface EmergingVoice {
   }[];
 }
 
+export type SynthesisScope = "kol" | "competitor" | "comprehensive";
+
+export interface SynthesisSource {
+  n: number;
+  target: string;
+  topic: string;
+  url: string;
+  source_name: string;
+  date: string;
+  quote: string;
+}
+
+export interface SynthesisKeyPost {
+  target: string;
+  topic: string;
+  said: string;
+  url: string;
+  source_name: string;
+  date: string;
+  why: string;
+}
+
+/** One downloadable dashboard synthesis: Main information / So what /
+ *  Recommendations / What to watch / Key articles & posts, plus the resolved
+ *  sources every claim cites. */
+export interface SynthesisReport {
+  scope: SynthesisScope;
+  title: string;
+  generated_at: string;
+  insight_count: number;
+  pdf_url: string | null;
+  error?: string | null;
+  main: string[];
+  so_what: string;
+  recommendations: string[];
+  watch: string[];
+  key_posts: SynthesisKeyPost[];
+  sources: SynthesisSource[];
+}
+
+export interface SynthesisState {
+  scope: SynthesisScope;
+  status: "idle" | "running" | "done" | "error";
+  error?: string | null;
+  result: SynthesisReport | null;
+}
+
 export interface GlobalSynthesis {
   exec_summary: string;
   kol_takeaways: string[];
   population_takeaways: string[];
   topic_takeaways: string[];
   so_what: string;
+  /** Actionable next steps. Optional: reports generated before this field
+   *  existed are still stored and rendered. */
+  recommendations?: string[];
   important_posts: (BurningTopicImportantPost & { why?: string })[];
   sections_present: { kol: boolean; population: boolean; burning_topics: number };
   generated_at: string;
@@ -128,8 +178,11 @@ export interface AppSettings {
   cron_hour: number;
   cron_minute: number;
   cron_enabled: boolean;
+  /** "weekly" | "monthly" — daily was retired on the client's request. */
   cron_frequency: string;
   cron_day_of_week: number;
+  /** 1-28 for monthly mode, capped so no month skips the run. */
+  cron_day_of_month: number;
   agent_budget_per_run: number;
   llm_budget_hard_stop: number;
   available_providers: Record<string, string>;
@@ -194,6 +247,62 @@ export interface SocialScanStatus {
   inserted?: number;
   started_at?: string;
   finished_at?: string;
+}
+
+/** Ad-hoc market-research report produced by Topic Explorer. Voice distribution
+ *  and volume are computed from rows, not written by the model. */
+export interface MarketReportVoiceRow {
+  bucket: string; label: string; mentions: number; percent: number;
+}
+
+export interface MarketReportVolume {
+  total: number;
+  by_kind: Record<string, number>;
+  dated: number;
+  /** % of mentions carrying a usable date — the weekly trend covers only these. */
+  date_coverage: number;
+  per_week: Record<string, number>;
+  total_engagement: number;
+  window_days: number;
+}
+
+export interface MarketReportSource {
+  n: number; kind: string; author: string; url: string;
+  source_name: string; date: string; quote: string;
+}
+
+export interface MarketReportKeyPost {
+  kind: string; author: string; url: string; source_name: string;
+  date: string; text: string; engagement: number; why: string;
+}
+
+export interface MarketReport {
+  id: number;
+  question: string;
+  status: "pending" | "running" | "done" | "failed";
+  error?: string | null;
+  window_days: number;
+  language: string | null;
+  exec_summary: string;
+  so_what: string;
+  what_is_said: string;
+  voices_note: string;
+  volume_note: string;
+  subtopics: string[];
+  voice_rows: MarketReportVoiceRow[];
+  volume: MarketReportVolume;
+  key_posts: MarketReportKeyPost[];
+  sources: MarketReportSource[];
+  item_count: number;
+  /** % of voices identified from tracked records rather than inferred. */
+  voice_exact_share: number;
+  pdf_url: string | null;
+  created_at: string;
+}
+
+export interface MarketReportSummary {
+  id: number; question: string; status: string;
+  item_count: number; pdf_url: string | null; created_at: string;
 }
 
 export interface DiscoveryResult {
@@ -453,6 +562,9 @@ export const api = {
     stop: () => req<{ stopped: boolean }>("/runs/stop", { method: "POST" }),
     generatePdfs: () => req<{ status: string; run_id: number }>("/runs/generate-pdfs", { method: "POST" }),
     resetAll: () => req<{ db_cleared: boolean; blobs_deleted: number; chroma_reset: boolean }>("/runs/reset-all", { method: "POST" }),
+    // Super admin only — backend 403s for everyone else.
+    remove: (id: number) =>
+      req<{ deleted: number; summaries_detached: number }>(`/runs/${id}`, { method: "DELETE" }),
   },
 
   reports: {
@@ -460,6 +572,11 @@ export const api = {
     list: () => req<{ path: string; name: string; size: number; url: string; uploadedAt?: string }[]>("/reports/"),
     triggerGlobalSynthesis: () =>
       req<{ status: string }>("/reports/global-synthesis", { method: "POST" }),
+    // The three downloadable dashboard syntheses.
+    triggerSynthesis: (scope: SynthesisScope) =>
+      req<{ status: string; scope: SynthesisScope }>(`/reports/synthesis/${scope}`, { method: "POST" }),
+    synthesis: (scope: SynthesisScope) =>
+      req<SynthesisState>(`/reports/synthesis/${scope}`),
     globalSynthesis: () =>
       req<{ status: "idle" | "running" | "done" | "failed"; error?: string | null; result: GlobalSynthesis | null }>(
         "/reports/global-synthesis"
@@ -529,7 +646,16 @@ export const api = {
         `/discovery/emerging-voices?${qs.toString()}`
       );
     },
-    synthesis: (query: string, lang = "all", refresh = false) =>
+    // Market-research report: queue, poll, list.
+    createReport: (question: string, windowDays = 30, lang = "fr") =>
+      req<{ id: number; status: string }>("/discovery/report", {
+        method: "POST",
+        body: JSON.stringify({ question, window_days: windowDays, lang }),
+      }),
+    report: (id: number) => req<MarketReport>(`/discovery/report/${id}`),
+    reports: (limit = 20) =>
+      req<{ reports: MarketReportSummary[] }>(`/discovery/reports?limit=${limit}`),
+    synthesis: (query: string, lang = "fr", refresh = false) =>
       req<DiscoverySynthesis>("/discovery/synthesis", {
         method: "POST",
         body: JSON.stringify({ query, lang, refresh }),
@@ -537,15 +663,18 @@ export const api = {
   },
 
   social: {
-    trends: (days = 180, platform = "all", kind = "all", limit = 60) =>
+    // `language` must be sent explicitly: the API defaults to "fr" (France-first),
+    // so omitting it silently narrows the pool and breaks the Global toggle.
+    trends: (days = 30, platform = "all", kind = "all", limit = 60, language = "fr") =>
       req<SocialTrends>(
-        `/social/trends?days=${days}&platform=${platform}&kind=${kind}&limit=${limit}`
+        `/social/trends?days=${days}&platform=${platform}&kind=${kind}&limit=${limit}` +
+        `&language=${language}`
       ),
     scan: (lang?: string) => req<{ started: boolean; task_id: string; lang: string | null }>(
       `/social/scan${lang ? `?lang=${lang}` : ""}`, { method: "POST" }),
     clearPosts: () => req<{ deleted: number }>("/social/posts", { method: "DELETE" }),
     status: () => req<SocialScanStatus>("/social/status"),
-    timeseries: (days = 180, top = 6) =>
+    timeseries: (days = 30, top = 6) =>
       req<SocialTimeseries>(`/social/timeseries?days=${days}&top=${top}`),
     describe: (id: number) =>
       req<{ description: string; so_what: string | null; cached: boolean }>("/social/describe", {

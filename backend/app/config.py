@@ -33,7 +33,10 @@ class Settings(BaseSettings):
     tinyfish_api_key: str = ""
     tinyfish_api_keys: str = ""
     tinyfish_rate_limit_per_key: int = 30
-    tinyfish_monthly_credits: int = 500  # credits granted per key per month (no balance API)
+    # Credits granted per key per month (no balance API). 1650 = the Starter plan
+    # allowance. Only agent runs consume these — search and fetch are unmetered,
+    # see _billable_steps in services/scraper.py.
+    tinyfish_monthly_credits: int = 1650
 
     # Sentry
     sentry_dsn: str = ""
@@ -66,8 +69,6 @@ class Settings(BaseSettings):
     run_trigger_url: str = "http://localhost:8009/api/runs/trigger"
 
     # Pipeline tunables
-    daily_run_hour: int = 8
-    daily_run_minute: int = 0
     agent_budget_per_run: int = 250
     llm_budget_hard_stop: int = 500
 

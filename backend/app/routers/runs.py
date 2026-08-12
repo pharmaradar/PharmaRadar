@@ -2,12 +2,12 @@
 import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc, delete
+from sqlalchemy import select, desc, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import RunLog, RunStatus, Target
-from app.auth import require_admin, require_admin_or_internal
+from app.auth import require_admin, require_admin_or_internal, require_superadmin
 from app.config import get_settings
 settings = get_settings()
 
@@ -60,7 +60,7 @@ async def trigger_run(body: TriggerRequest, db: AsyncSession = Depends(get_db)):
     from celery import chain, chord, group
     from app.tasks.scrape import scrape_target, wave2_rescue
     from app.tasks.llm import generate_summary, extract_target_posts
-    from app.tasks.pdf import generate_target_pdf, generate_daily_summary_pdf
+    from app.tasks.pdf import generate_target_pdf, generate_run_summary_pdf
 
     # Reject if a run is already in progress
     existing = await db.execute(
@@ -119,7 +119,7 @@ async def trigger_run(body: TriggerRequest, db: AsyncSession = Depends(get_db)):
     # Wave 2 callback: rescue 0-post targets → then daily summary
     wave2_callback = chain(
         wave2_rescue.si(run.id),
-        generate_daily_summary_pdf.si(run.id),
+        generate_run_summary_pdf.si(run.id),
     )
 
     pipeline = chord(group(*wave1_tasks), wave2_callback)
@@ -205,7 +205,7 @@ async def list_runs(db: AsyncSession = Depends(get_db)):
 async def generate_pdfs(db: AsyncSession = Depends(get_db)):
     """Regenerate PDFs for all active targets from existing insights — no scraping needed."""
     from celery import group, chain
-    from app.tasks.pdf import generate_target_pdf, generate_daily_summary_pdf
+    from app.tasks.pdf import generate_target_pdf, generate_run_summary_pdf
     from app.models import RunLog, RunStatus
 
     # Same guard as /trigger — a double-click here used to stack two concurrent
@@ -231,7 +231,7 @@ async def generate_pdfs(db: AsyncSession = Depends(get_db)):
 
     from celery import chord
     pdf_tasks = [generate_target_pdf.si(t.id, run.id) for t in targets]
-    pipeline = chord(group(*pdf_tasks), generate_daily_summary_pdf.si(run.id))
+    pipeline = chord(group(*pdf_tasks), generate_run_summary_pdf.si(run.id))
     pipeline.apply_async()
 
     return {"status": "started", "run_id": run.id}
@@ -243,6 +243,35 @@ async def get_run(run_id: int, db: AsyncSession = Depends(get_db)):
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
     return _run_to_out(run)
+
+
+@router.delete("/{run_id}", dependencies=[Depends(require_superadmin)])
+async def delete_run(run_id: int, db: AsyncSession = Depends(get_db)):
+    """Erase one run from history. SUPER ADMIN ONLY — it destroys audit trail.
+
+    Safe by construction: `person_summaries.run_id` is the ONLY foreign key into
+    run_logs, it's nullable, and it has no cascade. We NULL it rather than delete,
+    because those rows hold the summary bullets the reports render and they
+    outlive the run that produced them (a later generate-pdfs run reuses them).
+    `scraped_posts` and `extracted_insights` carry no run FK at all, so insights
+    are never touched — verified 2026-08-08 against the models.
+    """
+    run = await db.get(RunLog, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status == RunStatus.running:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a run that is still running — stop it first",
+        )
+
+    from app.models import PersonSummary
+    res = await db.execute(
+        update(PersonSummary).where(PersonSummary.run_id == run_id).values(run_id=None)
+    )
+    await db.delete(run)
+    await db.commit()
+    return {"deleted": run_id, "summaries_detached": res.rowcount or 0}
 
 
 @router.post("/reset-all", dependencies=[Depends(require_admin)])

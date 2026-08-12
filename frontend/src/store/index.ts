@@ -21,13 +21,17 @@ export const useAppStore = create<AppState>()(
       mobileMenuOpen: false,
       activeRunId: null,
       darkMode: false,
-      socialLang: "all",
+      // France-first: the platform monitors the French market, so French is the
+      // default view and "Global" is the opt-in. See version bump below.
+      socialLang: "fr",
       setSidebarOpen: (v) => set({ sidebarOpen: v }),
       setMobileMenuOpen: (v) => set({ mobileMenuOpen: v }),
       setActiveRunId: (id) => set({ activeRunId: id }),
       toggleDarkMode: () => set((s) => ({ darkMode: !s.darkMode })),
       setSocialLang: (v) => set({ socialLang: v }),
     }),
-    { name: "pharmaradar-ui", version: 2, migrate: (s: any) => ({ ...s, socialLang: "all" }) }
+    // v3 forces socialLang to "fr" for users whose localStorage still holds the
+    // old "all" default — without the bump they would keep seeing global posts.
+    { name: "pharmaradar-ui", version: 3, migrate: (s: any) => ({ ...s, socialLang: "fr" }) }
   )
 );

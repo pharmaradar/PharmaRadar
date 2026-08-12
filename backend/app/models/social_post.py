@@ -35,6 +35,10 @@ class SocialPost(Base):
     topic: Mapped[str | None] = mapped_column(String(255))          # coarse topic (from query/hashtag)
 
     language: Mapped[str | None] = mapped_column(String(8))           # 'en' | 'fr' | etc.
+    # Provenance — which source the post came from, recorded at ingest.
+    # Distinct from `language`, which is inferred from the text after the fact.
+    domain: Mapped[str | None] = mapped_column(String(255), index=True)
+    source_scope: Mapped[str | None] = mapped_column(String(8), index=True)   # 'fr' | 'global'
     llm_description: Mapped[str | None] = mapped_column(Text)        # filled on click
 
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

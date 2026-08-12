@@ -62,9 +62,14 @@ def _to_out(p: SocialPost, now: datetime) -> dict:
 
 # ── Scan trigger + status ─────────────────────────────────
 
-@router.post("/scan")
+@router.post("/scan", dependencies=[Depends(require_admin)])
 async def trigger_scan(lang: str | None = None):
     """Kick off a manual social trend scan via Apify.
+
+    Admin-only: this is the one endpoint that spends real Apify credits, and it
+    was previously reachable by any authenticated user while the far cheaper
+    DELETE /posts below already required admin.
+
     `lang` overrides settings.social_lang_filter for this scan only."""
     from app.services import apify_client
     if not apify_client.is_configured():
@@ -116,11 +121,16 @@ async def scan_status():
 
 @router.get("/trends")
 async def trends(
-    days: int = 180,
+    # Display window defaults to 30 days per client spec. The *scrape* window
+    # stays deep (AppSettings.social_window_days) so widening the view here is
+    # instant and free — the posts are already in the DB.
+    days: int = 30,
     platform: str | None = None,
     kind: str | None = None,
     limit: int = 60,
-    language: str | None = None,
+    # France-first: the platform monitors the French market, so "fr" is the
+    # default rather than an opt-in filter. Pass language="all" to widen.
+    language: str | None = "fr",
     from_date: str | None = None,
     to_date: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -185,7 +195,7 @@ async def trends(
 # ── Synthesis / takeaway + LLM editor's picks ─────────────
 
 @router.get("/synthesis")
-async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = False,
+async def synthesis(days: int = 30, lang: str | None = "fr", refresh: bool = False,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(daily_gen_guard("social_synthesis"))):
     """On-demand LLM synthesis of the recent social feed (filter-independent).
@@ -196,7 +206,9 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
     from app.config import get_settings
     from app.services.synthesizer import parse_synthesis
 
-    key = f"social_synth:v1:{days}:{lang or 'all'}"
+    # v2: the default scope changed from all-languages to French, so v1 entries
+    # would serve a global synthesis under a French request.
+    key = f"social_synth:v2:{days}:{lang or 'all'}"
     ukey = f"{key}:u{user.id}"   # private regenerate per user; shared key untouched
     r = None
     try:
@@ -290,7 +302,7 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
 # ── Time series for the trend wave chart ──────────────────
 
 @router.get("/timeseries")
-async def timeseries(days: int = 180, top: int = 6, db: AsyncSession = Depends(get_db)):
+async def timeseries(days: int = 30, top: int = 6, db: AsyncSession = Depends(get_db)):
     """Weekly engagement per top-N topic over the window — feeds the dashboard
     wave chart. Each series point is total engagement for that topic that week."""
     from collections import defaultdict
@@ -336,10 +348,12 @@ async def timeseries(days: int = 180, top: int = 6, db: AsyncSession = Depends(g
 # ── Discovery: cached matches + background fresh Apify fetch ──
 
 @router.get("/discover")
-async def discover(q: str, fresh: bool = True, lang: str | None = None,
+async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
                    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    """Return social posts matching a query, ranked. `lang` overrides the
-    configured default (fr/en/all). If user picks "Global" in the UI, lang="all"."""
+    """Return social posts matching a query, ranked.
+
+    `lang` defaults to French — the platform monitors the French market, so a
+    global search is the opt-in, not the default. Pass lang="all" to widen."""
     term = (q or "").strip()
     if len(term) < 2:
         return {"query": term, "results": [], "fetching": False}

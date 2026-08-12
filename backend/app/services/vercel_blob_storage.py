@@ -78,17 +78,22 @@ def upload_pdf_to_vercel_blob(
     return url
 
 
-def upload_daily_summary_to_vercel_blob(
-    pdf_binary: bytes, run_date: date, vercel_token: str
+def upload_run_summary_to_vercel_blob(
+    pdf_binary: bytes, run_date: date, vercel_token: str, cadence: str = "Weekly"
 ) -> str:
-    """Upload the daily summary PDF and return its public URL."""
-    pathname = f"reports/{run_date}/Daily_Summary_{run_date}.pdf"
+    """Upload the per-run summary PDF and return its public URL.
+
+    Named after the configured cadence — "Weekly_KOL_Report_…" or "Monthly_KOL_Report_…".
+    Files already in Blob keep their old "Daily_Summary_" / "Run_Summary_" names;
+    the Reports page recognises every prefix so nothing is stranded.
+    """
+    pathname = f"reports/{run_date}/{cadence}_KOL_Report_{run_date}.pdf"
     try:
         url = _put(pathname, pdf_binary, vercel_token)
     except Exception as e:
-        logger.error("vercel_blob.daily_upload_failed", error=str(e), date=str(run_date))
+        logger.error("vercel_blob.run_summary_upload_failed", error=str(e), date=str(run_date))
         raise
-    logger.info("vercel_blob.daily_summary_uploaded", date=str(run_date), url=url)
+    logger.info("vercel_blob.run_summary_uploaded", cadence=cadence, date=str(run_date), url=url)
     return url
 
 
@@ -120,4 +125,28 @@ def upload_burning_topic_pdf(
         raise
     logger.info("vercel_blob.burning_topic_uploaded", topic=topic_slug,
                 report_id=report_id, url=url)
+    return url
+
+
+def upload_synthesis_pdf(pdf_binary: bytes, scope: str, stamp: str, vercel_token: str) -> str:
+    """Upload a dashboard synthesis PDF (kol / competitor / comprehensive)."""
+    pathname = f"synthesis/{scope}/{scope.title()}_Synthesis_{stamp}.pdf"
+    try:
+        url = _put(pathname, pdf_binary, vercel_token)
+    except Exception as e:
+        logger.error("vercel_blob.synthesis_upload_failed", error=str(e), scope=scope)
+        raise
+    logger.info("vercel_blob.synthesis_uploaded", scope=scope, stamp=stamp, url=url)
+    return url
+
+
+def upload_market_report_pdf(pdf_binary: bytes, slug: str, stamp: str, vercel_token: str) -> str:
+    """Upload an ad-hoc market-research report PDF; slug+stamp keeps them distinct."""
+    pathname = f"market-research/{slug}/{slug}_{stamp}.pdf"
+    try:
+        url = _put(pathname, pdf_binary, vercel_token)
+    except Exception as e:
+        logger.error("vercel_blob.market_report_upload_failed", error=str(e), slug=slug)
+        raise
+    logger.info("vercel_blob.market_report_uploaded", slug=slug, stamp=stamp, url=url)
     return url

@@ -20,6 +20,12 @@ class Target(Base):
     target_type: Mapped[str] = mapped_column(String(16), nullable=False, default="kol", index=True)
     twitter_handle: Mapped[str | None] = mapped_column(String(128), nullable=True)  # e.g. @DrJohnSmith
     linkedin_url: Mapped[str | None] = mapped_column(String(512), nullable=True)    # full profile URL
+    # Acquisition scope: 'fr' pins search at French sources (locale flags +
+    # curated site: groups), 'global' searches worldwide. Defaults to 'fr' —
+    # the platform monitors the French market, and the client asked for
+    # competitor messaging in French too. See services/fr_sources.py.
+    source_scope: Mapped[str] = mapped_column(String(8), nullable=False, default="fr",
+                                              server_default="fr")
     active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

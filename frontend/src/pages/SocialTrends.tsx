@@ -60,7 +60,7 @@ const LANGUAGE_OPTIONS = [
   { value: "en",  label: "English only" },
 ];
 
-const DEFAULTS = { sortBy: "trending", platform: "all", days: 30, kind: "all", minLikes: 0, language: "all", fromDate: "", toDate: "" };
+const DEFAULTS = { sortBy: "trending", platform: "all", days: 30, kind: "all", minLikes: 0, language: "fr", fromDate: "", toDate: "" };
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -131,10 +131,13 @@ export default function SocialTrends() {
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings.get });
   const apifyOn = !!settings?.apify_configured;
 
-  // Single generous fetch — all filtering/sorting done client-side for instant UX
+  // One generous fetch per language scope — days/platform/kind filtering stays
+  // client-side for instant UX. Language is server-side because the API is
+  // France-first by default; it is in the query key so switching to Global
+  // refetches the wider pool instead of filtering an already-French one.
   const { data: allData } = useQuery({
-    queryKey: ["social-trends-all"],
-    queryFn: () => api.social.trends(180, "all", "all", 500),
+    queryKey: ["social-trends-all", language],
+    queryFn: () => api.social.trends(180, "all", "all", 500, language),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -231,7 +234,7 @@ export default function SocialTrends() {
     if (apifyOn) searchMut.mutate();
   }
   function clearSearch() { setSubmitted(""); setQuery(""); setSearching(false); setPolls(0); }
-  function resetFilters() { setSortBy(DEFAULTS.sortBy); setPlatform(DEFAULTS.platform); setDays(DEFAULTS.days); setKind(DEFAULTS.kind); setMinLikes(DEFAULTS.minLikes); setLanguage("all"); setFromDate(DEFAULTS.fromDate); setToDate(DEFAULTS.toDate); setTopicFilter(null); }
+  function resetFilters() { setSortBy(DEFAULTS.sortBy); setPlatform(DEFAULTS.platform); setDays(DEFAULTS.days); setKind(DEFAULTS.kind); setMinLikes(DEFAULTS.minLikes); setLanguage(DEFAULTS.language); setFromDate(DEFAULTS.fromDate); setToDate(DEFAULTS.toDate); setTopicFilter(null); }
 
   const allPosts = allData?.top_posts ?? [];
 
@@ -294,7 +297,7 @@ export default function SocialTrends() {
   const searchPosts = searchData?.results ?? [];
   const isDefault = sortBy === DEFAULTS.sortBy && platform === DEFAULTS.platform &&
     days === DEFAULTS.days && kind === DEFAULTS.kind && minLikes === DEFAULTS.minLikes &&
-    language === "all" && !fromDate && !toDate && !topicFilter;
+    language === DEFAULTS.language && !fromDate && !toDate && !topicFilter;
 
   return (
     <div className="glass rounded-xl flex flex-col h-full overflow-hidden">

@@ -13,16 +13,29 @@ type PdfFile = { path: string; name: string; size: number; url: string; uploaded
 type Category = "all" | "summary" | "kol" | "burning" | "congress" | "global";
 
 const CATEGORY_META: Record<Exclude<Category, "all">, { label: string; icon: React.ElementType; cls: string }> = {
-  summary:  { label: "Daily Summaries", icon: FileText,     cls: "text-pharma-light" },
-  kol:      { label: "KOL Reports",     icon: Users,        cls: "text-blue-500" },
+  summary:  { label: "Combined Report", icon: FileText,     cls: "text-pharma-light" },
+  kol:      { label: "Per-KOL Reports", icon: Users,        cls: "text-blue-500" },
   burning:  { label: "Burning Topics",  icon: Zap,          cls: "text-purple-500" },
   congress: { label: "Congress",        icon: CalendarDays, cls: "text-cyan-600" },
   global:   { label: "Global Synthesis", icon: Globe,       cls: "text-emerald-600" },
 };
 
+/** Newest first; the trailing two are historical and read-only. */
+const SUMMARY_PREFIXES = [
+  "Weekly_KOL_Report_",
+  "Monthly_KOL_Report_",
+  "Weekly_Report_",
+  "Monthly_Report_",
+  "Run_Summary_",
+  "Daily_Summary_",
+];
+
 function categorize(p: PdfFile): Exclude<Category, "all"> {
   const path = p.path.toLowerCase();
-  if (p.name.startsWith("Daily_Summary_")) return "summary";
+  // Reports name themselves after the configured cadence ("Weekly_Report_…",
+  // "Monthly_Report_…"). The earlier names are still recognised so PDFs already
+  // in Blob storage keep categorising correctly rather than being stranded.
+  if (SUMMARY_PREFIXES.some((prefix) => p.name.startsWith(prefix))) return "summary";
   if (path.includes("global")) return "global";
   if (path.includes("congress")) return "congress";
   if (path.includes("burning")) return "burning";
@@ -186,7 +199,7 @@ export default function Reports() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-bold text-pharma-blue dark:text-[#e2e8f0] mr-auto">Reports</h1>
+        <h1 className="text-2xl font-bold text-pharma-blue dark:text-[#e2e8f0] mr-auto">KOL Report</h1>
         {isAdmin && (
           <button
             onClick={() => genPdfsMut.mutate()}
@@ -276,7 +289,7 @@ export default function Reports() {
           {/* Daily summaries — accordion with inline preview */}
           {summaries.length > 0 && (
             <div className="space-y-2">
-              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Daily Summaries</h2>
+              <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Combined Report</h2>
               {summaries.map(({ pdf }) => {
                 const expanded = expandedSummaries.has(pdf.path);
                 return (

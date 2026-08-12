@@ -172,6 +172,45 @@ async def get_global_synthesis(user=Depends(get_current_user)):
     return {"status": status.get("status", "idle"), "error": status.get("error"), "result": result}
 
 
+# ── Dashboard syntheses (KOL / competitor / comprehensive) ─
+
+@router.post("/synthesis/{scope}", status_code=202)
+async def trigger_synthesis(scope: str, user=Depends(get_current_user)):
+    """Enqueue one of the three dashboard synthesis PDFs.
+
+    Non-admins get one fresh generation per scope per day; the stored report
+    stays readable for free in between.
+    """
+    from app.auth import enforce_daily_generation
+    from app.services import synthesis_report as sr
+    from app.tasks.synthesis import generate_synthesis_report
+
+    try:
+        sr.spec_for(scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    if sr.get_state(scope).get("status") == "running":
+        raise HTTPException(status_code=409, detail=f"A {scope} synthesis is already running")
+
+    enforce_daily_generation(user, f"synthesis_{scope}")
+    sr.set_status(scope, status="running")
+    generate_synthesis_report.delay(scope)
+    return {"status": "running", "scope": scope}
+
+
+@router.get("/synthesis/{scope}")
+async def get_synthesis(scope: str, user=Depends(get_current_user)):
+    """Status plus the last stored report for one scope."""
+    from app.services import synthesis_report as sr
+
+    try:
+        sr.spec_for(scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return {"scope": scope, **sr.get_state(scope)}
+
+
 @router.get("/local/{file_path:path}")
 async def serve_local_pdf(file_path: str):
     """Serve a PDF directly from the local filesystem (dev only)."""

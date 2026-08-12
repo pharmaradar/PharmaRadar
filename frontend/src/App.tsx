@@ -34,6 +34,13 @@ function AdminRoute({ children }: { children: React.ReactNode }) {
   return role === "admin" ? <>{children}</> : <Navigate to="/dashboard" replace />;
 }
 
+/** Superadmin-only route. Hiding a nav link is not access control — without this
+ *  the page is still reachable by typing the URL. */
+function SuperadminRoute({ children }: { children: React.ReactNode }) {
+  const isSuperadmin = useAuthStore((s) => s.user?.is_superadmin);
+  return isSuperadmin ? <>{children}</> : <Navigate to="/dashboard" replace />;
+}
+
 function AuthedApp() {
   const { sidebarOpen, setMobileMenuOpen } = useAppStore();
   return (
@@ -79,7 +86,7 @@ function AuthedApp() {
           <Route path="/targets"   element={<Padded><Targets /></Padded>} />
           <Route path="/competitors" element={<Padded><Competitors /></Padded>} />
           {/* Admin-only */}
-          <Route path="/history"   element={<AdminRoute><Padded><RunHistory /></Padded></AdminRoute>} />
+          <Route path="/history"   element={<SuperadminRoute><Padded><RunHistory /></Padded></SuperadminRoute>} />
           <Route path="/settings"  element={<AdminRoute><Padded><SettingsPage /></Padded></AdminRoute>} />
           <Route path="/users"     element={<AdminRoute><Padded><Users /></Padded></AdminRoute>} />
           <Route path="*"          element={<Navigate to="/dashboard" replace />} />

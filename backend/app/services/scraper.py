@@ -30,7 +30,20 @@ import structlog
 
 from app.config import get_settings
 from app.services.deduplicator import sha256_hash
+from app.services.fr_sources import (
+    SEARCH_LANGUAGE_FR,
+    SEARCH_LOCATION_FR,
+    Scope,
+    focus_clause,
+    fr_site_groups,
+    is_french_source,
+    localize_platform,
+    source_category,
+)
 from app.services.run_context import RunContext
+
+# Local alias so the hot paths compare against a plain string.
+FR_SCOPE = Scope.FR.value
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -253,6 +266,28 @@ def _rate_limit_wait(key: str) -> None:
 
 # ── Low-level TinyFish calls ──────────────────────────────
 
+def _billable_steps(args: list[str], parsed: dict) -> int:
+    """Credits actually consumed by a completed TinyFish CLI call.
+
+    Only `agent run` consumes credits — search and fetch are rate-limited but
+    unmetered on the plan — and one agent run bills its `num_of_steps`, which
+    measured between 3 and 35 (mean ~8.4), not 1.
+
+    Previously every CLI call incremented the counter by 1, so the health
+    dashboard both over-counted free searches and under-counted paid agent runs.
+    That mattered here because French source scoping adds search queries: without
+    this the dashboard would report "credits exhausted" for work that costs
+    nothing.
+    """
+    if len(args) < 2 or args[1] != "agent":
+        return 0
+    steps = parsed.get("num_of_steps") if isinstance(parsed, dict) else None
+    try:
+        return max(1, int(steps))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _run_tf(args: list[str], timeout: int = 120, pipeline_mode: bool = True) -> tuple[dict, str]:
     """Run tinyfish CLI, return (parsed_json, key_used)."""
     env, key = _tf_env(pipeline_mode=pipeline_mode)
@@ -264,11 +299,16 @@ def _run_tf(args: list[str], timeout: int = 120, pipeline_mode: bool = True) -> 
             logger.debug("tinyfish.nonzero", cmd=args[1] if len(args) > 1 else "",
                          returncode=r.returncode, stderr=stderr_snippet[:200])
             if "insufficient credits" in stderr_snippet.lower() or "0 credits remaining" in stderr_snippet.lower():
-                global _AGENT_CREDITS_EXHAUSTED
-                with _AGENT_CREDITS_LOCK:
-                    if not _AGENT_CREDITS_EXHAUSTED:
-                        logger.warning("tinyfish.agent_credits_exhausted", key=key)
-                        _AGENT_CREDITS_EXHAUSTED = True
+                # Only an `agent run` can exhaust credits — search and fetch are
+                # unmetered. Letting a failed search set this module-global
+                # permanently disabled the Wave-2 agent rescue for the whole
+                # worker process, and French scoping adds search calls.
+                if len(args) > 1 and args[1] == "agent":
+                    global _AGENT_CREDITS_EXHAUSTED
+                    with _AGENT_CREDITS_LOCK:
+                        if not _AGENT_CREDITS_EXHAUSTED:
+                            logger.warning("tinyfish.agent_credits_exhausted", key=key)
+                            _AGENT_CREDITS_EXHAUSTED = True
                 try:
                     from app.services.provider_health import flag_exhausted
                     flag_exhausted(f"tinyfish:{key[-12:]}", stderr_snippet[:200])
@@ -280,10 +320,10 @@ def _run_tf(args: list[str], timeout: int = 120, pipeline_mode: bool = True) -> 
             parsed = json.loads(out) if out else {}
         except json.JSONDecodeError:
             return {}, key
-        # Successful CLI call — count the credit and clear any stale flag
+        # Successful CLI call — count the credits and clear any stale flag.
         try:
             from app.services.provider_health import record_tinyfish_usage, clear_exhausted
-            record_tinyfish_usage(key)
+            record_tinyfish_usage(key, n=_billable_steps(args, parsed))
             clear_exhausted(f"tinyfish:{key[-12:]}")
         except Exception:
             pass
@@ -299,8 +339,25 @@ def _run_tf(args: list[str], timeout: int = 120, pipeline_mode: bool = True) -> 
         return {}, key
 
 
-def _tf_search(query: str) -> list[dict]:
-    data, _ = _run_tf(["tinyfish", "search", "query", query], pipeline_mode=True)
+def _search_locale_args(scope: str = "fr") -> list[str]:
+    """CLI locale flags for a search, or [] for the global scope.
+
+    `tinyfish search query` accepts `--location` and `--language`; the codebase
+    never passed them, so every search ran at the CLI's US/EN default. Measured
+    2026-08-11 on the same KOL query: 0/10 French sources without the flags,
+    3/9 with them. Search is not metered by TinyFish (only agent runs are), so
+    this costs nothing.
+    """
+    if scope != FR_SCOPE:
+        return []
+    return ["--location", SEARCH_LOCATION_FR, "--language", SEARCH_LANGUAGE_FR]
+
+
+def _tf_search(query: str, scope: str = "fr") -> list[dict]:
+    data, _ = _run_tf(
+        ["tinyfish", "search", "query", query] + _search_locale_args(scope),
+        pipeline_mode=True,
+    )
     return data.get("results", [])
 
 
@@ -318,8 +375,9 @@ def _note_tf_outcome(returncode: int, stderr: str, key: str) -> None:
     never reached the provider-health dashboard."""
     try:
         if returncode == 0:
-            from app.services.provider_health import record_tinyfish_usage, clear_exhausted
-            record_tinyfish_usage(key)
+            # Discovery/burning-topic calls are search and fetch only, which are
+            # unmetered — record the outcome without charging a credit.
+            from app.services.provider_health import clear_exhausted
             clear_exhausted(f"tinyfish:{key[-12:]}")
             return
         snippet = (stderr or "")[:300]
@@ -331,8 +389,13 @@ def _note_tf_outcome(returncode: int, stderr: str, key: str) -> None:
         pass
 
 
-def _tf_search_discovery(query: str) -> list[dict]:
-    """Discovery-aware search — uses dedicated key when pipeline is running."""
+def _tf_search_discovery(query: str, scope: str = "fr") -> list[dict]:
+    """Discovery-aware search — uses dedicated key when pipeline is running.
+
+    `scope` defaults to French because Topic Explorer and burning topics both
+    monitor the French market. Pass Scope.GLOBAL for congress and competitor
+    lookups, which are international by nature and go empty under a French pin.
+    """
     key = _discovery_key()
     env = os.environ.copy()
     if key:
@@ -340,7 +403,7 @@ def _tf_search_discovery(query: str) -> list[dict]:
     _rate_limit_wait(key)
     import subprocess as _sp, json as _json
     try:
-        r = _sp.run(["tinyfish", "search", "query", query],
+        r = _sp.run(["tinyfish", "search", "query", query] + _search_locale_args(scope),
                     capture_output=True, text=True, timeout=120, env=env)
         _note_tf_outcome(r.returncode, r.stderr, key)
         out = r.stdout.strip()
@@ -445,12 +508,22 @@ def _is_binary(url: str) -> bool:
     return (url or "").lower().endswith(HARD_SKIP_SUFFIXES)
 
 
-def _signal_score(url: str, ids: dict) -> int:
+def _signal_score(url: str, ids: dict, scope: str = "fr") -> int:
+    """Rank a candidate URL. Higher = kept when the candidate list is truncated.
+
+    Under the French scope a French source outranks the anglophone news tier:
+    HIGH_SIGNAL_DOMAINS and NEWS_SITES contain no .fr host, so before this a
+    French source scored 0 and was the first thing dropped by the `[:10 + n]`
+    cut — the platform could search France and still store nothing from it.
+    A KOL's own handle still wins, since that is the target's own voice.
+    """
     host = _domain(url)
     score = 0
     for handle in ids.values():
         if handle and handle.lower() in url.lower():
             score = max(score, 10)
+    if scope == FR_SCOPE and is_french_source(url):
+        score = max(score, 9)
     if any(host == d or host.endswith("." + d) for d in HIGH_SIGNAL_DOMAINS):
         score = max(score, 8)
     if any(n in host for n in NEWS_SITES):
@@ -491,33 +564,13 @@ def extract_identifiers(known_urls: list[str]) -> dict:
     return ids
 
 
-def build_search_queries(name: str, ids: dict, window_days: int = _FRESHNESS_DAYS) -> list[str]:
-    cutoff_90  = (date.today() - timedelta(days=90)).isoformat()
-    cutoff_1yr = (date.today() - timedelta(days=365)).isoformat()
-    f90  = f"after:{cutoff_90}"
-    f1yr = f"after:{cutoff_1yr}"
-    drugs = " OR ".join(ROCHE_DRUGS[:6])
-    news  = " OR ".join(f"site:{s}" for s in NEWS_SITES[:5])
+def _handle_queries(ids: dict, f90: str, f1yr: str) -> list[str]:
+    """Account-pinned queries for the handles we know for this target.
 
-    queries = [
-        f'"{name}" Roche {f90}',
-        f'"{name}" pharmaceutical OR oncology {f90}',
-        f'"{name}" ({news}) {f90}',
-        f'"{name}" {drugs} {f1yr}',
-        f'"{name}" Roche FDA OR EMA OR clinical trial {f1yr}',
-        f'"{name}" ESMO OR ASCO OR AACR {f1yr}',
-        f'"{name}" drug approval OR immunotherapy OR biomarker {f1yr}',
-        f'"{name}" cancer treatment OR lung cancer OR NSCLC {f1yr}',
-        f'"{name}" interview OR conference OR publication {f1yr}',
-        f'"{name}" pharma OR oncology site:researchgate.net OR site:pubmed.ncbi.nlm.nih.gov',
-        # Social sites — always search regardless of known handles
-        f'"{name}" site:linkedin.com {f1yr}',
-        f'"{name}" site:twitter.com OR site:x.com {f90}',
-        f'"{name}" site:threads.net OR site:bsky.app {f90}',
-        f'"{name}" site:youtube.com {f1yr}',
-        f'"{name}" site:reddit.com pharma OR oncology {f1yr}',
-    ]
-
+    Kept out of the disease-focus narrowing on purpose: a target's own profile
+    is its own voice, so everything it posts is in scope by definition.
+    """
+    queries: list[str] = []
     twitter = ids.get("twitter")
     if twitter:
         queries += [
@@ -542,8 +595,91 @@ def build_search_queries(name: str, ids: dict, window_days: int = _FRESHNESS_DAY
     yt = ids.get("youtube")
     if yt:
         queries.append(f"site:youtube.com {yt} pharma OR oncology {f1yr}")
-
     return queries
+
+
+def build_search_queries(name: str, ids: dict, window_days: int = _FRESHNESS_DAYS,
+                         scope: str = "fr", disease_area: str | None = None) -> list[str]:
+    """Search strings for one target.
+
+    Under the French scope this adds source-scoped `site:` queries against the
+    curated French registry and French clinical vocabulary (CBNPC, not NSCLC —
+    French oncologists do not write "NSCLC"). The anglophone queries are kept:
+    French KOLs publish and present in English, so dropping them would lose a
+    KOL's own ASCO coverage. Extra search queries are free — TinyFish meters
+    agent runs only — so this widens recall at no cost.
+
+    `disease_area` narrows every query to one therapeutic area. The client asked
+    for competitor tracking to cover "these companies' messaging regarding lung
+    cancer" only, so for a focused target the broad pharma queries are replaced
+    rather than supplemented — otherwise a competitor's diabetes or vaccine
+    announcements would fill the candidate cap and crowd out the lung-cancer
+    content the report is supposed to be about.
+    """
+    cutoff_90  = (date.today() - timedelta(days=90)).isoformat()
+    cutoff_1yr = (date.today() - timedelta(days=365)).isoformat()
+    f90  = f"after:{cutoff_90}"
+    f1yr = f"after:{cutoff_1yr}"
+    drugs = " OR ".join(ROCHE_DRUGS[:6])
+    news  = " OR ".join(f"site:{s}" for s in NEWS_SITES[:5])
+    linkedin_host = localize_platform("linkedin.com") if scope == FR_SCOPE else "linkedin.com"
+
+    focus = focus_clause(disease_area, scope)
+
+    if focus:
+        # Focused target: every query carries the disease clause. The broad
+        # pharma/news queries are intentionally absent — a large competitor
+        # publishes across many therapeutic areas, and those results would fill
+        # the candidate cap before any lung-cancer content was reached.
+        queries = [
+            f'"{name}" {focus} {f90}',
+            f'"{name}" {focus} {drugs} {f1yr}',
+            f'"{name}" {focus} ESMO OR ASCO OR WCLC {f1yr}',
+            f'"{name}" {focus} "essai clinique" OR "étude de phase" {f1yr}',
+            f'"{name}" {focus} immunothérapie OR "thérapie ciblée" {f1yr}',
+            f'"{name}" {focus} communiqué OR annonce OR publication {f1yr}',
+            # Social — the same focus applies
+            f'"{name}" {focus} site:{linkedin_host} {f1yr}',
+            f'"{name}" {focus} site:twitter.com OR site:x.com {f90}',
+            f'"{name}" {focus} site:youtube.com {f1yr}',
+        ]
+        if scope == FR_SCOPE:
+            queries += [f'"{name}" {focus} {group} {f1yr}' for group in fr_site_groups()]
+        return queries + _handle_queries(ids, f90, f1yr)
+
+    queries = [
+        f'"{name}" Roche {f90}',
+        f'"{name}" pharmaceutical OR oncology {f90}',
+        f'"{name}" ({news}) {f90}',
+        f'"{name}" {drugs} {f1yr}',
+        f'"{name}" Roche FDA OR EMA OR clinical trial {f1yr}',
+        f'"{name}" ESMO OR ASCO OR AACR {f1yr}',
+        f'"{name}" drug approval OR immunotherapy OR biomarker {f1yr}',
+        f'"{name}" cancer treatment OR lung cancer OR NSCLC {f1yr}',
+        f'"{name}" interview OR conference OR publication {f1yr}',
+        f'"{name}" pharma OR oncology site:researchgate.net OR site:pubmed.ncbi.nlm.nih.gov',
+        # Social sites — always search regardless of known handles
+        f'"{name}" site:{linkedin_host} {f1yr}',
+        f'"{name}" site:twitter.com OR site:x.com {f90}',
+        f'"{name}" site:threads.net OR site:bsky.app {f90}',
+        f'"{name}" site:youtube.com {f1yr}',
+        f'"{name}" site:reddit.com pharma OR oncology {f1yr}',
+    ]
+
+    if scope == FR_SCOPE:
+        # Source-scoped: each group pins the search to a slice of the registry,
+        # so these queries can only return French sources.
+        queries += [f'"{name}" {group} {f1yr}' for group in fr_site_groups()]
+        # Terminology-scoped: French clinical vocabulary, unpinned by domain, to
+        # catch French sources the registry does not enumerate.
+        queries += [
+            f'"{name}" oncologie OR cancérologie OR pneumologie {f1yr}',
+            f'"{name}" CBNPC OR "cancer du poumon" OR "cancer bronchique" {f1yr}',
+            f'"{name}" immunothérapie OR "thérapie ciblée" OR "essai clinique" {f1yr}',
+            f'"{name}" congrès OR communication OR publication {f1yr}',
+        ]
+
+    return queries + _handle_queries(ids, f90, f1yr)
 
 
 # ── Post persistence ──────────────────────────────────────
@@ -556,9 +692,16 @@ async def _save_post_and_extract(
     from app.models import ScrapedPost
 
     h = sha256_hash(content)
+    # Provenance, recorded at save time from the URL itself. Before this,
+    # source_type was never written anywhere in the codebase (only read), and
+    # source_name was set later from LLM-guessed metadata — so there was no way
+    # to answer "what share of this content came from a French source?".
     post = ScrapedPost(
         target_id=target_id, source_url=url, raw_content=content,
         content_hash=h, idempotency_key=f"{idempotency_key}:{h[:16]}",
+        domain=_domain(url),
+        source_scope=FR_SCOPE if is_french_source(url) else Scope.GLOBAL.value,
+        source_category=source_category(url),
     )
     async with CelerySessionLocal() as sess:
         try:
@@ -677,6 +820,43 @@ def _process_url_agent(
     return "new" if saved else "dup"
 
 
+# Share of Pass-1 fetch slots reserved for French sources under the French scope.
+# A reservation rather than a hard filter: a hard French-only cut starves targets
+# whose French coverage is thin that week, and a target that ends Pass 1 with zero
+# posts is escalated to the Wave-2 rescue, which is agent-only and therefore the
+# one path that actually bills TinyFish credits. Reserving keeps French sources
+# from being crowded out without ever emptying a target.
+_FR_SLOT_SHARE = 0.6
+
+
+def _select_candidates(candidates: list[dict], limit: int, scope: str = "fr") -> list[dict]:
+    """Pick which candidates get fetched, reserving slots for French sources.
+
+    Candidates arrive score-sorted. Under the global scope this is a plain top-N.
+    Under the French scope, up to `_FR_SLOT_SHARE` of the slots are filled from
+    French sources first, then the remainder from everything else in score order,
+    and any unused French slots fall back to non-French candidates so the fetch
+    budget is never left unspent.
+    """
+    if limit <= 0:
+        return []
+    if scope != FR_SCOPE:
+        return candidates[:limit]
+
+    french = [c for c in candidates if is_french_source(c["url"])]
+    other = [c for c in candidates if not is_french_source(c["url"])]
+
+    fr_slots = min(len(french), max(1, int(limit * _FR_SLOT_SHARE)))
+    selected = french[:fr_slots]
+    selected += other[: limit - len(selected)]
+    # Unused non-French capacity (few other candidates) goes back to French ones.
+    if len(selected) < limit:
+        taken = {id(c) for c in selected}
+        selected += [c for c in french if id(c) not in taken][: limit - len(selected)]
+    # Restore global score order so the fetch pool is still ranked.
+    return sorted(selected, key=lambda c: c["score"], reverse=True)
+
+
 # ── Main scrape service ───────────────────────────────────
 
 class ScrapeService:
@@ -697,13 +877,21 @@ class ScrapeService:
             name = target.name
             import json as _json
             known_urls: list[str] = _json.loads(target.known_urls or "[]")
+            # Per-target acquisition scope. Defaults to French: the platform
+            # monitors the French market, and the client asked for competitor
+            # messaging "exclusively in French" too. Set a target to 'global'
+            # when its coverage is genuinely international.
+            scope = (getattr(target, "source_scope", None) or FR_SCOPE).strip().lower()
+            # Narrows every query to one therapeutic area when set — the client
+            # asked for competitor tracking to cover lung cancer only.
+            disease_area = target.disease_area
 
         ids = extract_identifiers(known_urls)
         run_id = ctx.run_id
 
         # ── Pass 1: parallel search + parallel fetch ───────────────────────
-        logger.info("scrape.pass1.start", target=name)
-        queries = build_search_queries(name, ids)
+        logger.info("scrape.pass1.start", target=name, scope=scope, focus=disease_area)
+        queries = build_search_queries(name, ids, scope=scope, disease_area=disease_area)
 
         # Build candidate list: known_urls (score=10) + search results
         seen_urls: set[str] = set()
@@ -718,7 +906,7 @@ class ScrapeService:
 
         # Search queries in parallel
         def _do_search(q: str):
-            for hit in _tf_search(q):
+            for hit in _tf_search(q, scope=scope):
                 url = hit.get("url", "")
                 if not url or _is_binary(url):
                     return
@@ -728,7 +916,7 @@ class ScrapeService:
                         candidates.append({
                             "url": url,
                             "snippet": hit.get("snippet", ""),
-                            "score": _signal_score(url, ids),
+                            "score": _signal_score(url, ids, scope=scope),
                         })
 
         with ThreadPoolExecutor(max_workers=_SEARCH_WORKERS) as ex:
@@ -736,7 +924,11 @@ class ScrapeService:
 
         candidates.sort(key=lambda c: c["score"], reverse=True)
         n_known = len([k for k in (known_urls or []) if k and not _is_binary(k)])
-        top_candidates = [c for c in candidates if not ctx.should_stop][: 10 + n_known]
+        top_candidates = _select_candidates(
+            [c for c in candidates if not ctx.should_stop],
+            limit=10 + n_known,
+            scope=scope,
+        )
 
         # ── Pass 1: FREE FETCH ONLY on all candidates (no agent) ─────────────
         # Track bot-blocked URLs for potential Pass 2 agent retry

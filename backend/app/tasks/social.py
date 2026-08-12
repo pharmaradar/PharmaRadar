@@ -9,24 +9,28 @@ clicks a trend (see routers/social.py).
 import asyncio
 import json
 
-
-def _detect_lang(text: str) -> str:
-    """Lightweight FR/EN detector based on French function-word frequency."""
-    if not text or len(text) < 20:
-        return "en"
-    lower = text.lower()[:1000]
-    fr_signals = [" de ", " du ", " le ", " la ", " les ", " des ", " et ",
-                  " en ", " une ", " pour ", " avec ", " dans ", " sur ",
-                  " est ", " sont ", " nous ", " vous ", " ils ", " au ",
-                  "qu'", " l'", " d'", " n'"]
-    return "fr" if sum(1 for w in fr_signals if w in lower) >= 4 else "en"
-
 import structlog
+
+from app.services.lang import detect_lang as _detect_lang
+from app.services.fr_sources import Scope, is_french_source, normalize_host
+
+FR_SCOPE = Scope.FR.value
 
 # ── Pharma relevance gate ─────────────────────────────────
 # Posts are only stored if they contain at least one of these signals in
 # their text, hashtags, or topic. This filters out off-topic results that
 # happen to mention a vague keyword (e.g. "drug" = illegal drugs, slang).
+#
+# This gate runs at INGEST, before insert — anything it rejects is a post we
+# already paid Apify for and then threw away. It used to be English-only, so
+# French posts ("essai clinique", "immunothérapie", "dépistage") were dropped
+# on arrival. That was half of the client's "not enough French posts".
+#
+# Matching is substring-based on lowercased text, so terms must be long enough
+# to be unambiguous: "has" (HAS, the French health authority) would match every
+# English sentence, and "arc" would match "search". Use a longer phrase instead.
+# Accented terms are listed with their unaccented spelling too, because people
+# type "immunotherapie" on mobile.
 _PHARMA_SIGNALS = frozenset({
     # Disease / therapeutic area
     "cancer", "tumor", "tumour", "oncology", "leukemia", "leukaemia",
@@ -54,11 +58,51 @@ _PHARMA_SIGNALS = frozenset({
     "asco", "esmo", "aacr", "sitc",
     # Healthcare context
     "oncologist", "hematologist", "patient outcomes", "health outcomes",
+
+    # ── FRENCH ─────────────────────────────────────────────
+    # Disease / therapeutic area
+    "cancer du poumon", "cancer bronchique", "cancer du sein",
+    "cancer colorectal", "cancer de la prostate", "cancer de l'ovaire",
+    "leucémie", "leucemie", "lymphome", "myélome", "myelome",
+    "mélanome", "melanome", "tumeur", "métastase", "metastase",
+    "métastatique", "metastatique", "carcinome", "sarcome",
+    # CBNPC / CPNPC are what French clinicians write for NSCLC; CPC for SCLC.
+    "cbnpc", "cpnpc", "oncologie", "cancérologie", "cancerologie",
+    "pneumologie", "hématologie", "hematologie",
+    "sclérose en plaques", "sclerose en plaques", "maladie rare", "hémophilie",
+    "hemophilie", "diabète", "diabete",
+    # Treatment / clinical
+    "immunothérapie", "immunotherapie", "chimiothérapie", "chimiotherapie",
+    "radiothérapie", "radiotherapie", "thérapie ciblée", "therapie ciblee",
+    "essai clinique", "essai de phase", "recherche clinique", "biomarqueur",
+    "dépistage", "depistage", "survie globale", "survie sans progression",
+    "effets secondaires", "effets indésirables", "effets indesirables",
+    "soins de support", "prise en charge", "médicament", "medicament",
+    "anticorps monoclonal", "biosimilaire", "médecine personnalisée",
+    "medecine personnalisee", "traitement du cancer", "essais cliniques",
+    # Regulatory / industry / institutions (long forms only — see note above)
+    "institut national du cancer", "ligue contre le cancer", "fondation arc",
+    "gustave roussy", "institut curie", "unicancer", "inserm",
+    "haute autorité de santé", "haute autorite de sante",
+    "agence du médicament", "agence du medicament", "affaires médicales",
+    # Healthcare roles
+    "oncologue", "pneumologue", "hématologue", "hematologue",
+    "médecin", "medecin", "soignant", "cancérologue", "cancerologue",
 })
 
 
 def _is_pharma_relevant(post: dict) -> bool:
-    """Return True if the post has any pharma/medical signal in text, hashtags, or topic."""
+    """Return True if the post should be stored.
+
+    Posts from a curated French source bypass the keyword gate. The gate exists
+    to reject off-topic results from a broad keyword search, but a post from a
+    source we deliberately chose — Gustave Roussy, INCa, Le Quotidien du Médecin —
+    is on-topic by construction. Without this bypass, source pinning makes the
+    yield *worse*: an institution's congress-programme announcement carries no
+    pharma keyword, so it is paid for and then discarded.
+    """
+    if is_french_source(post.get("post_url") or ""):
+        return True
     text = " ".join(filter(None, [
         post.get("text") or "",
         " ".join(post.get("hashtags") or []),
@@ -198,15 +242,17 @@ async def _run_scan(lang_override: str | None = None) -> dict:
         # Fetch AND insert stay inside the semaphore so concurrent DB
         # connections are bounded to 4 alongside the Apify runs.
         async with sem:
-            # Always scrape worldwide — language is detected per post and
-            # stored. The UI's FR/EN/Global filter is display-only, so the
-            # same scrape serves all modes (no double Apify cost).
+            # Target the search at the configured market instead of scraping
+            # worldwide and filtering afterwards. Display-side filtering can
+            # only subtract: if 5% of a worldwide haul is French, the French
+            # view is 5%. Searching in French fills the same result slots with
+            # French posts at identical cost.
             posts = await loop.run_in_executor(
                 None,
-                lambda p=platform, t=term: apify_client.fetch_platform(
+                lambda p=platform, t=term, lf=lang_filter: apify_client.fetch_platform(
                     p, t, max_results=max_per_query, window_days=window,
                     page_urls=fb_page_urls if p == "facebook" else None,
-                    lang_filter=None,
+                    lang_filter=lf,
                 ),
             )
             # ONE session (= one engine + one connection) for the whole batch —
@@ -238,6 +284,9 @@ async def _run_scan(lang_override: str | None = None) -> dict:
                         kind=kind,
                         topic=term,
                         language=_detect_lang(post.get("text", "")),
+                        domain=normalize_host(post["post_url"]),
+                        source_scope=(FR_SCOPE if is_french_source(post["post_url"])
+                                      else Scope.GLOBAL.value),
                         posted_at=post.get("posted_at"),
                         content_hash=ch,
                     ).on_conflict_do_nothing(index_elements=["content_hash"])
@@ -282,37 +331,49 @@ def _expand_query(query: str) -> dict[str, list[str]]:
     from app.services.llm_router import call_llm
 
     prompt = (
-        "You are a pharma social media intelligence expert focused on the FRENCH market.\n"
+        "You are a pharma social media intelligence expert working the FRENCH market.\n"
         "Given a user's search query, generate search terms for social media scrapers.\n"
-        "Bias the expansion towards France: include the French translation of the topic, "
-        "French medical hashtags, and a couple of global English terms so worldwide posts are still captured.\n\n"
+        "This platform monitors France only — French KOLs, French institutions, French "
+        "patients. Write the terms the way a French oncologist or a French patient would "
+        "actually type them, NOT an English term translated word for word.\n\n"
         "Return ONLY a JSON object with two keys:\n"
         '- "hashtags": exactly 5 terms for Instagram (no spaces, no # prefix). '
-        "Mix: 3-4 French/France-related + 1-2 English/global. Use real French medical hashtags. "
+        "All must be French or France-specific, except drug brand names and congress names, "
+        "which are identical in every language. Use real French medical hashtags. "
         "Keep this list short — each hashtag costs Apify credits.\n"
-        '- "keywords": 6-8 terms for Twitter/LinkedIn/Facebook (can include spaces and phrases). '
-        "Mix: 4-5 in French + 2-3 in English. These are free via TinyFish.\n\n"
-        "Focus on: drug names (universal), French disease names, French treatment terms, "
-        "French institutions (INCa, Ligue contre le cancer, ARC, Unicancer, Inserm), "
-        "patient communities (octobrerose, marsbleu), congresses (also in French).\n\n"
+        '- "keywords": 6-8 terms for Twitter/LinkedIn/Facebook (spaces and phrases allowed). '
+        "At least 6 must be in French. These are free via TinyFish, so favour recall.\n\n"
+        "Use the abbreviations French clinicians actually use: CBNPC (never NSCLC), "
+        "CPC (never SCLC), SG for survie globale, SSP for survie sans progression.\n"
+        "Draw on: French disease names, French treatment terms, French institutions "
+        "(INCa, Unicancer, Inserm, Gustave Roussy, Institut Curie, IFCT, SPLF, "
+        "Ligue contre le cancer, Fondation ARC), French patient communities "
+        "(octobrerose, marsbleu), and congresses named in French.\n\n"
         "Examples:\n"
-        '- "lung cancer" → {"hashtags": ["cancerdupoumon", "poumon", "oncologiefrance", '
-        '"octobrerose", "cancersurvivants", "lungcancer", "NSCLC"], '
-        '"keywords": ["cancer du poumon", "cancer poumon France", "oncologie pulmonaire", '
-        '"essai clinique poumon", "Ligue contre le cancer poumon", "lung cancer", "NSCLC research"]}\n'
+        '- "lung cancer" → {"hashtags": ["cancerdupoumon", "CBNPC", "oncologiefrance", '
+        '"pneumologie", "cancersurvivants"], '
+        '"keywords": ["cancer du poumon", "cancer bronchique", "CBNPC", '
+        '"oncologie pulmonaire France", "essai clinique poumon", '
+        '"Ligue contre le cancer poumon", "dépistage cancer du poumon"]}\n'
         '- "Tecentriq" → {"hashtags": ["Tecentriq", "atezolizumab", "immunothérapie", '
-        '"oncologiefrance", "essaiclinique", "immunotherapy", "pdl1"], '
+        '"oncologiefrance", "essaiclinique"], '
         '"keywords": ["Tecentriq", "atezolizumab", "immunothérapie Roche", '
-        '"Tecentriq France", "essai clinique atezolizumab", "atezolizumab clinical trial"]}\n'
-        '- "ASCO 2026" → {"hashtags": ["ASCO2026", "ASCO", "oncologiefrance", '
-        '"congresoncologie", "rechercheclinique", "oncology2026"], '
+        '"Tecentriq France", "essai clinique atezolizumab", "immunothérapie CBNPC", '
+        '"atezolizumab survie globale"]}\n'
+        '- "ASCO 2026" → {"hashtags": ["ASCO2026", "oncologiefrance", '
+        '"congresoncologie", "rechercheclinique", "cancerologie"], '
         '"keywords": ["ASCO 2026", "ASCO 2026 France", "congrès oncologie ASCO", '
-        '"actualité oncologie", "ASCO annual meeting"]}\n\n'
+        '"actualité oncologie France", "résultats ASCO 2026", "étude présentée ASCO"]}\n\n'
         f'Query: "{query}"'
     )
     fallback = {"hashtags": [query], "keywords": [query]}
     try:
-        reply = call_llm([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=400)
+        # 2048, not 400: gemini-2.5-flash is a *thinking* model and its reasoning
+        # tokens come out of the same budget, so 400 returned ~30 characters —
+        # the JSON was always truncated, this function always fell back to the raw
+        # query, and the French term expansion never actually ran. Same root cause
+        # as the extractor truncation fixed on 2026-08-08.
+        reply = call_llm([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=2048)
         reply = reply.strip()
         if "```" in reply:
             reply = reply.split("```")[1].lstrip("json").strip()
@@ -392,15 +453,16 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
 
     # One actor call per platform with all terms batched — same cost as a single-term search
     async def _fetch_platform(p: str) -> list[dict]:
-        # Worldwide scrape — UI's language filter is display-only,
-        # so one Apify call serves all language modes.
+        # Market-targeted, not worldwide — see the note in _run_scan. The terms
+        # themselves are already French-biased by _expand_query; lang_filter
+        # adds the platform-native targeting on top.
         return await loop.run_in_executor(
             None,
-            lambda: apify_client.fetch_platform_expanded(
+            lambda p=p, lf=lang_filter: apify_client.fetch_platform_expanded(
                 p, hashtags, keywords,
                 max_results=30, window_days=window,
                 page_urls=fb_page_urls if p == "facebook" else None,
-                lang_filter=None,
+                lang_filter=lf,
             ),
         )
 
@@ -433,6 +495,9 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
                     hashtags=json.dumps(post.get("hashtags", [])),
                     query=query, kind="field", topic=post["topic"],
                     language=_detect_lang(post.get("text", "")),
+                    domain=normalize_host(post["post_url"]),
+                    source_scope=(FR_SCOPE if is_french_source(post["post_url"])
+                                  else Scope.GLOBAL.value),
                     posted_at=post.get("posted_at"), content_hash=ch,
                 ).on_conflict_do_nothing(index_elements=["content_hash"])
                 try:
