@@ -9,6 +9,7 @@ from app.models.discovery_result import DiscoveryResult
 from app.models.social_post import SocialPost
 from app.models.user import User
 from app.models.market_report import MarketReport
+from app.models.tracked_account import TrackedAccount
 from app.models.search_history import SearchHistory
 from app.models.burning_topic import BurningTopic, BurningTopicReport
 from app.models.congress import Congress, CongressQuestion
@@ -31,4 +32,5 @@ __all__ = [
     "Congress",
     "CongressQuestion",
     "MarketReport",
+    "TrackedAccount",
 ]

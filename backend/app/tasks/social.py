@@ -154,6 +154,22 @@ def social_scan(self, lang_override: str | None = None) -> dict:
     return asyncio.run(_run_scan(lang_override))
 
 
+async def _tracked_handles(session, platform: str) -> list[str]:
+    """Active handles for one platform, newest first. [] means 'none configured',
+    which the search builder treats as 'do not account-pin', while None means
+    'caller supplied nothing' and falls back to the curated constant."""
+    from sqlalchemy import select
+
+    from app.models import TrackedAccount
+
+    rows = await session.execute(
+        select(TrackedAccount.handle)
+        .where(TrackedAccount.platform == platform, TrackedAccount.active.is_(True))
+        .order_by(TrackedAccount.id)
+    )
+    return [h for h in rows.scalars().all() if h]
+
+
 async def _run_scan(lang_override: str | None = None) -> dict:
     from datetime import datetime, timezone
     from app.database import CelerySessionLocal
@@ -179,6 +195,12 @@ async def _run_scan(lang_override: str | None = None) -> dict:
         include_kols = s.social_include_kols if s else True
         fb_page_urls = json.loads(s.facebook_page_urls) if s and s.facebook_page_urls else []
         lang_filter = lang_override or getattr(s, "social_lang_filter", "fr") or "fr"
+
+        # Accounts the team chose to monitor. Loaded once per scan and threaded
+        # down, rather than queried deep inside the search builder where there is
+        # no session. Facebook pages still come from AppSettings for now; the
+        # registry holds them too, so that is the next thing to converge.
+        tracked_x = await _tracked_handles(sess, "twitter")
 
         # List of (search_term, platform_hint) for KOL scanning.
         # Prefer twitter_handle over name for Twitter (more precise); name is used as fallback.
@@ -252,7 +274,7 @@ async def _run_scan(lang_override: str | None = None) -> dict:
                 lambda p=platform, t=term, lf=lang_filter: apify_client.fetch_platform(
                     p, t, max_results=max_per_query, window_days=window,
                     page_urls=fb_page_urls if p == "facebook" else None,
-                    lang_filter=lf,
+                    lang_filter=lf, accounts=tracked_x,
                 ),
             )
             # ONE session (= one engine + one connection) for the whole batch —

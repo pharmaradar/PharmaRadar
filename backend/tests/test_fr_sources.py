@@ -403,3 +403,51 @@ def test_target_own_accounts_survive_the_focus_narrowing():
         "MSD France", {"twitter": "msdfrance"}, scope="fr", disease_area="lung_cancer"
     )
     assert any("site:x.com/msdfrance" in q for q in queries)
+
+
+# ── Tracked accounts registry ─────────────────────────────
+
+def test_registry_accounts_drive_the_search_when_supplied():
+    """The client asked to define accounts; the queries must follow the registry,
+    not the hardcoded constant."""
+    from app.services.tinyfish_social import _search_variants
+
+    variants = _search_variants("twitter", "cancer", "fr", ["MyClinic", "MyInstitute"])
+    joined = " ".join(variants)
+    assert "site:x.com/MyClinic" in joined and "site:x.com/MyInstitute" in joined
+    # …and the curated constant must NOT leak in when the caller supplied a list.
+    assert "GustaveRoussy" not in joined
+
+
+def test_no_accounts_configured_means_no_account_pinning():
+    """An empty registry must not silently fall back to the constant — that would
+    scrape accounts the team explicitly removed."""
+    from app.services.tinyfish_social import _search_variants
+
+    variants = _search_variants("twitter", "cancer", "fr", [])
+    assert len(variants) == 1, "only the unpinned discovery lane remains"
+    assert "site:x.com/" not in variants[0]
+
+
+def test_caller_supplying_nothing_falls_back_to_the_curated_constant():
+    """Paths without a DB session (tests, ad-hoc calls) must keep France pinning."""
+    from app.services.tinyfish_social import _search_variants
+
+    joined = " ".join(_search_variants("twitter", "cancer", "fr", None))
+    assert "GustaveRoussy" in joined
+
+
+def test_handles_are_normalised_and_batched():
+    from app.services.tinyfish_social import _account_groups
+
+    groups = _account_groups("twitter", ["@one", "two ", "three", "four", "five", "six"])
+    assert len(groups) == 2, "batched five per query"
+    assert "site:x.com/one" in groups[0] and "@" not in groups[0]
+
+
+def test_account_pinning_is_x_only():
+    """LinkedIn uses its country locale; Instagram's actor cannot fetch a profile."""
+    from app.services.tinyfish_social import _account_groups
+
+    assert _account_groups("linkedin", ["someone"]) == []
+    assert _account_groups("instagram", ["someone"]) == []

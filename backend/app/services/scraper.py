@@ -246,13 +246,23 @@ def _rate_limit_wait(key: str) -> None:
                                key_suffix=key[-12:] if key else "default",
                                max_wait=_RATE_LIMIT_MAX_WAIT)
                 return
+            # Count first, and only claim a slot when we are actually going to
+            # proceed. The previous version added an entry on EVERY attempt,
+            # including the ones that then slept and retried — so a caller
+            # waiting out a full window injected a phantom entry per attempt
+            # (up to ~15 in the 30s deadline) into the very window it was
+            # waiting on. Under contention the limiter throttled traffic that
+            # was never sent, which is what produced the flood of
+            # rate_limit_wait_exceeded warnings in production.
             pipe = r.pipeline(True)
             pipe.zremrangebyscore(redis_key, "-inf", now - window)
             pipe.zcard(redis_key)
-            pipe.zadd(redis_key, {f"{now:.6f}": now})
-            pipe.expire(redis_key, window + 5)
-            _, count, _, _ = pipe.execute()
+            _, count = pipe.execute()
             if count < limit:
+                claim = r.pipeline(True)
+                claim.zadd(redis_key, {f"{now:.6f}": now})
+                claim.expire(redis_key, window + 5)
+                claim.execute()
                 return
             # Window full — sleep until the oldest entry expires (capped)
             oldest = r.zrange(redis_key, 0, 0, withscores=True)

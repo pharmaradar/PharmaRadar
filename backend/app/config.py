@@ -32,7 +32,13 @@ class Settings(BaseSettings):
     # TinyFish
     tinyfish_api_key: str = ""
     tinyfish_api_keys: str = ""
-    tinyfish_rate_limit_per_key: int = 30
+    # 60/min is the plan's documented search limit and the most restrictive of
+    # the three (search 60/min, fetch 300/min, agent 10 concurrent) — one shared
+    # counter has to respect the tightest. 30 was the free-tier throttle and
+    # halved throughput for no reason: at 50 targets the French scope issues
+    # ~1800 searches, which is ~60 min of pure waiting at 30/min and would run
+    # into the stale-run reaper.
+    tinyfish_rate_limit_per_key: int = 60
     # Credits granted per key per month (no balance API). 1650 = the Starter plan
     # allowance. Only agent runs consume these — search and fetch are unmetered,
     # see _billable_steps in services/scraper.py.

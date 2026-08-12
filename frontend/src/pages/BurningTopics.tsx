@@ -118,8 +118,15 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
       q.state.data?.some((r) => r.status === "pending" || r.status === "running") ? 3000 : false,
   });
 
+  // Date filter: overrides the topic's window for this generation only, so the
+  // team can re-cut a report over a different period without editing the topic.
+  // A congress has fixed dates, so the control is topic-only.
+  const [periodDays, setPeriodDays] = useState<number | undefined>(undefined);
+
   const generateMut = useMutation({
-    mutationFn: () => entry.kind === "topic" ? api.burningTopics.generate(id) : api.congress.generate(id),
+    mutationFn: () => entry.kind === "topic"
+      ? api.burningTopics.generate(id, periodDays)
+      : api.congress.generate(id),
     onSuccess: () => {
       setExpanded(true);
       qc.invalidateQueries({ queryKey: ["entry-reports", entry.kind, id] });
@@ -155,6 +162,22 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
+            {entry.kind === "topic" && (
+              <select
+                value={periodDays ?? ""}
+                onChange={(e) => setPeriodDays(e.target.value ? Number(e.target.value) : undefined)}
+                disabled={Boolean(inFlight)}
+                title="Period covered by the next report"
+                className="px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-slate-600 dark:text-slate-300 disabled:opacity-50"
+              >
+                <option value="" className="dark:bg-[#0d1424]">
+                  Default ({entry.data.period_days}d)
+                </option>
+                {[7, 30, 90, 180, 365].map((d) => (
+                  <option key={d} value={d} className="dark:bg-[#0d1424]">Last {d} days</option>
+                ))}
+              </select>
+            )}
             <button
               onClick={() => generateMut.mutate()}
               disabled={Boolean(inFlight) || !entry.data.is_active}

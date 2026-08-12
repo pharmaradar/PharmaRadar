@@ -199,6 +199,16 @@ export interface AppSettings {
   social_lang_filter: string;
 }
 
+export interface TrackedAccount {
+  id: number;
+  platform: "twitter" | "linkedin" | "instagram" | "facebook";
+  handle: string;
+  url: string | null;
+  label: string | null;
+  category: string | null;
+  active: boolean;
+}
+
 export interface SocialPost {
   id: number;
   platform: string;
@@ -455,6 +465,17 @@ export interface BurningTopicReport {
   important_posts: BurningTopicImportantPost[];
   main_authors: BurningTopicAuthor[];
   question_answers: ReportQuestionAnswer[];
+  /** Market-research sections. Empty on reports generated before they existed —
+   *  the UI renders each section only when it has content. */
+  what_is_said: string;
+  voices_note: string;
+  volume_note: string;
+  subtopics: string[];
+  voice_rows: MarketReportVoiceRow[];
+  volume: Partial<MarketReportVolume>;
+  item_count: number;
+  voice_exact_share: number;
+  window_days: number;
   pdf_url: string | null;
   created_at: string;
 }
@@ -670,6 +691,14 @@ export const api = {
         `/social/trends?days=${days}&platform=${platform}&kind=${kind}&limit=${limit}` +
         `&language=${language}`
       ),
+    // Tracked accounts registry — the client's "define and track specific accounts".
+    accounts: () => req<{ accounts: TrackedAccount[] }>("/social/accounts"),
+    createAccount: (body: Partial<TrackedAccount>) =>
+      req<TrackedAccount>("/social/accounts", { method: "POST", body: JSON.stringify(body) }),
+    updateAccount: (id: number, body: Partial<TrackedAccount>) =>
+      req<TrackedAccount>(`/social/accounts/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    deleteAccount: (id: number) =>
+      req<{ deleted: number }>(`/social/accounts/${id}`, { method: "DELETE" }),
     scan: (lang?: string) => req<{ started: boolean; task_id: string; lang: string | null }>(
       `/social/scan${lang ? `?lang=${lang}` : ""}`, { method: "POST" }),
     clearPosts: () => req<{ deleted: number }>("/social/posts", { method: "DELETE" }),
@@ -708,8 +737,13 @@ export const api = {
       period_days: number; exclusion_words: string[]; restriction_terms: string[]; is_active: boolean;
     }>) => req<BurningTopic>(`/burning-topics/${id}`, { method: "PUT", body: JSON.stringify(body) }),
     remove: (id: number) => req<void>(`/burning-topics/${id}`, { method: "DELETE" }),
-    generate: (id: number) =>
-      req<{ report_id: number; status: string }>(`/burning-topics/${id}/generate-report`, { method: "POST" }),
+    // periodDays overrides the topic's window for this run only.
+    generate: (id: number, periodDays?: number) =>
+      req<{ report_id: number; status: string }>(
+        `/burning-topics/${id}/generate-report` +
+        (periodDays ? `?period_days=${periodDays}` : ""),
+        { method: "POST" },
+      ),
     reports: (id: number) => req<BurningTopicReport[]>(`/burning-topics/${id}/reports`),
     followup: (topicId: number, reportId: number, question: string, history: { role: string; content: string }[]) =>
       req<{ answer: string }>(`/burning-topics/${topicId}/reports/${reportId}/followup`, {

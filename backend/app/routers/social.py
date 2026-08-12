@@ -501,3 +501,97 @@ async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
     post.llm_description = what + (_SEPARATOR + so_what if so_what else "")
     await db.commit()
     return {"description": what, "so_what": so_what, "cached": False}
+
+
+# ── Tracked accounts registry ─────────────────────────────
+# The client asked to "define and track specific social media accounts".
+# Keyword search pays for N results and hopes; a chosen account is on-topic by
+# construction, which is why this is the highest-yield lever on French volume.
+
+class TrackedAccountIn(BaseModel):
+    platform: str
+    handle: str
+    url: str | None = None
+    label: str | None = None
+    category: str | None = None
+    active: bool = True
+
+
+def _account_out(a) -> dict:
+    return {
+        "id": a.id, "platform": a.platform, "handle": a.handle, "url": a.url,
+        "label": a.label, "category": a.category, "active": a.active,
+    }
+
+
+@router.get("/accounts")
+async def list_accounts(db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+
+    rows = await db.execute(
+        select(TrackedAccount).order_by(TrackedAccount.platform, TrackedAccount.handle)
+    )
+    return {"accounts": [_account_out(a) for a in rows.scalars().all()]}
+
+
+@router.post("/accounts", status_code=201, dependencies=[Depends(require_admin)])
+async def create_account(body: TrackedAccountIn, db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+    from app.models.tracked_account import PLATFORMS
+
+    platform = (body.platform or "").strip().lower()
+    if platform not in PLATFORMS:
+        raise HTTPException(status_code=422, detail=f"platform must be one of {', '.join(PLATFORMS)}")
+    handle = (body.handle or "").strip().lstrip("@")
+    if not handle:
+        raise HTTPException(status_code=422, detail="handle is required")
+
+    existing = await db.execute(
+        select(TrackedAccount).where(
+            TrackedAccount.platform == platform,
+            func.lower(TrackedAccount.handle) == handle.lower(),
+        )
+    )
+    if existing.scalars().first():
+        raise HTTPException(status_code=409, detail="That account is already tracked")
+
+    row = TrackedAccount(
+        platform=platform, handle=handle,
+        url=(body.url or "").strip() or (f"https://x.com/{handle}" if platform == "twitter" else None),
+        label=(body.label or "").strip() or None,
+        category=(body.category or "").strip() or None,
+        active=body.active,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _account_out(row)
+
+
+@router.patch("/accounts/{account_id}", dependencies=[Depends(require_admin)])
+async def update_account(account_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+
+    row = await db.get(TrackedAccount, account_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    for field in ("label", "category", "url"):
+        if field in body:
+            setattr(row, field, (body[field] or "").strip() or None)
+    if "active" in body:
+        row.active = bool(body["active"])
+    await db.commit()
+    await db.refresh(row)
+    return _account_out(row)
+
+
+@router.delete("/accounts/{account_id}", dependencies=[Depends(require_admin)])
+async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+
+    row = await db.get(TrackedAccount, account_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    await db.delete(row)
+    await db.commit()
+    return {"deleted": account_id}

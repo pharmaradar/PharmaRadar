@@ -283,6 +283,7 @@ def fetch_platform_expanded(
     timeout_secs: int = 180,
     page_urls: list[str] | None = None,
     lang_filter: str | None = "fr",
+    accounts: list[str] | None = None,
 ) -> list[dict]:
     """Like fetch_platform but accepts pre-expanded term lists.
 
@@ -298,7 +299,8 @@ def fetch_platform_expanded(
         terms = [t for t in (keywords + hashtags) if t and t.strip()][:6]
         if not terms:
             return []
-        return fetch_via_tinyfish(platform, terms, max_results=max_results, lang_filter=lang_filter)
+        return fetch_via_tinyfish(platform, terms, max_results=max_results,
+                                  lang_filter=lang_filter, accounts=accounts)
 
     token = get_settings().apify_api_token
     if not token:
@@ -390,13 +392,15 @@ def fetch_platform_expanded(
 def fetch_platform(platform: str, term: str, max_results: int = 30,
                    window_days: int = 180, timeout_secs: int = 180,
                    page_urls: list[str] | None = None,
-                   lang_filter: str | None = "fr") -> list[dict]:
+                   lang_filter: str | None = "fr",
+                   accounts: list[str] | None = None) -> list[dict]:
     """Run one platform Actor.
     Returns normalized posts filtered to the last `window_days`. Never raises."""
     # Twitter + LinkedIn use TinyFish search (Apify deferred)
     if platform in ("twitter", "linkedin"):
         from app.services.tinyfish_social import fetch_via_tinyfish
-        return fetch_via_tinyfish(platform, [term], max_results=max_results, lang_filter=lang_filter)
+        return fetch_via_tinyfish(platform, [term], max_results=max_results,
+                                  lang_filter=lang_filter, accounts=accounts)
 
     token = get_settings().apify_api_token
     if not token:

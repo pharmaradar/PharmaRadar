@@ -59,7 +59,27 @@ def _hash_url(url: str) -> str:
     return hashlib.sha256(_norm_url(url).encode()).hexdigest()
 
 
-def _search_variants(platform: str, term: str, lang_filter: str | None) -> list[str]:
+def _account_groups(platform: str, accounts: list[str] | None) -> list[str]:
+    """`site:` groups for the accounts the team tracks.
+
+    `accounts` comes from the tracked_accounts table. When the caller passes
+    nothing (a unit test, or a path that has no session) the curated constant in
+    fr_sources is used, so search never silently loses its France pinning.
+    """
+    if accounts is None:
+        return fr_account_groups(platform)
+    if platform != "twitter" or not accounts:
+        return []
+    handles = [h.strip().lstrip("@") for h in accounts if h and h.strip()]
+    groups = []
+    for i in range(0, len(handles), 5):
+        batch = handles[i:i + 5]
+        groups.append("(" + " OR ".join(f"site:x.com/{h}" for h in batch) + ")")
+    return groups
+
+
+def _search_variants(platform: str, term: str, lang_filter: str | None,
+                     accounts: list[str] | None = None) -> list[str]:
     """Search strings to issue for one term.
 
     TinyFish ``search query`` hits a *web* index, not the platform's own search,
@@ -89,7 +109,7 @@ def _search_variants(platform: str, term: str, lang_filter: str | None) -> list[
         # Unpinned discovery lane first, then the account-pinned lanes.
         variants = [f"{term} site:twitter.com OR site:x.com"]
         if fr:
-            variants += [f"{term} {group}" for group in fr_account_groups("twitter")]
+            variants += [f"{term} {group}" for group in _account_groups("twitter", accounts)]
         return variants
     # LinkedIn: fr.linkedin.com is a real country subdomain, so it pins the
     # source directly (measured 10/10 French). The generic domain stays as a
@@ -101,7 +121,8 @@ def _search_variants(platform: str, term: str, lang_filter: str | None) -> list[
 
 def fetch_via_tinyfish(platform: str, queries: list[str],
                       max_results: int = 30,
-                      lang_filter: str | None = "fr") -> list[dict]:
+                      lang_filter: str | None = "fr",
+                      accounts: list[str] | None = None) -> list[dict]:
     """Run TinyFish searches for each query, return SocialPost-shaped dicts.
 
     ``lang_filter="fr"`` targets the search at the French market rather than
@@ -129,7 +150,7 @@ def fetch_via_tinyfish(platform: str, queries: list[str],
         q_clean = q.strip()
         if not q_clean:
             continue
-        for variant in _search_variants(platform, q_clean, lang_filter):
+        for variant in _search_variants(platform, q_clean, lang_filter, accounts):
             if variant not in search_queries:
                 search_queries.append(variant)
 

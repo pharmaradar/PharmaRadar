@@ -2,6 +2,9 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Download, ExternalLink, Loader2, Send } from "lucide-react";
 import { api, BurningTopicReport } from "@/lib/api";
+import {
+  Prose, SectionLabel, SubtopicList, VoiceChart, VolumeBlock,
+} from "@/components/MarketSections";
 import { cn } from "@/lib/utils";
 
 export function StatusBadge({ status }: { status: string }) {
@@ -191,6 +194,39 @@ export default function ReportView({ scope, scopeId, report }: ReportViewProps) 
         <div className="rounded-lg bg-blue-50/60 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-900/30 px-4 py-3">
           <div className="text-xs font-semibold text-blue-700 dark:text-blue-300 uppercase tracking-wider mb-1">So what</div>
           <p className="text-sm text-slate-700 dark:text-slate-200 whitespace-pre-wrap">{report.so_what}</p>
+        </div>
+      )}
+
+      {/* Market-research sections, in the order the client listed them. Each is
+          rendered only when present, so reports generated before these existed
+          still display correctly. */}
+      {report.what_is_said && (
+        <div>
+          <SectionLabel>What is being said</SectionLabel>
+          <Prose text={report.what_is_said} />
+        </div>
+      )}
+
+      {report.voice_rows?.length > 0 && (
+        <div>
+          <SectionLabel>Voice distribution</SectionLabel>
+          <VoiceChart rows={report.voice_rows} exactShare={report.voice_exact_share} />
+          {report.voices_note && <div className="mt-2"><Prose text={report.voices_note} /></div>}
+        </div>
+      )}
+
+      {(report.volume?.total ?? 0) > 0 && (
+        <div>
+          <SectionLabel>Volume of mentions</SectionLabel>
+          <VolumeBlock volume={report.volume} />
+          {report.volume_note && <div className="mt-2"><Prose text={report.volume_note} /></div>}
+        </div>
+      )}
+
+      {report.subtopics?.length > 0 && (
+        <div>
+          <SectionLabel>Key sub-topics to consider</SectionLabel>
+          <SubtopicList items={report.subtopics} />
         </div>
       )}
 
