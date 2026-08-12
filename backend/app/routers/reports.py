@@ -190,7 +190,9 @@ async def trigger_synthesis(scope: str, user=Depends(get_current_user)):
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    if sr.get_state(scope).get("status") == "running":
+    # Staleness-aware: a status left at "running" by a worker that died must not
+    # block regeneration until the 24h key expires.
+    if sr.is_running(scope):
         raise HTTPException(status_code=409, detail=f"A {scope} synthesis is already running")
 
     enforce_daily_generation(user, f"synthesis_{scope}")

@@ -413,14 +413,42 @@ def _redis():
     return _redis_lib.Redis.from_url(get_settings().redis_url, socket_timeout=2)
 
 
+# A "running" status older than this is treated as dead. The task's own hard
+# time_limit is 720s, so anything past that plus a margin cannot still be alive —
+# it was killed by a deploy, an OOM, or a lost worker. Without this a single dead
+# task would block regeneration until the 24h key expired, because the trigger
+# endpoint 409s while the status reads "running".
+_RUNNING_STALE_AFTER = 900
+
+
 def set_status(scope: str, **fields) -> None:
     try:
+        fields.setdefault("at", datetime.now(timezone.utc).isoformat())
         _redis().set(STATUS_KEY.format(scope=scope), json.dumps(fields), ex=86400)
     except Exception:
         pass
 
 
+def is_running(scope: str) -> bool:
+    """True only when a generation is running AND recent enough to still be alive."""
+    state = get_state(scope)
+    if state.get("status") != "running":
+        return False
+    stamp = state.get("at")
+    if not stamp:
+        return True          # no timestamp (pre-upgrade row) — assume it is live
+    try:
+        started = datetime.fromisoformat(stamp)
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - started).total_seconds() < _RUNNING_STALE_AFTER
+
+
 def get_state(scope: str) -> dict:
+    """Stored status + last result. `at` is carried through so callers can tell a
+    live generation from one abandoned by a dead worker — see is_running()."""
     status: dict = {"status": "idle"}
     result = None
     try:
@@ -433,7 +461,12 @@ def get_state(scope: str) -> dict:
             result = json.loads(raw)
     except Exception:
         pass
-    return {"status": status.get("status", "idle"), "error": status.get("error"), "result": result}
+    return {
+        "status": status.get("status", "idle"),
+        "error": status.get("error"),
+        "at": status.get("at"),
+        "result": result,
+    }
 
 
 def store_result(scope: str, result: dict) -> None:
