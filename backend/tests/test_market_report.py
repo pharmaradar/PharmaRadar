@@ -238,3 +238,37 @@ def test_slugify_makes_a_safe_filename():
     assert mr.slugify("What do doctors think about subcutaneous therapies?") \
         .startswith("what-do-doctors-think")
     assert "/" not in mr.slugify("a/b c") and mr.slugify("") == "query"
+
+
+# ── Blob pathnames (GDPR) ─────────────────────────────────
+
+def test_blob_pathnames_are_unguessable_but_keep_their_shape():
+    """The Blob store is public, so the URL is the only protection on PDFs that
+    name real clinicians. The random token must not break the two things that
+    read the filename: the `.pdf` filter in list_pdfs and the prefix that
+    Reports.tsx categorises on."""
+    from app.services.vercel_blob_storage import unguessable_pathname
+
+    original = "reports/2026-08-12/Weekly_KOL_Report_2026-08-12.pdf"
+    out = unguessable_pathname(original)
+    name = out.rsplit("/", 1)[-1]
+
+    assert out != original, "must add entropy"
+    assert out.endswith(".pdf"), "list_pdfs filters on the extension"
+    assert name.startswith("Weekly_KOL_Report_"), "Reports.tsx categorises on the prefix"
+    assert out.startswith("reports/2026-08-12/"), "directory must be unchanged"
+    assert "2026-08-12" in name, "extractDate must still find the date"
+
+
+def test_blob_pathnames_do_not_collide():
+    from app.services.vercel_blob_storage import unguessable_pathname
+
+    generated = {unguessable_pathname("a/b.pdf") for _ in range(300)}
+    assert len(generated) == 300
+
+
+def test_blob_pathname_without_an_extension_is_still_handled():
+    from app.services.vercel_blob_storage import unguessable_pathname
+
+    out = unguessable_pathname("a/b")
+    assert out.startswith("a/b-") and "." not in out.rsplit("/", 1)[-1]
