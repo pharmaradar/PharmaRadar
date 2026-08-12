@@ -451,3 +451,33 @@ def test_account_pinning_is_x_only():
 
     assert _account_groups("linkedin", ["someone"]) == []
     assert _account_groups("instagram", ["someone"]) == []
+
+
+# ── Instagram via free search ─────────────────────────────
+
+def test_instagram_post_urls_are_recognised():
+    from app.services.tinyfish_social import _is_post_url
+
+    assert _is_post_url("instagram", "https://www.instagram.com/p/DZpyA39jA2W/") is True
+    assert _is_post_url("instagram", "https://www.instagram.com/reel/DRCorr1khrh/") is True
+    # A profile or explore page is not a post and must not be ingested as one.
+    assert _is_post_url("instagram", "https://www.instagram.com/unicancer/") is False
+    assert _is_post_url("instagram", "https://www.instagram.com/explore/tags/cancer/") is False
+
+
+def test_instagram_author_comes_from_the_search_title():
+    """An Instagram post URL is /p/<code> — it identifies the post, not the
+    person — so the title is the only author signal a search result carries."""
+    from app.services.tinyfish_social import _instagram_author
+
+    assert _instagram_author({"title": 'Ligue contre le cancer on Instagram: "Un vaccin"'}) \
+        == "Ligue contre le cancer"
+    assert _instagram_author({"title": "Some unrelated page"}) is None
+    assert _instagram_author({}) is None
+
+
+def test_instagram_search_is_france_scoped_and_free():
+    from app.services.tinyfish_social import _search_variants
+
+    variants = _search_variants("instagram", "cancer du poumon", "fr")
+    assert variants == ["cancer du poumon site:instagram.com"]

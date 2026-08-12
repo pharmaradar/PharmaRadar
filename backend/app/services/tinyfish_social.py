@@ -22,6 +22,20 @@ def _norm_url(u: str) -> str:
     return u.strip().rstrip("/")
 
 
+_IG_TITLE_AUTHOR_RE = re.compile(r"^(.{2,60}?)\s+on\s+Instagram", re.IGNORECASE)
+
+
+def _instagram_author(hit: dict) -> str | None:
+    """Pull the account out of a search title.
+
+    An Instagram post URL is /p/<code>, which identifies the post and not the
+    person, so the only author signal in a search result is the title Instagram
+    renders as "<account> on Instagram: ...".
+    """
+    match = _IG_TITLE_AUTHOR_RE.match((hit.get("title") or "").strip())
+    return match.group(1).strip() if match else None
+
+
 def _extract_handle(url: str) -> str | None:
     """Pull @handle from a twitter/x or linkedin URL."""
     try:
@@ -52,6 +66,9 @@ def _is_post_url(platform: str, url: str) -> bool:
         return ("linkedin.com/posts/" in u or
                 "linkedin.com/feed/update/" in u or
                 "linkedin.com/pulse/" in u)
+    if platform == "instagram":
+        # A post or reel, not a profile or the explore pages.
+        return "instagram.com/" in u and ("/p/" in u or "/reel/" in u)
     return False
 
 
@@ -111,6 +128,12 @@ def _search_variants(platform: str, term: str, lang_filter: str | None,
         if fr:
             variants += [f"{term} {group}" for group in _account_groups("twitter", accounts)]
         return variants
+    if platform == "instagram":
+        # Free discovery: the web index knows Instagram posts, carries the French
+        # caption in the snippet, and honours --location France — which the
+        # hashtag actor cannot do at all. Apify is then only needed for the
+        # things search cannot give: engagement counts and comments.
+        return [f"{term} site:instagram.com"]
     # LinkedIn: fr.linkedin.com is a real country subdomain, so it pins the
     # source directly (measured 10/10 French). The generic domain stays as a
     # discovery lane for French posts hosted on the global locale.
@@ -136,7 +159,7 @@ def fetch_via_tinyfish(platform: str, queries: list[str],
     Engagement counts (likes/comments) are 0 — search results don't include them.
     posted_at is also None — would need to fetch each post individually.
     """
-    if platform not in ("twitter", "linkedin"):
+    if platform not in ("twitter", "linkedin", "instagram"):
         return []
 
     out: list[dict] = []
@@ -178,7 +201,8 @@ def fetch_via_tinyfish(platform: str, queries: list[str],
             out.append({
                 "platform": platform,
                 "post_url": url,
-                "author": _extract_handle(url),
+                "author": (_instagram_author(hit) if platform == "instagram"
+                           else _extract_handle(url)),
                 "text": text,
                 "thumbnail_url": None,
                 "likes": 0,

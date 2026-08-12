@@ -123,6 +123,8 @@ _COMMENT_POST_LIMIT = 10
 # Patient comments are the most sensitive material the platform touches.
 # They are stored through the same AE classification as every other post.
 _COMMENTS_ENABLED = True
+# Free, but each term is still a search against the shared rate limiter.
+_IG_FREE_TERM_LIMIT = 12
 
 
 def _set_status(**fields) -> None:
@@ -220,6 +222,39 @@ async def _ingest_posts(session, posts: list[dict], *, kind: str, topic: str,
             await session.rollback()
             logger.debug("social_scan.insert_failed", exc=str(exc)[:120])
     return inserted
+
+
+async def _scan_instagram_free(terms: list[str], lang_filter: str | None,
+                               max_per_term: int = 10) -> int:
+    """Instagram discovery through TinyFish search — no Apify credits.
+
+    The web index knows Instagram posts, returns the French caption in the
+    snippet, and honours --location France, which the hashtag actor cannot do at
+    all. It costs nothing, so it runs *alongside* the Apify hashtag lane rather
+    than replacing it: Apify still supplies the engagement counts and timestamps
+    that search results lack, and the client's "top 10 posts by views/comments"
+    depends on those.
+
+    Overlap between the two lanes is harmless — both dedup on the URL hash.
+    """
+    from app.database import CelerySessionLocal
+    from app.services.tinyfish_social import fetch_via_tinyfish
+
+    if not terms:
+        return 0
+    loop = asyncio.get_running_loop()
+    saved = 0
+    for term in terms:
+        posts = await loop.run_in_executor(
+            None, lambda t=term: fetch_via_tinyfish(
+                "instagram", [t], max_results=max_per_term, lang_filter=lang_filter))
+        if not posts:
+            continue
+        async with CelerySessionLocal() as sess:
+            saved += await _ingest_posts(sess, posts, kind="field", topic=term,
+                                         query=term)
+    logger.info("social_scan.instagram_free", terms=len(terms), posts=saved)
+    return saved
 
 
 async def _scan_instagram_accounts(handles: list[str], window: int,
@@ -429,9 +464,12 @@ async def _run_scan(lang_override: str | None = None) -> dict:
         jobs.append(_run_one("", "field", "facebook"))
     # Tracked Instagram accounts use a different actor from the hashtag scan, so
     # they run as their own job rather than through _run_one.
-    if tracked_ig and "instagram" in platforms:
-        jobs.append(_scan_instagram_accounts(
-            tracked_ig, window, max_per_query, _COMMENTS_ENABLED))
+    if "instagram" in platforms:
+        # Free French discovery, run in addition to the paid hashtag lane.
+        jobs.append(_scan_instagram_free(keywords[:_IG_FREE_TERM_LIMIT], lang_filter))
+        if tracked_ig:
+            jobs.append(_scan_instagram_accounts(
+                tracked_ig, window, max_per_query, _COMMENTS_ENABLED))
     await asyncio.gather(*jobs, return_exceptions=True)
 
     _set_status(running=False, done=done_count, inserted=inserted_count,
