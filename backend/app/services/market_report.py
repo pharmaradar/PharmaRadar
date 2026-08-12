@@ -30,6 +30,7 @@ doctors think" is answered by different rows in each:
 """
 from __future__ import annotations
 
+import asyncio
 import html as _html
 import json
 import re
@@ -57,6 +58,10 @@ DEFAULT_WINDOW_DAYS = 30
 MAX_INSIGHTS = 40
 MAX_SOCIAL = 40
 MAX_WEB = 25
+
+# Below this, a precise search is judged too thin and the broader terms are
+# tried as well — better a slightly noisy report than an empty one.
+_MIN_MATERIAL = 12
 
 # gemini-2.5-flash is a thinking model — reasoning shares this budget. A short
 # cap here is what silently truncated other LLM calls in this codebase.
@@ -86,6 +91,54 @@ class Material:
                 f"\"{(item.get('text') or '')[:260]}\""
             )
         return "\n".join(lines)
+
+
+# ── Live research ─────────────────────────────────────────
+
+async def research(session, question: str, queries: list[str],
+                   language: str | None = "fr", max_queries: int = 5) -> int:
+    """Search the web for this question and persist what comes back.
+
+    Without this the report can only describe what a previous scrape happened to
+    collect, so a genuinely new question ("Was the ATOMIC study discussed at ASCO
+    2026?") returns nothing — which is exactly the "no significant difference"
+    the client reported. Searching makes the tab dynamic.
+
+    TinyFish search is unmetered (only agent runs bill), so this costs wall-clock
+    and nothing else. Rows are written as DiscoveryResult, which is where
+    _gather_web already looks, and are deduplicated on content hash so asking the
+    same question twice does not duplicate the corpus.
+    """
+    from app.routers.discovery import _save_hit
+    from app.services.scraper import _tf_search_discovery
+
+    scope = "fr" if (language or "fr") == "fr" else "global"
+    loop = asyncio.get_running_loop()
+    seen: set[str] = set()
+    saved = 0
+
+    for query in queries[:max_queries]:
+        try:
+            hits = await loop.run_in_executor(
+                None, lambda q=query: _tf_search_discovery(q, scope=scope)
+            )
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("market_report.search_failed", q=query[:70], error=str(exc)[:120])
+            continue
+        for hit in hits or []:
+            try:
+                # Stored under the question so _gather_web's ILIKE finds it.
+                if await _save_hit(session, question, hit, seen):
+                    saved += 1
+            except Exception:                          # noqa: BLE001
+                continue
+    try:
+        await session.commit()
+    except Exception:                                  # noqa: BLE001
+        await session.rollback()
+    logger.info("market_report.research", question=question[:70], queries=len(queries[:max_queries]),
+                saved=saved)
+    return saved
 
 
 # ── Gathering ─────────────────────────────────────────────
@@ -272,11 +325,33 @@ async def gather(session, question: str, *, terms: list[str] | None = None,
                  language: str | None = "fr") -> Material:
     """Collect and score everything relevant to one question."""
     since = datetime.now(timezone.utc) - timedelta(days=window_days)
+    # A typed question never appears verbatim in stored text, so matching the
+    # whole sentence with a LIKE finds nothing. Reduce it to content terms.
+    if terms is None:
+        from app.services.question import expand
+        terms = expand(question, language=language)["terms"]
     search_terms = [t for t in (terms or [question]) if t and t.strip()]
 
-    insights = await _gather_insights(session, search_terms, since)
-    social = await _gather_social(session, search_terms, since, language)
-    web = await _gather_web(session, search_terms, language)
+    # Search the discriminating terms first. Corpus-wide staples ("study",
+    # "cancer", "patients") match almost every row, so including them up front
+    # fills the per-source caps with material about something else entirely —
+    # a question about the ATOMIC trial retrieved 104 unrelated items that way.
+    # They are only added back if the precise search came up thin.
+    from app.services.question import split_by_specificity
+    specific, fallback = split_by_specificity(search_terms)
+    tiers = [specific or search_terms]
+    if fallback and specific:
+        tiers.append(search_terms)
+
+    insights: list[dict] = []
+    social: list[dict] = []
+    web: list[dict] = []
+    for tier in tiers:
+        insights = await _gather_insights(session, tier, since)
+        social = await _gather_social(session, tier, since, language)
+        web = await _gather_web(session, tier, language)
+        if len(insights) + len(social) + len(web) >= _MIN_MATERIAL:
+            break
 
     # KOL statements first: they are the highest-trust material and should be
     # the low citation numbers the model reaches for.
@@ -577,24 +652,44 @@ def slugify(text: str, limit: int = 40) -> str:
 
 def build(question: str, *, terms: list[str] | None = None,
           window_days: int = DEFAULT_WINDOW_DAYS,
-          language: str | None = "fr") -> dict:
-    """Build one market-research report end to end. Runs inside a Celery task."""
+          language: str | None = "fr",
+          live_research: bool = True) -> dict:
+    """Build one market-research report end to end. Runs inside a Celery task.
+
+    `live_research` is what makes the tab dynamic: the question is searched
+    before anything is gathered, so a topic nobody has scraped before still
+    produces a report. Search is unmetered, so this costs wall-clock only. Pass
+    False for a stored topic that already has its own collection pipeline.
+    """
     import asyncio
 
     from app.services.llm_router import call_llm
+    from app.services.question import expand
 
     now = datetime.now(timezone.utc)
+    plan = expand(question, language=language) if terms is None else {
+        "terms": terms, "queries": [question]}
 
-    async def _fetch() -> Material:
+    async def _fetch() -> tuple[Material, int]:
         from app.database import CelerySessionLocal
         async with CelerySessionLocal() as session:
-            return await gather(session, question, terms=terms,
-                                window_days=window_days, language=language)
+            found = 0
+            if live_research:
+                # Best-effort: a search failure must not lose the stored material.
+                try:
+                    found = await research(session, question, plan["queries"],
+                                           language=language)
+                except Exception as exc:                    # noqa: BLE001
+                    logger.warning("market_report.research_skipped", error=str(exc)[:160])
+            return (await gather(session, question, terms=plan["terms"],
+                                 window_days=window_days, language=language), found)
 
-    material = asyncio.run(_fetch())
+    material, researched = asyncio.run(_fetch())
 
     base = {
         "question": question,
+        "researched": researched,
+        "search_terms": plan["terms"],
         "generated_at": now.isoformat(),
         "window_days": window_days,
         "language": language,
