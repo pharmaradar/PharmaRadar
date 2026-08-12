@@ -272,3 +272,63 @@ def test_blob_pathname_without_an_extension_is_still_handled():
 
     out = unguessable_pathname("a/b")
     assert out.startswith("a/b-") and "." not in out.rsplit("/", 1)[-1]
+
+
+# ── Brand detection / share of voice ──────────────────────
+
+def test_brands_match_trade_name_and_inn():
+    """Clinicians write "atezolizumab" at least as often as "Tecentriq", and a
+    press release uses both in one paragraph."""
+    from app.services.brands import detect
+
+    assert detect("Tecentriq shows benefit") == ["Tecentriq"]
+    assert "Tecentriq" in detect("atezolizumab plus chemotherapy")
+    assert "Imfinzi" in detect("durvalumab periop data")
+    assert "Enhertu" in detect("T-DXd at ESMO")
+
+
+@pytest.mark.parametrize("text", ["Opdivoqtig is different", "preTecentriqly", "keytrudaX"])
+def test_brand_matching_is_word_bounded(text):
+    """Substring matching would inflate a competitor's share off a lookalike."""
+    from app.services.brands import detect
+
+    assert detect(text) == []
+
+
+def test_share_of_voice_splits_ours_from_theirs():
+    from app.services.brands import tally
+
+    result = tally([
+        {"text": "Tecentriq data", "sentiment": "positive", "engagement": 5, "source": "a"},
+        {"text": "Keytruda data", "sentiment": "neutral", "engagement": 0, "source": "b"},
+        {"text": "Opdivo and Keytruda", "sentiment": "negative", "engagement": 2, "source": "c"},
+    ])
+    assert result["total_mentions"] == 4, "an item naming two brands counts for both"
+    assert result["roche_mentions"] == 1
+    assert result["roche_share"] == 25
+    owners = {o["owner"] for o in result["by_owner"]}
+    assert {"roche", "MSD", "BMS"} <= owners
+
+
+def test_unrated_brands_are_not_reported_as_zero_sentiment():
+    """A brand discussed neutrally forty times is unrated, not 0% positive —
+    collapsing those would invent a negative signal."""
+    from app.services.brands import tally
+
+    result = tally([{"text": "Keytruda", "sentiment": "neutral", "engagement": 0, "source": "a"}])
+    row = next(r for r in result["brands"] if r["brand"] == "Keytruda")
+    assert row["net_sentiment"] is None and row["rated_mentions"] == 0
+
+    rated = tally([
+        {"text": "Keytruda good", "sentiment": "positive", "engagement": 0, "source": "a"},
+        {"text": "Keytruda bad", "sentiment": "negative", "engagement": 0, "source": "b"},
+    ])
+    row = next(r for r in rated["brands"] if r["brand"] == "Keytruda")
+    assert row["net_sentiment"] == 0 and row["rated_mentions"] == 2
+
+
+def test_share_of_voice_of_nothing_does_not_divide_by_zero():
+    from app.services.brands import tally
+
+    result = tally([{"text": "no products mentioned", "sentiment": "neutral"}])
+    assert result["total_mentions"] == 0 and result["roche_share"] == 0

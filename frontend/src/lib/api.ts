@@ -199,6 +199,53 @@ export interface AppSettings {
   social_lang_filter: string;
 }
 
+export interface KolProfileCard {
+  id: number;
+  name: string;
+  target_type: "kol" | "competitor";
+  active: boolean;
+  disease_area: string | null;
+  twitter_handle: string | null;
+  linkedin_url: string | null;
+  insight_count: number;
+  last_activity: string | null;
+  summary_bullets: string[];
+  so_what: string | null;
+  summary_generated_at: string | null;
+}
+
+export interface KolStatement {
+  id: number; topic: string; what_they_said: string; sentiment: string;
+  category: string; url: string; source_name: string; source_scope: string; date: string;
+}
+
+export interface KolProfile extends KolProfileCard {
+  known_urls: string[];
+  window_days: number;
+  sentiment: Record<string, number>;
+  top_topics: { topic: string; count: number }[];
+  per_week: Record<string, number>;
+  statements: KolStatement[];
+}
+
+/** Share of voice by product — a brand lead thinks in assets, not topics. */
+export interface BrandRow {
+  brand: string; owner: string; is_ours: boolean; indication: string;
+  mentions: number; share: number;
+  sentiment: Record<string, number>;
+  /** Net sentiment across rated mentions only; null when nothing carried an opinion. */
+  net_sentiment: number | null;
+  rated_mentions: number; engagement: number; sources: number;
+}
+
+export interface ShareOfVoice {
+  window_days: number; source: string; items_scanned: number; tracked_brands: number;
+  total_mentions: number; roche_mentions: number; competitor_mentions: number;
+  roche_share: number;
+  brands: BrandRow[];
+  by_owner: { owner: string; is_ours: boolean; mentions: number; share: number; brands: string[] }[];
+}
+
 export interface TrackedAccount {
   id: number;
   platform: "twitter" | "linkedin" | "instagram" | "facebook";
@@ -613,6 +660,15 @@ export const api = {
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
     },
   },
+
+  // KOL module — surfaces the per-target summaries the pipeline already writes.
+  kolProfiles: (q?: string, targetType = "kol") =>
+    req<{ profiles: KolProfileCard[] }>(
+      `/targets/profiles?target_type=${targetType}` + (q ? `&q=${encodeURIComponent(q)}` : "")),
+  kolProfile: (id: number, days = 30) =>
+    req<KolProfile>(`/targets/${id}/profile?days=${days}`),
+  shareOfVoice: (days = 30, source = "all") =>
+    req<ShareOfVoice>(`/stats/share-of-voice?days=${days}&source=${source}`),
 
   settings: {
     get: () => req<AppSettings>("/settings/"),

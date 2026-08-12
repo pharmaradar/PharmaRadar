@@ -1521,6 +1521,78 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
 
 
 # ── SPA fallback ──────────────────────────────────────────
+
+@app.get("/api/stats/share-of-voice")
+async def share_of_voice(days: int = BRIEF_WINDOW_DAYS, source: str = "all",
+                         user=Depends(get_current_user)):
+    """Share of voice by product — Roche assets versus the competition.
+
+    A brand lead thinks in assets, not topics: is the conversation about
+    Tecentriq or Keytruda, and are we gaining or losing ground? Everything here
+    is counted from text already stored — no extra scraping, no LLM call — so it
+    is free to compute and refreshes as soon as a run lands.
+
+    `source`: all | kol | social.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    from sqlalchemy import select, desc
+
+    from app.database import AsyncSessionLocal
+    from app.models import ExtractedInsight, ScrapedPost, SocialPost, Target
+    from app.services.ae_filter import post_not_ae, social_not_ae
+    from app.services.brands import BRANDS, tally
+
+    window = max(1, min(days, 365))
+    since = datetime.now(timezone.utc) - timedelta(days=window)
+    items: list[dict] = []
+
+    async with AsyncSessionLocal() as sess:
+        if source in ("all", "kol"):
+            rows = await sess.execute(
+                select(ExtractedInsight, Target.name, ScrapedPost.domain)
+                .join(Target, ExtractedInsight.target_id == Target.id)
+                .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
+                .where(ExtractedInsight.extracted_at >= since)
+                .where(post_not_ae())
+                .order_by(desc(ExtractedInsight.extracted_at))
+                .limit(1000)
+            )
+            for insight, name, domain in rows.all():
+                items.append({
+                    # Topic carries the drug name as often as the quote does.
+                    "text": f"{insight.topic or ''} {insight.what_they_said or ''}",
+                    "sentiment": insight.sentiment,
+                    "engagement": 0,
+                    "source": name or domain or "",
+                })
+
+        if source in ("all", "social"):
+            rows = await sess.execute(
+                select(SocialPost)
+                .where(SocialPost.scraped_at >= since)
+                .where(social_not_ae())
+                .order_by(desc(SocialPost.scraped_at))
+                .limit(1000)
+            )
+            for post in rows.scalars().all():
+                items.append({
+                    "text": f"{post.topic or ''} {post.text or ''}",
+                    "sentiment": None,     # social posts carry no rated sentiment
+                    "engagement": (post.likes or 0) + 2 * (post.comments or 0),
+                    "source": post.author or post.domain or post.platform or "",
+                })
+
+    result = tally(items)
+    result.update({
+        "window_days": window,
+        "source": source,
+        "items_scanned": len(items),
+        "tracked_brands": len(BRANDS),
+    })
+    return result
+
+
 _spa_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if _spa_dir.exists():
     app.mount("/assets", StaticFiles(directory=str(_spa_dir / "assets")), name="assets")
