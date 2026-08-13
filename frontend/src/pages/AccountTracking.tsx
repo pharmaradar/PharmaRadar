@@ -9,6 +9,7 @@ import {
   api, type AccountPost, type TrackedAccountFull,
 } from "@/lib/api";
 import { Prose, SubtopicList, VoiceChart, VolumeBlock } from "@/components/MarketSections";
+import PostAnalysisPanel from "@/components/PostAnalysisPanel";
 import { useAuthStore } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
@@ -388,6 +389,9 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
   const [days, setDays] = useState(90);
   const [editing, setEditing] = useState(startEditing);
+  // Clicking a post analyses it rather than leaving the app — the post's own
+  // link is still on the card for opening the original.
+  const [analysingPost, setAnalysingPost] = useState<AccountPost | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["account-detail", id, days],
@@ -603,11 +607,17 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {data.posts.map((post) => (
               <PostCard key={post.id} post={post}
-                onClick={() => window.open(post.url, "_blank", "noopener")} />
+                onClick={() => setAnalysingPost(post)} />
             ))}
           </div>
         )}
       </div>
+
+      {analysingPost && (
+        <PostAnalysisPanel postId={analysingPost.id} onClose={() => setAnalysingPost(null)}
+          post={{ text: analysingPost.text, author: analysingPost.author,
+                  platform: analysingPost.platform, url: analysingPost.url }} />
+      )}
     </div>
   );
 }

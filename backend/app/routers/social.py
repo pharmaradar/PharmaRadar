@@ -777,3 +777,148 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(row)
     await db.commit()
     return {"deleted": account_id}
+
+
+# ── Single-post analysis ──────────────────────────────────
+
+def _post_reach(post, platform_stats: dict) -> dict:
+    """This post's pull, benchmarked against its own platform.
+
+    "Volume of mentions" is meaningless for one post — it is always one. What is
+    useful is how far THIS post travelled relative to others on the same
+    platform, so that is what the section reports.
+
+    X and LinkedIn arrive through search, which carries no engagement at all, so
+    their numbers are absent rather than zero. Rendering 0 there would read as
+    "nobody engaged" when the truth is "we cannot see engagement".
+    """
+    engagement = (post.likes or 0) + (post.comments or 0) + (post.views or 0)
+    available = post.platform in ("instagram", "facebook")
+    stats = platform_stats.get(post.platform) or {}
+    average = stats.get("avg") or 0
+    return {
+        "available": available,
+        "likes": post.likes or 0,
+        "comments": post.comments or 0,
+        "views": post.views or 0,
+        "engagement": engagement,
+        "platform_average": round(average, 1) if available else None,
+        "vs_average": (round(engagement / average, 1)
+                       if available and average else None),
+        "platform": post.platform,
+        "note": (None if available else
+                 f"{post.platform} posts are collected through search, which "
+                 "does not expose engagement figures."),
+    }
+
+
+@router.post("/post/{post_id}/analyse")
+async def analyse_post(post_id: int, refresh: bool = False,
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """Analyse one post on its own, in the report format used everywhere else."""
+    post = await db.get(SocialPost, post_id)
+    if not post or post.is_adverse_event is True:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    if post.analysis_sections and not refresh:
+        try:
+            return {"sections": json.loads(post.analysis_sections), "cached": True}
+        except Exception:                           # noqa: BLE001 - rewrite bad cache
+            pass
+
+    if not (post.text or "").strip():
+        raise HTTPException(422, "This post has no text to analyse")
+
+    rows = await db.execute(
+        select(SocialPost.platform,
+               func.avg(func.coalesce(SocialPost.likes, 0)
+                        + func.coalesce(SocialPost.comments, 0)
+                        + func.coalesce(SocialPost.views, 0)))
+        .group_by(SocialPost.platform)
+    )
+    platform_stats = {p: {"avg": float(a or 0)} for p, a in rows.all()}
+
+    # Who is speaking is a classification, not a distribution: one post has one
+    # author, so a percentage chart would be theatre.
+    from app.services.voice_profile import classify
+    bucket, confidence, evidence = classify(
+        post.author or "", url=post.post_url or "",
+        is_tracked_kol=False, target_type=None)
+
+    hashtags = json.loads(post.hashtags) if post.hashtags else []
+    reach = _post_reach(post, platform_stats)
+
+    prompt = (
+        "You are a pharma intelligence analyst monitoring the French market for "
+        "Roche. Analyse this SINGLE social media post.\n\n"
+        "Output EXACTLY these sections, each starting with its marker:\n\n"
+        "##EXEC_SUMMARY##\n2-3 sentences: what this post is, who published it "
+        "and the context.\n\n"
+        "##SO_WHAT##\n2-3 sentences on the strategic implication for a pharma "
+        "medical affairs team — the signal, opportunity or risk, and what to do "
+        "about it. Be specific.\n\n"
+        "##WHAT_IS_SAID##\n2-4 sentences on the substance: the actual claims, "
+        "products, studies or positions stated in the post.\n\n"
+        "##VOICE##\n1-2 sentences on who is speaking and what standing they "
+        f"have. Our classifier reads this author as: {bucket} ({confidence}). "
+        "Say whether the post supports that reading.\n\n"
+        "##REACH##\n1-2 sentences interpreting how far this post travelled, "
+        f"given: {json.dumps(reach)}. If engagement is unavailable on this "
+        "platform, say so plainly and do not guess.\n\n"
+        "##SUBTOPICS##\n3-5 lines starting '- ': the themes this post touches "
+        "that are worth tracking.\n\n"
+        "Base every statement on the post. Only the post text is available — "
+        "comment text is NOT collected, so never state what commenters said.\n\n"
+        f"Platform: {post.platform}\nAuthor: {post.author or 'unknown'}\n"
+        f"Posted: {post.posted_at.date().isoformat() if post.posted_at else 'undated'}\n"
+        f"Hashtags: {', '.join(hashtags) if hashtags else '-'}\n"
+        f"Engagement: {reach['likes']} likes, {reach['comments']} comments, "
+        f"{reach['views']} views\n\n"
+        f"Post text:\n{(post.text or '')[:4000]}"
+    )
+
+    from app.services.llm_router import call_llm_async
+    try:
+        # gemini-2.5-flash counts reasoning against this budget, so a small cap
+        # silently truncates the tail sections.
+        reply = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=6000)
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(502, f"LLM call failed: {str(exc)[:200]}") from exc
+
+    from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
+
+    raw = reply or ""
+    sections = {
+        "exec_summary": trim_incomplete(extract_section(raw, "EXEC_SUMMARY")),
+        "so_what": trim_incomplete(extract_section(raw, "SO_WHAT")),
+        "what_is_said": trim_incomplete(extract_section(raw, "WHAT_IS_SAID")),
+        "voice_note": trim_incomplete(extract_section(raw, "VOICE")),
+        "reach_note": trim_incomplete(extract_section(raw, "REACH")),
+        "subtopics": parse_bullets(extract_section(raw, "SUBTOPICS")),
+        # Computed, not written by the model.
+        "voice": {"bucket": bucket, "confidence": confidence, "evidence": evidence},
+        "reach": reach,
+    }
+    post.analysis_sections = json.dumps(sections)
+    post.analysed_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"sections": sections, "cached": False}
+
+
+@router.get("/post/{post_id}/analysis")
+async def get_post_analysis(post_id: int, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """Whatever analysis is already stored. Never calls the LLM.
+
+    Opening a post must not spend money — generating is an explicit action.
+    """
+    post = await db.get(SocialPost, post_id)
+    if not post or post.is_adverse_event is True:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if not post.analysis_sections:
+        return {"sections": None, "cached": False}
+    try:
+        return {"sections": json.loads(post.analysis_sections), "cached": True}
+    except Exception:                               # noqa: BLE001
+        return {"sections": None, "cached": False}

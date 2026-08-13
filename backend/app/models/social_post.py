@@ -54,6 +54,11 @@ class SocialPost(Base):
     tracked_account_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("tracked_accounts.id", ondelete="SET NULL"), index=True)
 
+    # Cached six-section analysis of this single post. Distinct from
+    # `llm_description`, which is the older two-part describe.
+    analysis_sections: Mapped[str | None] = mapped_column(Text)
+    analysed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     # Pharmacovigilance — same semantics as ScrapedPost.is_adverse_event.

@@ -5,6 +5,7 @@ import {
   Sparkles, Loader2, Search, RefreshCw, SlidersHorizontal, Clock,
 } from "lucide-react";
 import MarketResearchReport from "@/components/MarketResearchReport";
+import PostAnalysisPanel from "@/components/PostAnalysisPanel";
 import { api, type SocialPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
@@ -637,7 +638,12 @@ export default function SocialTrends() {
         </div>
       </div>
 
-      {selected && <DescribeModal post={selected} onClose={() => setSelected(null)} />}
+      {selected && (
+        <PostAnalysisPanel postId={selected.id} onClose={() => setSelected(null)}
+          withDescribe
+          post={{ text: selected.text, author: selected.author,
+                  platform: selected.platform, url: selected.post_url }} />
+      )}
     </div>
   );
 }

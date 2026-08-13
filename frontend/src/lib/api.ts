@@ -634,6 +634,23 @@ export interface AccountAnalysis {
   };
 }
 
+/** Six-section analysis of one post. `voice` and `reach` are computed from the
+ *  row, not written by the model. */
+export interface PostAnalysis {
+  exec_summary: string;
+  so_what: string;
+  what_is_said: string;
+  voice_note: string;
+  reach_note: string;
+  subtopics: string[];
+  voice: { bucket: string; confidence: string; evidence: string };
+  reach: {
+    available: boolean; likes: number; comments: number; views: number;
+    engagement: number; platform_average: number | null;
+    vs_average: number | null; platform: string; note: string | null;
+  };
+}
+
 export interface AccountPost {
   id: number;
   url: string;
@@ -905,6 +922,13 @@ export const api = {
     status: () => req<SocialScanStatus>("/social/status"),
     timeseries: (days = 30, top = 6) =>
       req<SocialTimeseries>(`/social/timeseries?days=${days}&top=${top}`),
+    /** Cached analysis only — never triggers an LLM call. */
+    postAnalysis: (id: number) =>
+      req<{ sections: PostAnalysis | null; cached: boolean }>(
+        `/social/post/${id}/analysis`),
+    analysePost: (id: number, refresh = false) =>
+      req<{ sections: PostAnalysis; cached: boolean }>(
+        `/social/post/${id}/analyse?refresh=${refresh}`, { method: "POST" }),
     describe: (id: number) =>
       req<{ description: string; so_what: string | null; cached: boolean }>("/social/describe", {
         method: "POST",
