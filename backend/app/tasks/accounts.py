@@ -115,6 +115,23 @@ async def _link_posts(session, account_id: int, urls: list[str]) -> None:
     await session.commit()
 
 
+def _authored_by(posts: list[dict], handle: str) -> list[dict]:
+    """Keep only the posts this account actually wrote.
+
+    Posts with no author at all are dropped: unverifiable attribution is the
+    thing being guarded against, so keeping them would defeat the check.
+    """
+    wanted = (handle or "").strip().lstrip("@").lower()
+    if not wanted:
+        return posts
+    kept = []
+    for post in posts or []:
+        author = (post.get("author") or "").strip().lstrip("@").lower()
+        if author and author == wanted:
+            kept.append(post)
+    return kept
+
+
 async def _scan_one(account, lang_filter: str = "fr") -> dict:
     """Collect one account's recent posts. Returns a small result summary."""
     from app.database import CelerySessionLocal
@@ -143,6 +160,12 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
             posts = await loop.run_in_executor(
                 None, lambda: apify_client.fetch_instagram_accounts(
                     [handle], max_per_account=_PER_ACCOUNT, window_days=90))
+            # The profile scraper also returns posts the account was tagged in
+            # or collaborated on. Measured: 2 of 24 came back authored by
+            # someone else, and linking those to this account would credit it
+            # with reach it never had. Twitter and LinkedIn already verify
+            # authorship this way; Instagram gives the username outright.
+            posts = _authored_by(posts, handle)
 
         elif platform == "facebook":
             if not apify_client.is_configured():
