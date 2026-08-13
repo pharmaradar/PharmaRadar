@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, AtSign, Check, ExternalLink, Eye, Facebook, Heart,
@@ -354,15 +354,41 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
     },
   });
 
+  // Poll the account until its scan timestamp moves, rather than reloading once
+  // after a guessed delay — a collect can take longer than any fixed wait, and a
+  // single reload that lands too early looks exactly like nothing happening.
+  const [awaiting, setAwaiting] = useState(false);
+  const scanBefore = useRef<string | null>(null);
+
+  useQuery({
+    queryKey: ["account-detail-watch", id, awaiting],
+    queryFn: async () => {
+      const fresh = await api.accounts.detail(id, days);
+      qc.setQueryData(["account-detail", id, days], fresh);
+      if (fresh.account.last_scanned_at
+          && fresh.account.last_scanned_at !== scanBefore.current) {
+        setAwaiting(false);
+        qc.invalidateQueries({ queryKey: ["accounts"] });
+      }
+      return fresh;
+    },
+    enabled: awaiting,
+    refetchInterval: 2000,
+  });
+
+  useEffect(() => {
+    if (!awaiting) return;
+    const timer = setTimeout(() => setAwaiting(false), 120_000);
+    return () => clearTimeout(timer);
+  }, [awaiting]);
+
   const refreshMut = useMutation({
     mutationFn: () => api.accounts.refresh(id),
-    onSuccess: () => {
-      // The sweep runs in a worker, so the rows appear a moment later.
-      setTimeout(() => {
-        qc.invalidateQueries({ queryKey: ["account-detail", id] });
-        qc.invalidateQueries({ queryKey: ["accounts"] });
-      }, 4000);
+    onMutate: () => {
+      scanBefore.current = data?.account.last_scanned_at ?? null;
+      setAwaiting(true);
     },
+    onError: () => setAwaiting(false),
   });
 
   const account = data?.account;
@@ -410,13 +436,14 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
               </button>
             )}
             {isAdmin && (
-              <button onClick={() => refreshMut.mutate()} disabled={refreshMut.isPending}
+              <button onClick={() => refreshMut.mutate()}
+                disabled={refreshMut.isPending || awaiting}
                 title="Collect this account's latest posts now"
                 className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-pharma-blue text-white rounded-lg hover:bg-pharma-light disabled:opacity-50 transition-colors">
-                {refreshMut.isPending
+                {refreshMut.isPending || awaiting
                   ? <Loader2 size={12} className="animate-spin" />
                   : <RefreshCw size={12} />}
-                Refresh
+                {awaiting ? "Collecting…" : "Refresh"}
               </button>
             )}
             <button onClick={onClose} aria-label="Close"
@@ -426,9 +453,9 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
           </div>
         </div>
 
-        {refreshMut.isSuccess && (
-          <p className="text-xs text-emerald-600 dark:text-emerald-400">
-            Refresh queued — new posts appear here within a minute.
+        {refreshMut.isError && (
+          <p className="text-xs text-red-400">
+            Could not start collection: {(refreshMut.error as Error)?.message?.slice(0, 160)}
           </p>
         )}
 
@@ -611,20 +638,87 @@ export default function AccountTracking() {
     queryFn: api.accounts.list,
   });
 
+  // Watch the pipeline for a window after any collect action.
+  //
+  // Polling "only while running" cannot bootstrap: the flag starts false, so the
+  // query never refetches, so it never sees the job start and the progress bar
+  // never appears. A single-account refresh also finishes in a few seconds, so
+  // even correct polling can miss the whole run — which is why the clicked card
+  // gets its own spinner below rather than relying on this.
+  const [watchUntil, setWatchUntil] = useState(0);
+  const watching = watchUntil > Date.now();
+
   const { data: status } = useQuery({
     queryKey: ["accounts-status"],
     queryFn: api.accounts.status,
-    // Poll only while a sweep is actually running.
-    refetchInterval: (q) => (q.state.data?.running ? 2000 : false),
+    refetchInterval: (q) => (q.state.data?.running || watching ? 1500 : false),
   });
+
+  // Which account is mid-collect, so only that card spins rather than all of
+  // them. Cleared when its scan timestamp moves, or by the safety timeout.
+  const [pendingId, setPendingId] = useState<number | null>(null);
+  const pendingSince = useRef<string | null>(null);
+  const [justDone, setJustDone] = useState<
+    { id: number; status: string | null; posts: number } | null>(null);
+
+  // Clear the confirmation after a few seconds so it does not become furniture.
+  useEffect(() => {
+    if (!justDone) return;
+    const timer = setTimeout(() => setJustDone(null), 6000);
+    return () => clearTimeout(timer);
+  }, [justDone]);
+
+  const watch = (accountId: number | null, previousScan?: string | null) => {
+    setWatchUntil(Date.now() + 120_000);
+    setPendingId(accountId);
+    pendingSince.current = previousScan ?? null;
+    qc.invalidateQueries({ queryKey: ["accounts-status"] });
+  };
+
+  // Poll the list while something is collecting, and stop the spinner once that
+  // account reports a newer scan.
+  useQuery({
+    queryKey: ["accounts-watch", pendingId, watching],
+    queryFn: async () => {
+      const fresh = await api.accounts.list();
+      qc.setQueryData(["accounts"], fresh);
+      if (pendingId != null) {
+        const row = fresh.accounts.find((a) => a.id === pendingId);
+        if (row && row.last_scanned_at && row.last_scanned_at !== pendingSince.current) {
+          // A collect can finish in under a second, so the spinner alone is
+          // easy to miss — that is exactly what "nothing happened" looked like.
+          // Leave a short confirmation on the card instead.
+          setJustDone({ id: pendingId, status: row.last_scan_status, posts: row.post_count });
+          setPendingId(null);
+          setWatchUntil(0);
+        }
+      }
+      return fresh;
+    },
+    enabled: watching || pendingId != null,
+    refetchInterval: 2000,
+  });
+
+  // Safety net: never spin forever if the worker dies or the task is unregistered.
+  useEffect(() => {
+    if (pendingId == null) return;
+    const timer = setTimeout(() => { setPendingId(null); setWatchUntil(0); }, 120_000);
+    return () => clearTimeout(timer);
+  }, [pendingId]);
 
   const scanMut = useMutation({
     mutationFn: api.accounts.scanAll,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts-status"] }),
+    onSuccess: () => watch(null),
   });
   const refreshMut = useMutation({
     mutationFn: (id: number) => api.accounts.refresh(id),
-    onSuccess: () => setTimeout(() => qc.invalidateQueries({ queryKey: ["accounts"] }), 4000),
+    onMutate: (id) => {
+      // Feedback starts on click, not on response — the task can finish before
+      // the first poll lands.
+      const current = (data?.accounts ?? []).find((a) => a.id === id);
+      watch(id, current?.last_scanned_at ?? null);
+    },
+    onError: () => { setPendingId(null); setWatchUntil(0); },
   });
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.accounts.remove(id),
@@ -672,17 +766,27 @@ export default function AccountTracking() {
         )}
       </div>
 
-      {running && (
+      {(running || pendingId !== null) && (
         <div className="glass rounded-xl p-3">
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-[#94a3b8] mb-1.5">
-            <span>Collecting {status?.current ?? ""}</span>
+            <span>
+              Collecting {status?.current
+                ?? (pendingId !== null
+                      ? (data?.accounts ?? []).find((a) => a.id === pendingId)?.handle ?? ""
+                      : "")}
+            </span>
             <span className="tabular-nums">
-              {status?.done ?? 0}/{status?.total ?? 0} · {status?.saved ?? 0} new posts
+              {status?.running
+                ? `${status?.done ?? 0}/${status?.total ?? 0} · ${status?.saved ?? 0} new posts`
+                : "starting…"}
             </span>
           </div>
           <div className="h-1.5 rounded-full bg-slate-100 dark:bg-white/5 overflow-hidden">
-            <div className="h-full bg-pharma-blue transition-all"
-              style={{ width: `${status?.total ? ((status.done ?? 0) / status.total) * 100 : 0}%` }} />
+            <div className={cn("h-full bg-pharma-blue transition-all",
+              !status?.running && "animate-pulse")}
+              style={{ width: status?.total
+                ? `${((status.done ?? 0) / status.total) * 100}%`
+                : "35%" }} />
           </div>
         </div>
       )}
@@ -741,7 +845,8 @@ export default function AccountTracking() {
               onRefresh={() => refreshMut.mutate(account.id)}
               onToggle={() => toggleMut.mutate({ id: account.id, active: !account.active })}
               onDelete={() => deleteMut.mutate(account.id)}
-              refreshing={refreshMut.isPending} />
+              refreshing={pendingId === account.id}
+              justDone={justDone?.id === account.id ? justDone : null} />
           ))}
         </div>
       )}
@@ -759,11 +864,13 @@ export default function AccountTracking() {
  *  The yield badge is the point of the card: an account showing 0 is not
  *  decoration, it is the only signal that a handle is wrong — measured on this
  *  data, every French Facebook slug was wrong and silently produced nothing. */
-function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle, onDelete, refreshing }: {
+function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle,
+                      onDelete, refreshing, justDone }: {
   account: TrackedAccountFull; isAdmin: boolean;
   onOpen: () => void; onEdit: () => void; onRefresh: () => void;
   onToggle: () => void; onDelete: () => void;
   refreshing: boolean;
+  justDone: { status: string | null; posts: number } | null;
 }) {
   const meta = PLATFORM_META[account.platform];
   const Icon = meta?.icon ?? AtSign;
@@ -819,16 +926,28 @@ function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle, on
         )}
 
         <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-100 dark:border-slate-800">
-          <span className="text-[10px] text-gray-400 truncate">
-            checked {relative(account.last_scanned_at)}
-            {account.last_scan_status === "empty" && " · found nothing"}
+          <span className={cn("text-[10px] truncate",
+            refreshing ? "text-pharma-blue font-medium"
+              : justDone ? "text-emerald-600 dark:text-emerald-400 font-medium"
+              : "text-gray-400")}>
+            {refreshing ? "collecting…" : justDone ? (
+              justDone.status === "empty"
+                ? "collected — found nothing"
+                : `collected — ${justDone.posts} posts`
+            ) : (
+              <>
+                checked {relative(account.last_scanned_at)}
+                {account.last_scan_status === "empty" && " · found nothing"}
+              </>
+            )}
           </span>
           {isAdmin && (
             <span className="ml-auto flex items-center gap-0.5 shrink-0"
               onClick={(e) => e.stopPropagation()}>
               <button onClick={onRefresh} disabled={refreshing} title="Collect this account now"
-                className="p-1 text-gray-400 hover:text-pharma-blue disabled:opacity-40">
-                <RefreshCw size={12} />
+                className={cn("p-1 disabled:opacity-100",
+                  refreshing ? "text-pharma-blue" : "text-gray-400 hover:text-pharma-blue")}>
+                <RefreshCw size={12} className={cn(refreshing && "animate-spin")} />
               </button>
               <button onClick={onEdit} title="Edit handle and details"
                 className="p-1 text-gray-400 hover:text-pharma-blue">
