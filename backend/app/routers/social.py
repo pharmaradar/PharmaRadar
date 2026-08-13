@@ -532,6 +532,73 @@ def _account_out(a) -> dict:
     }
 
 
+async def _account_coverage(db) -> dict[tuple[str, str], dict]:
+    """Posts collected per tracked account, so a dead account is visible.
+
+    Tracking an account is only worth anything if posts actually arrive from it,
+    and a wrong handle fails silently: seeding LinkedIn turned up `gustaveroussy`,
+    which returns ten results none of which are Gustave Roussy — the real slug is
+    `gustave-roussy`. Without a count per account that stays invisible forever.
+
+    Aggregated in SQL rather than in Python. The obvious version pulls every post
+    and loops the accounts across it, which is 51 x N comparisons on every page
+    load of the Social tab — fine on a dev table, quadratic in production.
+
+    Two attribution routes, because the lanes label differently: the account
+    lanes stamp `query = 'tracked:<platform>:<handle>'`, and every normaliser
+    fills `author`. Both group cleanly; a URL-substring fallback deliberately is
+    not used, since matching "roche" inside a URL also matches "rochester".
+    """
+    from app.models import TrackedAccount
+
+    accounts = (await db.execute(select(TrackedAccount))).scalars().all()
+    if not accounts:
+        return {}
+
+    # Author, normalised the same way the handle is (case-folded, no leading @).
+    author_key = func.lower(func.ltrim(func.trim(SocialPost.author), "@"))
+    by_author = await db.execute(
+        select(SocialPost.platform, author_key,
+               func.count(), func.max(SocialPost.scraped_at))
+        .where(social_not_ae(), SocialPost.author.is_not(None))
+        .group_by(SocialPost.platform, author_key)
+    )
+    by_query = await db.execute(
+        select(SocialPost.platform, func.lower(SocialPost.query),
+               func.count(), func.max(SocialPost.scraped_at))
+        .where(social_not_ae(), SocialPost.query.like("tracked:%"))
+        .group_by(SocialPost.platform, func.lower(SocialPost.query))
+    )
+
+    author_hits: dict[tuple[str, str], tuple[int, object]] = {
+        (platform, key): (count, last)
+        for platform, key, count, last in by_author.all() if key
+    }
+    query_hits: dict[str, tuple[int, object]] = {
+        key: (count, last) for _, key, count, last in by_query.all() if key
+    }
+
+    coverage: dict[tuple[str, str], dict] = {}
+    for account in accounts:
+        handle = (account.handle or "").strip().lstrip("@").lower()
+        if not handle:
+            continue
+        count, last = author_hits.get((account.platform, handle), (0, None))
+        tag_count, tag_last = query_hits.get(
+            f"tracked:{account.platform}:{handle}", (0, None))
+        # The same post can carry both the tag and the author, so take the larger
+        # rather than the sum — adding them would double-count the account lanes.
+        if tag_count > count:
+            count, last = tag_count, tag_last
+        elif tag_last and (last is None or tag_last > last):
+            last = tag_last
+        coverage[(account.platform, handle)] = {
+            "post_count": count,
+            "last_seen": last.isoformat() if last else None,
+        }
+    return coverage
+
+
 @router.get("/accounts")
 async def list_accounts(db: AsyncSession = Depends(get_db)):
     from app.models import TrackedAccount
@@ -539,7 +606,15 @@ async def list_accounts(db: AsyncSession = Depends(get_db)):
     rows = await db.execute(
         select(TrackedAccount).order_by(TrackedAccount.platform, TrackedAccount.handle)
     )
-    return {"accounts": [_account_out(a) for a in rows.scalars().all()]}
+    accounts = rows.scalars().all()
+    coverage = await _account_coverage(db)
+    out = []
+    for a in accounts:
+        item = _account_out(a)
+        stats = coverage.get((a.platform, (a.handle or "").strip().lstrip("@").lower()),
+                             {"post_count": 0, "last_seen": None})
+        out.append({**item, **stats})
+    return {"accounts": out}
 
 
 @router.post("/accounts", status_code=201, dependencies=[Depends(require_admin)])

@@ -41,9 +41,14 @@ const DATE_RANGES = [
 ];
 
 const KIND_OPTIONS = [
-  { value: "all",   label: "All posts" },
-  { value: "field", label: "Medical field" },
-  { value: "kol",   label: "KOLs" },
+  { value: "all",     label: "All posts" },
+  { value: "field",   label: "Medical field" },
+  { value: "kol",     label: "KOLs" },
+  // The account lanes tag their rows kind="account" and the API already filters
+  // on it, but there was no way to ask for them — so posts collected from the
+  // accounts the client chose to track were indistinguishable from keyword luck.
+  { value: "account", label: "Tracked accounts" },
+  { value: "comment", label: "Comments" },
 ];
 
 const MIN_LIKES_OPTIONS = [

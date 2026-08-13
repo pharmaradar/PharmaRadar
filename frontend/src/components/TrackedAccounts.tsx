@@ -24,12 +24,24 @@ const PLATFORM_LABELS: Record<string, string> = {
 };
 
 /** Per-platform caveats, shown so nobody adds an account that is silently
- *  never collected. Instagram is now scraped by profile; LinkedIn is reached
- *  through its French locale rather than per-account. */
+ *  never collected. Every platform is now collected per-account. */
 const PLATFORM_NOTE: Record<string, string> = {
   instagram: "Posts and their comments are collected for these accounts.",
-  linkedin: "Collected via fr.linkedin.com search rather than per-account.",
+  linkedin: "Posts are collected per-account from fr.linkedin.com.",
+  facebook: "Pages are scraped directly. This list replaced the old Settings field.",
 };
+
+function coverageTitle(account: TrackedAccount): string {
+  const name = account.label || account.handle;
+  if (typeof account.post_count !== "number") return name;
+  if (account.post_count === 0) {
+    return `${name} — no posts collected yet. Check the handle is exactly right.`;
+  }
+  const seen = account.last_seen
+    ? ` · last seen ${new Date(account.last_seen).toLocaleDateString()}`
+    : "";
+  return `${name} — ${account.post_count} posts collected${seen}`;
+}
 
 export default function TrackedAccounts() {
   const qc = useQueryClient();
@@ -85,6 +97,7 @@ export default function TrackedAccounts() {
             <h2 className="font-semibold text-sm">Tracked accounts</h2>
             <p className="text-xs text-gray-400">
               Every post from these is collected directly — no keyword luck involved.
+              The count beside each is how many posts it has actually produced.
             </p>
           </div>
         </div>
@@ -163,8 +176,21 @@ export default function TrackedAccounts() {
                         ? "border-slate-200 dark:border-white/10 text-slate-700 dark:text-slate-200"
                         : "border-slate-200/60 dark:border-white/5 text-slate-400 line-through"
                     )}
-                    title={account.label || account.handle}>
+                    title={coverageTitle(account)}>
                     {account.label || account.handle}
+                    {typeof account.post_count === "number" && (
+                      <span className={cn(
+                        "text-[10px] tabular-nums px-1 rounded",
+                        account.post_count > 0
+                          ? "text-emerald-600 dark:text-emerald-400"
+                          // A tracked handle that has never returned a post is
+                          // almost always a wrong slug — seeding LinkedIn turned
+                          // up "gustaveroussy", which matches nothing; the real
+                          // one is "gustave-roussy". Silent until it is shown.
+                          : "text-amber-600 dark:text-amber-400")}>
+                        {account.post_count}
+                      </span>
+                    )}
                     {isAdmin && (
                       <>
                         <button

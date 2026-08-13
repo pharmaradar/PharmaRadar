@@ -460,7 +460,6 @@ function SocialScanCard({ form, set, apifyConfigured }: {
   const qc = useQueryClient();
   const keywords = form.social_keywords ?? [];
   const platforms = form.social_platforms ?? [];
-  const fbPages = form.facebook_page_urls ?? [];
 
   const { data: status } = useQuery({
     queryKey: ["social-status"],
@@ -512,20 +511,17 @@ function SocialScanCard({ form, set, apifyConfigured }: {
         <p className="text-xs text-gray-400 dark:text-[#64748b] mt-1">{keywords.length} terms — comma or newline separated</p>
       </Field>
 
-      {/* Facebook page URLs */}
-      <Field label="Facebook pages to scrape (one URL per line)">
-        <textarea
-          value={fbPages.join("\n")}
-          onChange={e => set("facebook_page_urls",
-            e.target.value.split(/[\n,]/).map(s => s.trim()).filter(Boolean))}
-          rows={4}
-          placeholder="https://www.facebook.com/roche&#10;https://www.facebook.com/Novartis"
-          className={`${input} font-mono text-xs resize-y`}
-        />
-        <p className="text-xs text-gray-400 dark:text-[#64748b] mt-1">
-          {fbPages.length} pages — Facebook scraping uses known page URLs, not keyword search
-        </p>
-      </Field>
+      {/* Facebook pages moved to the tracked-accounts registry. Two editors for
+          one setting meant the one the client was given (Tracked accounts) had
+          no effect on scraping, while this one silently did. */}
+      <div className="flex items-start gap-2 text-xs text-gray-500 dark:text-[#94a3b8]
+        bg-slate-50 dark:bg-white/5 rounded-lg px-3 py-2.5">
+        <Info size={13} className="shrink-0 mt-0.5" />
+        <span>
+          Facebook pages, X, LinkedIn and Instagram accounts are managed together
+          under <strong>Social → What we track → Tracked accounts</strong>.
+        </span>
+      </div>
 
       {/* Platforms */}
       <Field label="Platforms">

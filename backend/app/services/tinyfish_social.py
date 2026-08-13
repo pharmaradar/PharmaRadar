@@ -10,9 +10,10 @@ import hashlib
 import re
 import structlog
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
-from app.services.fr_sources import Scope, fr_account_groups
+from app.services.fr_sources import (FR_PLATFORM_LOCALES, Scope,
+                                     fr_account_groups)
 from app.services.scraper import _tf_search_discovery
 
 logger = structlog.get_logger(__name__)
@@ -37,18 +38,31 @@ def _instagram_author(hit: dict) -> str | None:
 
 
 def _extract_handle(url: str) -> str | None:
-    """Pull @handle from a twitter/x or linkedin URL."""
+    """Pull @handle from a twitter/x or linkedin URL.
+
+    Slugs come back percent-encoded (`soci%c3%a9t%c3%a9-fran%c3%a7aise-...`), so
+    they are decoded before returning: an encoded slug never compares equal to
+    the handle the team actually typed into the registry.
+    """
     try:
-        p = urlparse(url)
+        p = urlparse(unquote(url))
         host = (p.netloc or "").lower().replace("www.", "")
         path = (p.path or "").strip("/").split("/")
         if not path:
             return None
-        if host in ("twitter.com", "x.com"):
+        if host in ("twitter.com", "x.com", "mobile.x.com"):
             return f"@{path[0]}" if path[0] not in ("status", "i", "search") else None
-        if host == "linkedin.com":
+        # Any LinkedIn locale, not just the bare domain: the French scope pins
+        # searches to fr.linkedin.com, so matching only "linkedin.com" meant the
+        # French lane — the one that matters most here — never got an author.
+        if host == "linkedin.com" or host.endswith(".linkedin.com"):
             if len(path) >= 2 and path[0] in ("in", "company"):
                 return path[1]
+            # Post URLs are /posts/<author-slug>_<slugified-text>. The author is
+            # everything before the first underscore.
+            if len(path) >= 2 and path[0] == "posts":
+                slug = path[1].split("_")[0].strip("-")
+                return slug or None
         return None
     except Exception:
         return None
@@ -69,7 +83,25 @@ def _is_post_url(platform: str, url: str) -> bool:
     if platform == "instagram":
         # A post or reel, not a profile or the explore pages.
         return "instagram.com/" in u and ("/p/" in u or "/reel/" in u)
+    if platform == "facebook":
+        return "facebook.com/" in u and any(
+            marker in u for marker in
+            ("/posts/", "/videos/", "/reel/", "/photo", "/permalink", "story_fbid="))
     return False
+
+
+def looks_like_post(platform: str, url: str, text: str | None) -> bool:
+    """Whether a row is a POST rather than an account's landing page.
+
+    Ten rows in the live table were `facebook.com/<page>` with empty text — the
+    account's home page, scraped as if it were content. Each one makes a tracked
+    account look like it produced a post, which is exactly the signal the yield
+    count exists to give. Anything carrying real text is kept regardless of URL
+    shape, since losing content is worse than keeping an odd URL.
+    """
+    if (text or "").strip():
+        return True
+    return _is_post_url(platform, url)
 
 
 def _hash_url(url: str) -> str:
@@ -93,6 +125,44 @@ def _account_groups(platform: str, accounts: list[str] | None) -> list[str]:
         batch = handles[i:i + 5]
         groups.append("(" + " OR ".join(f"site:x.com/{h}" for h in batch) + ")")
     return groups
+
+
+def linkedin_account_queries(handles: list[str]) -> list[str]:
+    """One search per tracked LinkedIn account.
+
+    Measured 2026-08-12, and both halves of this were surprises:
+
+    * `site:fr.linkedin.com/posts/<handle>` looks like the obvious form and is a
+      trap — `site:` matches on prefix, so `/posts/ifct` returned
+      `ifct-institut-de-formation-continue-des-therapeutes`, a different
+      organisation entirely. The same trap eliminated Instagram account pinning
+      (`/unicancer` matched `unicancer.mx`). Callers MUST verify the author slug
+      of every result rather than trusting the pin.
+    * OR-batching the handles as terms starves all but one of them:
+      `(ifct OR unicancer OR gustaveroussy)` returned 8 unicancer posts and
+      nothing at all for the other two. So this issues one query per handle.
+
+    One query per handle is affordable because TinyFish search is unmetered —
+    only `agent run` bills.
+    """
+    return [f"{h.strip().lstrip('@')} site:{FR_PLATFORM_LOCALES['linkedin.com']}/posts"
+            for h in handles if h and h.strip()]
+
+
+def by_exact_author(posts: list[dict], handles: list[str]) -> list[dict]:
+    """Keep only posts whose author slug IS one of `handles`.
+
+    The companion to the prefix-match trap above: pinning gets the right posts
+    *plus* neighbours, and only an exact author comparison separates them.
+    """
+    wanted = {h.strip().lstrip("@").lower() for h in handles if h and h.strip()}
+    kept = []
+    for post in posts:
+        author = (_extract_handle(post.get("post_url", "")) or "").lstrip("@").lower()
+        if author and author in wanted:
+            post.setdefault("author", author)
+            kept.append(post)
+    return kept
 
 
 def _search_variants(platform: str, term: str, lang_filter: str | None,

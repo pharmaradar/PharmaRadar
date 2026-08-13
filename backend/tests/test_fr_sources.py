@@ -537,3 +537,61 @@ def test_french_voice_accepts_a_tracked_account_in_any_language():
     assert french_voice("https://www.instagram.com/p/X/", "bms_france", None)
     assert french_voice("https://www.instagram.com/p/X/", "unicancer", "en",
                         tracked=("unicancer",))
+
+
+def test_linkedin_author_is_read_from_every_locale():
+    """The French scope pins searches to fr.linkedin.com, so matching only the
+    bare domain meant the lane that matters most never recorded an author —
+    which both weakens provenance and starves Emerging Voices."""
+    from app.services.tinyfish_social import _extract_handle
+    assert _extract_handle("https://fr.linkedin.com/posts/ifct_onco-xyz") == "ifct"
+    assert _extract_handle(
+        "https://fr.linkedin.com/posts/etienne-giroux-leprieu_a-b") == "etienne-giroux-leprieu"
+    assert _extract_handle("https://www.linkedin.com/in/benjamin-besse-1") == "benjamin-besse-1"
+    assert _extract_handle("https://x.com/Inserm/status/9") == "@Inserm"
+
+
+# ── Account tracking: the registry has to actually drive the scrape ──
+
+def test_linkedin_account_queries_avoid_the_prefix_trap():
+    """`site:` matches on prefix, so pinning the path is not safe.
+
+    Measured: `site:fr.linkedin.com/posts/ifct` returned
+    `ifct-institut-de-formation-continue-des-therapeutes`, a different
+    organisation. The handle therefore goes in as a TERM and the path pin stops
+    at /posts."""
+    from app.services.tinyfish_social import linkedin_account_queries
+    queries = linkedin_account_queries(["ifct", "@unicancer", "  "])
+    assert queries == ["ifct site:fr.linkedin.com/posts",
+                       "unicancer site:fr.linkedin.com/posts"]
+    assert not any("/posts/" in q for q in queries), "path pinning prefix-matches"
+
+
+def test_one_query_per_handle_because_or_batching_starves_handles():
+    """Measured: `(ifct OR unicancer OR gustaveroussy)` returned 8 unicancer
+    posts and nothing for the other two. Batching is cheaper and wrong."""
+    from app.services.tinyfish_social import linkedin_account_queries
+    queries = linkedin_account_queries(["a", "b", "c"])
+    assert len(queries) == 3
+    assert all(" OR " not in q for q in queries)
+
+
+def test_exact_author_filter_rejects_prefix_lookalikes():
+    from app.services.tinyfish_social import by_exact_author
+    posts = [
+        {"post_url": "https://fr.linkedin.com/posts/ifct_jad2025-activity-1"},
+        {"post_url": "https://fr.linkedin.com/posts/ifct-institut-de-formation_x-2"},
+        {"post_url": "https://fr.linkedin.com/posts/alexis-cortot-a9b_y-3"},
+    ]
+    kept = by_exact_author(posts, ["ifct"])
+    assert len(kept) == 1
+    assert kept[0]["author"] == "ifct"
+
+
+def test_exact_author_filter_decodes_percent_encoded_slugs():
+    """French org slugs come back percent-encoded; an encoded slug never
+    compares equal to the handle the team typed into the registry."""
+    from app.services.tinyfish_social import by_exact_author
+    posts = [{"post_url":
+              "https://fr.linkedin.com/posts/soci%C3%A9t%C3%A9-fran%C3%A7aise_x-1"}]
+    assert len(by_exact_author(posts, ["société-française"])) == 1
