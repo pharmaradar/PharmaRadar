@@ -588,16 +588,33 @@ export interface TrackedAccountFull {
   notes: string | null;
   active: boolean;
   post_count: number;
+  analysis?: AccountAnalysis;
   last_scanned_at: string | null;
   /** ok | empty | error — "empty" means the scan ran and found nothing, which
    *  is what a mistyped handle looks like from the outside. */
   last_scan_status: "ok" | "empty" | "error" | null;
 }
 
+/** Cached AI read of what a tracked account talks about. `stale` means posts
+ *  arrived after it was written, so it covers only `post_count` of them. */
+export interface AccountAnalysis {
+  summary: string | null;
+  so_what: string | null;
+  themes: string[];
+  generated_at: string | null;
+  stale: boolean;
+  post_count: number;
+}
+
 export interface AccountPost {
   id: number;
   url: string;
   text: string | null;
+  /** Only Instagram and Facebook carry images — TinyFish search results (X,
+   *  LinkedIn) have none, so cards must render without one. */
+  thumbnail_url: string | null;
+  platform: string;
+  author: string | null;
   likes: number;
   comments: number;
   views: number;
@@ -830,6 +847,9 @@ export const api = {
     refresh: (id: number) =>
       req<{ queued: boolean }>(`/accounts/${id}/refresh`, { method: "POST" }),
     scanAll: () => req<{ queued: boolean }>("/accounts/scan", { method: "POST" }),
+    analyse: (id: number, refresh = false) =>
+      req<TrackedAccountFull & { cached: boolean; posts_analysed?: number }>(
+        `/accounts/${id}/analyse?refresh=${refresh}`, { method: "POST" }),
     status: () => req<AccountScanStatus>("/accounts/status"),
   },
 

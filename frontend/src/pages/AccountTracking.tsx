@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, AtSign, Check, ExternalLink, Eye, Facebook, Heart,
   Instagram, Linkedin, Loader2, MessageCircle, Plus, RefreshCw, Search,
-  Trash2, Twitter, X,
+  Sparkles, Trash2, Twitter, X,
 } from "lucide-react";
 import {
   api, type AccountPost, type TrackedAccountFull,
@@ -65,35 +65,132 @@ function relative(iso: string | null): string {
 
 /* ─── per-account detail ─────────────────────────────────── */
 
-function PostRow({ post }: { post: AccountPost }) {
-  // posted_at is null on LinkedIn and X — their search results carry no
-  // publication date. Showing collected_at as if it were the post date would
-  // misstate when the account was active, so the label changes with the fact.
+const PLATFORM_TINT: Record<string, string> = {
+  twitter: "bg-sky-100 text-sky-700 dark:bg-sky-500/15 dark:text-sky-300",
+  linkedin: "bg-blue-100 text-blue-700 dark:bg-blue-500/15 dark:text-blue-300",
+  instagram: "bg-pink-100 text-pink-700 dark:bg-pink-500/15 dark:text-pink-300",
+  facebook: "bg-indigo-100 text-indigo-700 dark:bg-indigo-500/15 dark:text-indigo-300",
+};
+
+function Stat({ icon: Icon, value }: { icon: React.ElementType; value: number }) {
+  if (!value) return null;
+  return (
+    <span className="flex items-center gap-1 text-[11px] text-gray-400">
+      <Icon size={11} /> {value}
+    </span>
+  );
+}
+
+/** One post, in the same shape as the Social Trends card so the two pages read
+ *  the same way.
+ *
+ *  The image is optional by necessity, not by style: only Instagram and
+ *  Facebook return one. X and LinkedIn arrive through search, which carries no
+ *  media at all, so the card has to look deliberate without it. */
+function PostCard({ post, onClick }: { post: AccountPost; onClick: () => void }) {
   const stamp = post.posted_at
     ? `posted ${new Date(post.posted_at).toLocaleDateString()}`
     : `collected ${post.collected_at ? new Date(post.collected_at).toLocaleDateString() : "—"}`;
-  const engagement = post.likes + post.comments + post.views;
 
   return (
-    <div className="p-3 rounded-lg border border-slate-200/60 dark:border-white/5 bg-white/50 dark:bg-white/[0.02]">
-      <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-relaxed">
-        {post.text || <span className="italic text-gray-400">No text captured</span>}
-      </p>
-      <div className="flex items-center gap-3 mt-2 flex-wrap text-[11px] text-gray-400">
-        <span>{stamp}</span>
-        {engagement > 0 && (
-          <>
-            {post.likes > 0 && <span className="flex items-center gap-1"><Heart size={10} />{post.likes}</span>}
-            {post.comments > 0 && <span className="flex items-center gap-1"><MessageCircle size={10} />{post.comments}</span>}
-            {post.views > 0 && <span className="flex items-center gap-1"><Eye size={10} />{post.views}</span>}
-          </>
-        )}
-        {post.language && <span className="uppercase">{post.language}</span>}
-        <a href={post.url} target="_blank" rel="noreferrer"
-          className="ml-auto text-gray-400 hover:text-pharma-blue" title="Open post">
-          <ExternalLink size={11} />
-        </a>
+    <div onClick={onClick}
+      className="glass-panel rounded-xl overflow-hidden cursor-pointer hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col">
+      {post.thumbnail_url && (
+        <div className="h-32 bg-slate-100 dark:bg-slate-800 overflow-hidden shrink-0">
+          <img src={post.thumbnail_url} alt="" loading="lazy"
+            className="w-full h-full object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+        </div>
+      )}
+      <div className="p-3 flex-1 flex flex-col">
+        <div className="flex items-center gap-2 mb-1.5">
+          <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium capitalize",
+            PLATFORM_TINT[post.platform] ?? "bg-gray-100 text-gray-600")}>
+            {post.platform}
+          </span>
+          <span className="text-[10px] text-gray-400 truncate">{stamp}</span>
+        </div>
+        <p className="text-xs text-gray-600 dark:text-[#94a3b8] line-clamp-4 flex-1">
+          {post.text || <span className="italic text-gray-400">No text captured</span>}
+        </p>
+        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-gray-100 dark:border-slate-800">
+          <Stat icon={Heart} value={post.likes} />
+          <Stat icon={MessageCircle} value={post.comments} />
+          <Stat icon={Eye} value={post.views} />
+          <a href={post.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+            className="ml-auto text-gray-400 hover:text-pharma-blue" title="Open post">
+            <ExternalLink size={11} />
+          </a>
+        </div>
       </div>
+    </div>
+  );
+}
+
+/** The AI read of an account: what they talk about and what it means for us. */
+function AnalysisPanel({ account, onGenerate, busy }: {
+  account: TrackedAccountFull; onGenerate: () => void; busy: boolean;
+}) {
+  const a = account.analysis;
+  const has = !!a?.summary;
+
+  return (
+    <div className="rounded-xl border border-slate-200/60 dark:border-white/10 p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Sparkles size={14} className="text-pharma-blue dark:text-blue-300" />
+          <h3 className="text-sm font-semibold text-gray-800 dark:text-[#e2e8f0]">AI analysis</h3>
+        </div>
+        <button onClick={onGenerate} disabled={busy || !account.post_count}
+          title={account.post_count ? "Read this account's posts and summarise them"
+                                    : "Nothing collected yet to analyse"}
+          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+          {busy ? "Reading…" : has ? "Regenerate" : "Analyse"}
+        </button>
+      </div>
+
+      {!has ? (
+        <p className="text-xs text-gray-400">
+          {account.post_count
+            ? "Not analysed yet — this reads their posts and summarises the angle, plus what it means for us."
+            : "No posts collected yet, so there is nothing to analyse."}
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {/* Staleness is stated, not implied: an analysis written from 12 of 22
+              posts should not read as though it covers all of them. */}
+          {a!.stale && (
+            <p className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+              <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+              Written from {a!.post_count} posts; {account.post_count} collected since.
+              Regenerate to include them.
+            </p>
+          )}
+          <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-relaxed whitespace-pre-wrap">
+            {a!.summary}
+          </p>
+          {a!.so_what && (
+            <div className="rounded-lg bg-amber-50/60 dark:bg-amber-900/10 border border-amber-100 dark:border-amber-900/30 px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-300 mb-1">
+                So what
+              </p>
+              <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-relaxed whitespace-pre-wrap">
+                {a!.so_what}
+              </p>
+            </div>
+          )}
+          {a!.themes?.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {a!.themes.map((t) => (
+                <span key={t} className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-gray-600 dark:text-[#94a3b8]">
+                  {t}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -106,6 +203,14 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
   const { data, isLoading } = useQuery({
     queryKey: ["account-detail", id, days],
     queryFn: () => api.accounts.detail(id, days),
+  });
+
+  const analyseMut = useMutation({
+    mutationFn: (refresh: boolean) => api.accounts.analyse(id, refresh),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["account-detail", id] });
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+    },
   });
 
   const refreshMut = useMutation({
@@ -185,6 +290,16 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
           ))}
         </div>
 
+        {account && (
+          <AnalysisPanel account={account} busy={analyseMut.isPending}
+            onGenerate={() => analyseMut.mutate(!!account.analysis?.summary)} />
+        )}
+        {analyseMut.isError && (
+          <p className="text-xs text-red-400">
+            {(analyseMut.error as Error)?.message?.slice(0, 160)}
+          </p>
+        )}
+
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-gray-400">Window</span>
           {[30, 90, 365].map((d) => (
@@ -214,8 +329,11 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
             )}
           </div>
         ) : (
-          <div className="space-y-2">
-            {data.posts.map((post) => <PostRow key={post.id} post={post} />)}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {data.posts.map((post) => (
+              <PostCard key={post.id} post={post}
+                onClick={() => window.open(post.url, "_blank", "noopener")} />
+            ))}
           </div>
         )}
       </div>
