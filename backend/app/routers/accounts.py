@@ -186,6 +186,20 @@ async def update_account(account_id: int, body: AccountPatch,
     data = body.model_dump(exclude_unset=True)
     if "handle" in data and data["handle"]:
         data["handle"] = _normalise_handle(account.platform, data["handle"])
+        # Correcting a handle to one already tracked would violate
+        # UNIQUE (platform, handle) and surface as a 500. Editing handles is the
+        # main reason this endpoint exists — every French Facebook page here
+        # started as a wrong slug — so the collision has to answer cleanly.
+        if data["handle"].lower() != (account.handle or "").lower():
+            clash = await db.execute(
+                select(TrackedAccount).where(
+                    TrackedAccount.platform == account.platform,
+                    func.lower(TrackedAccount.handle) == data["handle"].lower(),
+                    TrackedAccount.id != account_id)
+            )
+            if clash.scalars().first():
+                raise HTTPException(
+                    409, f"{data['handle']} is already tracked on {account.platform}")
     for field, value in data.items():
         setattr(account, field, value)
     await db.commit()
@@ -205,6 +219,49 @@ async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
     return {"deleted": account_id}
 
 
+
+# Whether the running workers actually know the account tasks, cached briefly.
+# A Celery worker only registers the tasks that existed when it started, so a
+# worker left running across a deploy accepts nothing new — the message is
+# published, no one consumes it, and the API happily reports "queued". That
+# silent no-op is what this guards against: measured here, workers started a day
+# before `app.tasks.accounts` existed had zero of its tasks registered, so every
+# Refresh click did nothing while claiming success.
+_WORKER_CACHE: dict[str, tuple[float, bool]] = {}
+_WORKER_CACHE_TTL = 60.0
+
+
+def _task_is_registered(task_name: str) -> bool:
+    """True if at least one live worker can run this task.
+
+    Unreachable workers return True: a broker hiccup should not block a queue
+    attempt, and the task will simply wait as it normally would.
+    """
+    import time
+
+    cached = _WORKER_CACHE.get(task_name)
+    now = time.monotonic()
+    if cached and (now - cached[0]) < _WORKER_CACHE_TTL:
+        return cached[1]
+
+    known = True
+    try:
+        from app.tasks.celery_app import celery_app
+        replies = celery_app.control.inspect(timeout=1.5).registered() or {}
+        if replies:
+            known = any(task_name in (tasks or []) for tasks in replies.values())
+    except Exception:                               # noqa: BLE001
+        known = True
+    _WORKER_CACHE[task_name] = (now, known)
+    return known
+
+
+_STALE_WORKER_HINT = (
+    "The running workers do not have this task registered — they were started "
+    "before it existed. Restart the Celery workers to pick it up."
+)
+
+
 @router.get("/status")
 async def scan_status(user=Depends(get_current_user)):
     """Progress of the current sweep, for the page's progress bar."""
@@ -216,6 +273,8 @@ async def scan_status(user=Depends(get_current_user)):
 async def trigger_scan():
     """Sweep every active account now."""
     from app.tasks.accounts import account_scan
+    if not _task_is_registered("app.tasks.accounts.account_scan"):
+        raise HTTPException(503, _STALE_WORKER_HINT)
     try:
         task = account_scan.delay()
     except Exception as exc:                        # noqa: BLE001
@@ -230,6 +289,8 @@ async def refresh_one(account_id: int, db: AsyncSession = Depends(get_db)):
     if not account:
         raise HTTPException(404, "account not found")
     from app.tasks.accounts import refresh_account
+    if not _task_is_registered("app.tasks.accounts.refresh_account"):
+        raise HTTPException(503, _STALE_WORKER_HINT)
     try:
         task = refresh_account.delay(account_id)
     except Exception as exc:                        # noqa: BLE001

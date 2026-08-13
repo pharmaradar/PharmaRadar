@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, AtSign, Check, ExternalLink, Eye, Facebook, Heart,
   Instagram, Linkedin, Loader2, MessageCircle, Plus, RefreshCw, Search,
-  Sparkles, Trash2, Twitter, X,
+  Pencil, Sparkles, Trash2, Twitter, X,
 } from "lucide-react";
 import {
   api, type AccountPost, type TrackedAccountFull,
@@ -123,6 +123,106 @@ function PostCard({ post, onClick }: { post: AccountPost; onClick: () => void })
 }
 
 /** The AI read of an account: what they talk about and what it means for us. */
+
+/** Inline editor for one account.
+ *
+ *  Everything except the platform can change: the handle is what the scrapers
+ *  query, and correcting a wrong one is the single most valuable edit here —
+ *  every French Facebook page in this registry was originally a wrong slug
+ *  producing nothing. Platform is fixed because a handle is not portable
+ *  between platforms, so changing it would mean a different account entirely.
+ */
+function EditAccount({ account, onDone, onCancel }: {
+  account: TrackedAccountFull; onDone: () => void; onCancel: () => void;
+}) {
+  const [form, setForm] = useState({
+    handle: account.handle,
+    label: account.label ?? "",
+    full_name: account.full_name ?? "",
+    role: account.role ?? "",
+    notes: account.notes ?? "",
+  });
+  const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
+
+  const saveMut = useMutation({
+    mutationFn: () => api.accounts.update(account.id, {
+      handle: form.handle.trim(),
+      label: form.label.trim() || null,
+      full_name: form.full_name.trim() || null,
+      role: form.role || null,
+      notes: form.notes.trim() || null,
+    }),
+    onSuccess: onDone,
+  });
+
+  const handleChanged = form.handle.trim() !== account.handle;
+
+  return (
+    <div className="rounded-xl border border-slate-200/60 dark:border-white/10 p-4 space-y-3"
+      onClick={(e) => e.stopPropagation()}>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="space-y-1">
+          <span className="text-[11px] text-gray-400">Handle or profile URL</span>
+          <input value={form.handle} onChange={(e) => set("handle", e.target.value)}
+            className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-white/10 bg-transparent" />
+        </label>
+        <label className="space-y-1">
+          <span className="text-[11px] text-gray-400">Display name</span>
+          <input value={form.label} onChange={(e) => set("label", e.target.value)}
+            className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-white/10 bg-transparent" />
+        </label>
+        <label className="space-y-1">
+          <span className="text-[11px] text-gray-400">Real name</span>
+          <input value={form.full_name} onChange={(e) => set("full_name", e.target.value)}
+            className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-white/10 bg-transparent" />
+        </label>
+        <label className="space-y-1">
+          <span className="text-[11px] text-gray-400">Type</span>
+          <select value={form.role} onChange={(e) => set("role", e.target.value)}
+            className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-white/10 bg-transparent">
+            <option value="" className="dark:bg-[#0d1424]">—</option>
+            {Object.entries(ROLE_LABELS).map(([value, label]) => (
+              <option key={value} value={value} className="dark:bg-[#0d1424]">{label}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <input value={form.notes} onChange={(e) => set("notes", e.target.value)}
+        placeholder="Why this account is tracked (optional)"
+        className="w-full px-2 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-white/10 bg-transparent" />
+
+      {handleChanged && (
+        <p className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+          <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+          Changing the handle points collection at a different page. Posts already
+          collected stay attached to this account; press Refresh afterwards to check
+          the new handle returns anything.
+        </p>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button onClick={() => saveMut.mutate()}
+          disabled={!form.handle.trim() || saveMut.isPending}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-pharma-blue text-white rounded-lg text-sm disabled:opacity-50">
+          {saveMut.isPending ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+          Save
+        </button>
+        <button onClick={onCancel}
+          className="px-3 py-1.5 text-sm border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5">
+          Cancel
+        </button>
+        {saveMut.isError && (
+          <span className="text-xs text-red-400">
+            {(saveMut.error as Error)?.message?.includes("409")
+              ? "That handle is already tracked on this platform."
+              : (saveMut.error as Error)?.message?.slice(0, 90)}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Section({ n, title, children }: {
   n: number; title: string; children: React.ReactNode;
 }) {
@@ -233,10 +333,13 @@ function AnalysisPanel({ account, onGenerate, busy }: {
   );
 }
 
-function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }) {
+function AccountDetailPanel({ id, startEditing = false, onClose }: {
+  id: number; startEditing?: boolean; onClose: () => void;
+}) {
   const qc = useQueryClient();
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
   const [days, setDays] = useState(90);
+  const [editing, setEditing] = useState(startEditing);
 
   const { data, isLoading } = useQuery({
     queryKey: ["account-detail", id, days],
@@ -300,6 +403,13 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {isAdmin && (
+              <button onClick={() => setEditing((v) => !v)}
+                title="Edit this account's handle and details"
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+                <Pencil size={12} /> {editing ? "Close" : "Edit"}
+              </button>
+            )}
+            {isAdmin && (
               <button onClick={() => refreshMut.mutate()} disabled={refreshMut.isPending}
                 title="Collect this account's latest posts now"
                 className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-pharma-blue text-white rounded-lg hover:bg-pharma-light disabled:opacity-50 transition-colors">
@@ -320,6 +430,16 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
           <p className="text-xs text-emerald-600 dark:text-emerald-400">
             Refresh queued — new posts appear here within a minute.
           </p>
+        )}
+
+        {editing && account && (
+          <EditAccount account={account}
+            onCancel={() => setEditing(false)}
+            onDone={() => {
+              setEditing(false);
+              qc.invalidateQueries({ queryKey: ["account-detail", id] });
+              qc.invalidateQueries({ queryKey: ["accounts"] });
+            }} />
         )}
 
         {account?.notes && (
@@ -480,6 +600,9 @@ export default function AccountTracking() {
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
   const [adding, setAdding] = useState(false);
   const [openId, setOpenId] = useState<number | null>(null);
+  // Whether the modal should open straight into edit mode (card pencil) or on
+  // the analysis (card body).
+  const [editOnOpen, setEditOnOpen] = useState(false);
   const [platform, setPlatform] = useState("all");
   const [search, setSearch] = useState("");
 
@@ -613,7 +736,8 @@ export default function AccountTracking() {
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
           {accounts.map((account) => (
             <AccountCard key={account.id} account={account} isAdmin={isAdmin}
-              onOpen={() => setOpenId(account.id)}
+              onOpen={() => { setEditOnOpen(false); setOpenId(account.id); }}
+              onEdit={() => { setEditOnOpen(true); setOpenId(account.id); }}
               onRefresh={() => refreshMut.mutate(account.id)}
               onToggle={() => toggleMut.mutate({ id: account.id, active: !account.active })}
               onDelete={() => deleteMut.mutate(account.id)}
@@ -623,7 +747,8 @@ export default function AccountTracking() {
       )}
 
       {openId !== null && (
-        <AccountDetailPanel id={openId} onClose={() => setOpenId(null)} />
+        <AccountDetailPanel id={openId} startEditing={editOnOpen}
+          onClose={() => setOpenId(null)} />
       )}
     </div>
   );
@@ -634,9 +759,10 @@ export default function AccountTracking() {
  *  The yield badge is the point of the card: an account showing 0 is not
  *  decoration, it is the only signal that a handle is wrong — measured on this
  *  data, every French Facebook slug was wrong and silently produced nothing. */
-function AccountCard({ account, isAdmin, onOpen, onRefresh, onToggle, onDelete, refreshing }: {
+function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle, onDelete, refreshing }: {
   account: TrackedAccountFull; isAdmin: boolean;
-  onOpen: () => void; onRefresh: () => void; onToggle: () => void; onDelete: () => void;
+  onOpen: () => void; onEdit: () => void; onRefresh: () => void;
+  onToggle: () => void; onDelete: () => void;
   refreshing: boolean;
 }) {
   const meta = PLATFORM_META[account.platform];
@@ -703,6 +829,10 @@ function AccountCard({ account, isAdmin, onOpen, onRefresh, onToggle, onDelete, 
               <button onClick={onRefresh} disabled={refreshing} title="Collect this account now"
                 className="p-1 text-gray-400 hover:text-pharma-blue disabled:opacity-40">
                 <RefreshCw size={12} />
+              </button>
+              <button onClick={onEdit} title="Edit handle and details"
+                className="p-1 text-gray-400 hover:text-pharma-blue">
+                <Pencil size={12} />
               </button>
               <button onClick={onToggle}
                 title={account.active ? "Pause — keep it, stop collecting" : "Resume"}
