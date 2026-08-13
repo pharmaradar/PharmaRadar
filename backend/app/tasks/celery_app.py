@@ -42,6 +42,7 @@ celery_app = Celery(
         "app.tasks.burning_topics",  # generate_topic_report
         "app.tasks.synthesis",       # dashboard KOL/competitor/comprehensive PDFs
         "app.tasks.market_report",   # ad-hoc Topic Explorer market-research reports
+        "app.tasks.accounts",        # per-account tracking sweep + on-demand refresh
     ],
 )
 
@@ -57,6 +58,7 @@ import app.tasks.social          # noqa: E402,F401
 import app.tasks.burning_topics  # noqa: E402,F401
 import app.tasks.synthesis       # noqa: E402,F401
 import app.tasks.market_report   # noqa: E402,F401
+import app.tasks.accounts       # noqa: E402,F401
 
 celery_app.conf.update(
     task_serializer="json",
@@ -129,6 +131,14 @@ celery_app.conf.update(
         "check-social-scan": {
             "task": "app.tasks.scheduler.check_social_scan",
             "schedule": crontab(minute="*"),
+        },
+        # Account tracking runs on its own daily cadence, deliberately not
+        # coupled to the keyword social scan: the client refreshes individual
+        # accounts on demand, and this is the background sweep that keeps the
+        # rest current. 04:15 UTC — off-peak, and clear of the scrape window.
+        "account-tracking-sweep": {
+            "task": "app.tasks.accounts.account_scan",
+            "schedule": crontab(hour=4, minute=15),
         },
         # Reaper: every 5 min, mark any 'running' RunLog older than 1h as 'error'
         # and revoke its child task IDs. Catches anything the time limits miss.

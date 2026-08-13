@@ -13,6 +13,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import engine, Base
 from app.routers import targets, runs, reports, settings as settings_router, agent
+from app.routers import accounts as accounts_router
 from app.routers import discovery as discovery_router
 from app.routers import social as social_router
 from app.routers import auth as auth_router
@@ -341,6 +342,7 @@ app.include_router(settings_router.router)
 app.include_router(agent.router)
 app.include_router(discovery_router.router)
 app.include_router(social_router.router)
+app.include_router(accounts_router.router)
 app.include_router(burning_topics_router.router)
 app.include_router(congress_router.router)
 

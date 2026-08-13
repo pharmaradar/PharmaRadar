@@ -41,5 +41,20 @@ class TrackedAccount(Base):
     label: Mapped[str | None] = mapped_column(String(255))
     # Free-text grouping shown in the UI: institution, pharma, patient association…
     category: Mapped[str | None] = mapped_column(String(32))
+    # Who this actually is, and why we watch them. Free text on purpose: the
+    # client knows their market better than an enum written months earlier.
+    full_name: Mapped[str | None] = mapped_column(String(255))
+    notes: Mapped[str | None] = mapped_column(Text)
+    # kol | institution | pharma | patient_association | media | other
+    role: Mapped[str | None] = mapped_column(String(32))
+
+    # Scan health. Without these, "is this account being collected?" can only be
+    # answered by reading worker logs — and a wrong handle is silent otherwise.
+    last_scanned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # ok | empty | error. 'empty' means the scan ran and found nothing, which is
+    # what a mistyped handle looks like from the outside.
+    last_scan_status: Mapped[str | None] = mapped_column(String(16))
+    post_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

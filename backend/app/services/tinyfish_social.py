@@ -212,6 +212,45 @@ def _search_variants(platform: str, term: str, lang_filter: str | None,
     return [f"{term} site:linkedin.com"]
 
 
+def account_query(platform: str, handle: str) -> str | None:
+    """The single search that returns one account's own posts.
+
+    Distinct from `_search_variants`, which always includes an UNPINNED
+    discovery lane — correct for keyword scanning, wrong here. Passing an empty
+    term through that path would make the first variant a bare
+    `site:x.com OR site:twitter.com`, i.e. a global search returning whoever
+    happens to rank, attributed to the account being tracked.
+    """
+    clean = (handle or "").strip().lstrip("@")
+    if not clean:
+        return None
+    if platform == "twitter":
+        return f"site:x.com/{clean}"
+    if platform == "linkedin":
+        return f"{clean} site:{FR_PLATFORM_LOCALES['linkedin.com']}/posts"
+    if platform == "instagram":
+        # Weak: prefix-matches sibling accounts (`liguecontrelecancer.34`), so
+        # callers must filter by exact author. Apify is the real Instagram lane.
+        return f"site:instagram.com/{clean}"
+    # Facebook account search returns nothing at all through the web index.
+    return None
+
+
+def fetch_account_posts(platform: str, handle: str, max_results: int = 10,
+                        lang_filter: str | None = "fr") -> list[dict]:
+    """One account's recent posts through the free search lane.
+
+    Returns only posts whose author slug IS the handle — pinning gets the right
+    account plus its prefix-neighbours, and only an exact comparison separates
+    `ifct` from `ifct-institut-de-formation-continue-des-therapeutes`.
+    """
+    query = account_query(platform, handle)
+    if not query:
+        return []
+    posts = _run_searches(platform, [query], max_results, lang_filter)
+    return by_exact_author(posts, [handle])
+
+
 def fetch_via_tinyfish(platform: str, queries: list[str],
                       max_results: int = 30,
                       lang_filter: str | None = "fr",
@@ -232,10 +271,6 @@ def fetch_via_tinyfish(platform: str, queries: list[str],
     if platform not in ("twitter", "linkedin", "instagram"):
         return []
 
-    out: list[dict] = []
-    seen_urls: set[str] = set()
-    now = datetime.now(timezone.utc)
-
     # Expand every term to its variants up front, preserving order and dropping
     # duplicates so the same search is never paid for (in wall-clock) twice.
     search_queries: list[str] = []
@@ -246,6 +281,21 @@ def fetch_via_tinyfish(platform: str, queries: list[str],
         for variant in _search_variants(platform, q_clean, lang_filter, accounts):
             if variant not in search_queries:
                 search_queries.append(variant)
+
+    return _run_searches(platform, search_queries, max_results, lang_filter)
+
+
+def _run_searches(platform: str, search_queries: list[str], max_results: int,
+                  lang_filter: str | None) -> list[dict]:
+    """Issue already-built searches and normalise the hits into post dicts.
+
+    Split out of `fetch_via_tinyfish` so the account lane can run one exact
+    query without going through variant expansion, which always adds an
+    unpinned discovery search.
+    """
+    out: list[dict] = []
+    seen_urls: set[str] = set()
+    now = datetime.now(timezone.utc)
 
     search_scope = Scope.FR.value if lang_filter == "fr" else Scope.GLOBAL.value
     for full_q in search_queries:
@@ -291,6 +341,6 @@ def fetch_via_tinyfish(platform: str, queries: list[str],
         if len(out) >= max_results:
             break
 
-    logger.info("tinyfish_social.done", platform=platform, terms=len(queries),
+    logger.info("tinyfish_social.done", platform=platform,
                 searches=len(search_queries), results=len(out), lang=lang_filter)
     return out[:max_results]

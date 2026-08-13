@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, String, Text,
+                        func)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -45,6 +46,13 @@ class SocialPost(Base):
     domain: Mapped[str | None] = mapped_column(String(255), index=True)
     source_scope: Mapped[str | None] = mapped_column(String(8), index=True)   # 'fr' | 'global'
     llm_description: Mapped[str | None] = mapped_column(Text)        # filled on click
+
+    # The tracked account this post came from, when it came from one. Nullable
+    # because most posts arrive from keyword search and belong to no account.
+    # Attribution used to rely on the author string plus a query tag; a report
+    # per account has to be exact, so the link is a column now.
+    tracked_account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("tracked_accounts.id", ondelete="SET NULL"), index=True)
 
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
