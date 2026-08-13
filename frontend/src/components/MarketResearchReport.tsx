@@ -7,7 +7,7 @@ import {
 import { api, type MarketReport } from "@/lib/api";
 import { useGenQuota } from "@/hooks/useGenQuota";
 import {
-  Prose, SubtopicList, VoiceChart, VolumeBlock,
+  AuthorList, Prose, SubtopicList, VoiceChart, VolumeBlock,
 } from "@/components/MarketSections";
 
 /**
@@ -66,8 +66,14 @@ function ReportBody({ report }: { report: MarketReport }) {
         <SubtopicList items={report.subtopics} />
       </Section>
 
+      {/* Folded in from the old "Emerging voices" side panel: the main speakers
+          belong in the answer, not beside it. */}
+      <Section title="Main voices on this question" index={7}>
+        <AuthorList authors={report.main_authors ?? []} />
+      </Section>
+
       {report.key_posts?.length > 0 && (
-        <Section title="Key articles & posts" index={7}>
+        <Section title="Key articles & posts" index={8}>
           <div className="space-y-2">
             {report.key_posts.map((post, i) => (
               <div key={i} className="p-2.5 rounded-lg bg-gray-50/60 dark:bg-[#0d1424]/40 border border-slate-200/50 dark:border-white/5">

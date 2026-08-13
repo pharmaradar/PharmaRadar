@@ -1016,6 +1016,7 @@ def _report_out(row) -> dict:
         "volume_note": row.volume_note or "",
         "subtopics": _loads(row.subtopics, []),
         "voice_rows": _loads(row.voice_rows, []),
+        "main_authors": _loads(row.main_authors, []),
         "volume": _loads(row.volume, {}),
         "key_posts": _loads(row.key_posts, []),
         "sources": _loads(row.sources, []),

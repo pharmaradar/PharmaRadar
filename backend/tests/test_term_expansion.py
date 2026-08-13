@@ -4,6 +4,7 @@ Measured on the live corpus before this existed: the topic "subcutaneous
 administration" matched 0 rows, "side effects" 0, "screening" 2. The report
 generator was fine; it was being handed almost nothing to write about.
 """
+from app.services.market_report import _compute_main_authors
 from app.services.term_expansion import expand_term, expand_terms, fold_accents
 
 
@@ -56,3 +57,32 @@ class TestConceptExpansion:
     def test_expand_terms_dedupes_across_inputs(self):
         out = expand_terms(["NSCLC", "nsclc", "lung cancer"])
         assert len(out) == len({v.lower() for v in out})
+
+
+class TestMainAuthors:
+    """Folded in from the removed 'Emerging voices' panel."""
+
+    def test_untracked_author_is_flagged_as_candidate(self):
+        items = [{"author": "Dr Nouveau", "is_tracked_kol": False, "kind": "social"}]
+        assert _compute_main_authors(items)[0]["tracked"] is False
+
+    def test_tracked_competitor_is_not_flagged(self):
+        """`is_tracked_kol` is False for competitors — using it alone would badge
+        AstraZeneca France as outside the audience, the opposite of the truth."""
+        items = [{"author": "AstraZeneca France", "is_tracked_kol": False,
+                  "target_type": "competitor", "kind": "kol"}]
+        assert _compute_main_authors(items)[0]["tracked"] is True
+
+    def test_tracked_social_account_is_not_flagged(self):
+        items = [{"author": "@GustaveRoussy", "is_tracked_kol": False, "kind": "social"}]
+        authors = _compute_main_authors(items, tracked_names={"gustaveroussy"})
+        assert authors[0]["tracked"] is True
+
+    def test_authors_rank_by_mentions(self):
+        items = ([{"author": "Loud", "kind": "social"}] * 3
+                 + [{"author": "Quiet", "kind": "social"}])
+        assert [a["author"] for a in _compute_main_authors(items)] == ["Loud", "Quiet"]
+
+    def test_unattributed_rows_are_skipped(self):
+        items = [{"author": "", "kind": "social"}, {"author": "unattributed", "kind": "social"}]
+        assert _compute_main_authors(items) == []

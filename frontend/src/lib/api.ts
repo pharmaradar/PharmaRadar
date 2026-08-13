@@ -351,6 +351,9 @@ export interface MarketReport {
   volume_note: string;
   subtopics: string[];
   voice_rows: MarketReportVoiceRow[];
+  /** Main speakers on this question. `tracked: false` marks a voice outside the
+   *  current audience — a candidate KOL. Replaces the old side panel. */
+  main_authors: MarketReportAuthor[];
   volume: MarketReportVolume;
   key_posts: MarketReportKeyPost[];
   sources: MarketReportSource[];
@@ -491,6 +494,14 @@ export interface BurningTopicImportantPost {
   platform?: string;
   kind?: string;
   why?: string;
+}
+
+export interface MarketReportAuthor {
+  author: string;
+  mentions: number;
+  engagement: number;
+  platforms: string[];
+  tracked: boolean;
 }
 
 export interface BurningTopicAuthor {

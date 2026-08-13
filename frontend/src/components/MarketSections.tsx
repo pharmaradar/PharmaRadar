@@ -1,5 +1,5 @@
 import { AlertTriangle } from "lucide-react";
-import type { MarketReportVoiceRow, MarketReportVolume } from "@/lib/api";
+import type { MarketReportAuthor, MarketReportVoiceRow, MarketReportVolume } from "@/lib/api";
 
 /**
  * The market-research sections shared by Topic Explorer and Burning Topics.
@@ -107,6 +107,38 @@ export function SubtopicList({ items }: { items: string[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Main voices on a question, untracked ones flagged.
+ *
+ * This lived in an "Emerging voices" side panel, where it read as decoration
+ * next to the report rather than part of the answer. The untracked rows are the
+ * actionable half: someone shaping the conversation who is not yet a target. */
+export function AuthorList({ authors }: { authors: MarketReportAuthor[] }) {
+  if (!authors?.length) {
+    return <p className="text-sm text-gray-400">No attributable authors in this window.</p>;
+  }
+  return (
+    <div className="space-y-1.5">
+      {authors.map((a) => (
+        <div key={a.author}
+          className="flex items-center gap-2 p-2 rounded-lg bg-slate-50/60 dark:bg-white/[0.03]">
+          <span className="text-sm text-gray-700 dark:text-[#e2e8f0] truncate flex-1">
+            {a.author}
+            {!a.tracked && (
+              <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 dark:bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                not tracked
+              </span>
+            )}
+          </span>
+          <span className="text-[11px] text-gray-400 tabular-nums shrink-0">
+            {a.mentions} mention{a.mentions === 1 ? "" : "s"}
+            {a.engagement > 0 && ` · ${a.engagement} engagement`}
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 

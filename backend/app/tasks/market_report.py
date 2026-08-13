@@ -12,7 +12,8 @@ from app.tasks.celery_app import celery_app
 logger = structlog.get_logger(__name__)
 
 # Sections stored as JSON text; everything else is prose or a scalar.
-_JSON_FIELDS = ("subtopics", "voice_rows", "volume", "key_posts", "sources")
+_JSON_FIELDS = ("subtopics", "voice_rows", "volume", "key_posts", "sources",
+                "main_authors")
 
 _TEXT_FIELDS = ("exec_summary", "so_what", "what_is_said", "voices_note", "volume_note")
 

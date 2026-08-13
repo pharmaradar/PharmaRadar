@@ -40,6 +40,9 @@ class MarketReport(Base):
     volume_note: Mapped[str | None] = mapped_column(Text)
     subtopics: Mapped[str | None] = mapped_column(Text)        # JSON list[str]
     voice_rows: Mapped[str | None] = mapped_column(Text)       # JSON list[{bucket,label,mentions,percent}]
+    # JSON list[{author,mentions,engagement,platforms,tracked}] — the main
+    # speakers, replacing the standalone emerging-voices panel.
+    main_authors: Mapped[str | None] = mapped_column(Text)
     volume: Mapped[str | None] = mapped_column(Text)           # JSON dict
     key_posts: Mapped[str | None] = mapped_column(Text)        # JSON list[dict]
     sources: Mapped[str | None] = mapped_column(Text)          # JSON list[{n,author,url,...}]
