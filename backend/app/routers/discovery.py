@@ -5,7 +5,7 @@ import json
 import re
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select, desc, update
+from sqlalchemy import select, desc, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Max concurrent TinyFish subprocess calls across all discovery endpoints.
@@ -958,6 +958,38 @@ class MarketReportRequest(BaseModel):
     question: str
     window_days: int = 30
     lang: str | None = "fr"
+
+
+@router.get("/report/by-question")
+async def find_market_report(q: str, window_days: int = 30, language: str = "fr",
+                             db: AsyncSession = Depends(get_db),
+                             user: User = Depends(get_current_user)):
+    """The newest finished report for this exact question, if one exists.
+
+    Lets the UI show a report the moment a question is asked again, instead of
+    charging a fresh LLM run for an answer already on disk. This is what makes
+    "the report is just there" affordable: reuse is free, generation is not, and
+    the daily quota is small.
+
+    Matching is on the normalised question plus the window and language, because
+    the same words over 30 vs 365 days are genuinely different reports.
+    """
+    from app.models import MarketReport
+
+    question = (q or "").strip()
+    if not question:
+        return {"report": None}
+
+    row = (await db.execute(
+        select(MarketReport)
+        .where(func.lower(func.trim(MarketReport.question)) == question.lower(),
+               MarketReport.window_days == max(1, min(int(window_days or 30), 365)),
+               MarketReport.language == (language or "fr"),
+               MarketReport.status == "done")
+        .order_by(desc(MarketReport.created_at))
+        .limit(1)
+    )).scalars().first()
+    return {"report": _report_out(row) if row else None}
 
 
 @router.post("/report", status_code=202)

@@ -799,6 +799,12 @@ export const api = {
         body: JSON.stringify({ question, window_days: windowDays, lang }),
       }),
     report: (id: number) => req<MarketReport>(`/discovery/report/${id}`),
+    /** The newest finished report for this exact question, or null. Free —
+     *  reuse costs nothing, generation draws on the small daily quota. */
+    findReport: (question: string, windowDays = 30, lang = "fr") =>
+      req<{ report: MarketReport | null }>(
+        `/discovery/report/by-question?q=${encodeURIComponent(question)}` +
+        `&window_days=${windowDays}&language=${lang}`),
     reports: (limit = 20) =>
       req<{ reports: MarketReportSummary[] }>(`/discovery/reports?limit=${limit}`),
     synthesis: (query: string, lang = "fr", refresh = false) =>

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart3, Download, ExternalLink, FileSearch,
@@ -127,7 +127,26 @@ export default function MarketResearchReport({ question, windowDays = 30, lang =
 }) {
   const qc = useQueryClient();
   const { can, spent } = useGenQuota();
-  const [reportId, setReportId] = useState<number | null>(null);
+  // The id is stored WITH the question it belongs to, so changing the question
+  // discards it automatically. Holding a bare id leaks the previous question's
+  // report into the next search and blocks generation for the new one.
+  const [current, setCurrent] = useState<{ question: string; id: number } | null>(null);
+  const reportId = current && current.question === question ? current.id : null;
+  const setReportId = (id: number) => setCurrent({ question, id });
+  // One auto-generate per question, ever. Without this the effect below would
+  // re-fire on every render that follows a failure and spend the whole quota on
+  // a question that cannot be answered.
+  const autoTried = useRef<string | null>(null);
+
+  // Reuse before generating. Asking the same question twice should show the
+  // answer instantly and cost nothing — generation draws on a small daily quota,
+  // so firing a fresh run per search would exhaust it in a few clicks.
+  const { data: existing, isFetching: looking } = useQuery({
+    queryKey: ["market-report-find", question, windowDays, lang],
+    queryFn: () => api.discovery.findReport(question, windowDays, lang),
+    enabled: !!question,
+    staleTime: 60_000,
+  });
 
   const { data: report } = useQuery({
     queryKey: ["market-report", reportId],
@@ -136,6 +155,9 @@ export default function MarketResearchReport({ question, windowDays = 30, lang =
     // Poll only while it is actually building.
     refetchInterval: (q) =>
       q.state.data && ["pending", "running"].includes(q.state.data.status) ? 3000 : false,
+    // Show the already-found report while the first fetch resolves.
+    initialData: existing?.report && existing.report.id === reportId
+      ? existing.report : undefined,
   });
 
   const genMut = useMutation({
@@ -146,6 +168,22 @@ export default function MarketResearchReport({ question, windowDays = 30, lang =
       qc.invalidateQueries({ queryKey: ["market-reports"] });
     },
   });
+
+  // Adopt an existing report, or write the first one for a question nobody has
+  // asked yet. Quota is still respected: when it is spent the manual button
+  // stays, so the user chooses which question is worth the last run.
+  useEffect(() => {
+    if (!question || looking) return;
+    const found = existing?.report ?? null;
+    if (found) {
+      if (reportId !== found.id) setReportId(found.id);
+      return;
+    }
+    if (autoTried.current === question || reportId != null) return;
+    if (!can("market_report")) return;
+    autoTried.current = question;
+    genMut.mutate();
+  }, [question, looking, existing, reportId, can, genMut]);
 
   const building = genMut.isPending
     || (report != null && ["pending", "running"].includes(report.status));
