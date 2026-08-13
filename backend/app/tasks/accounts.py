@@ -204,7 +204,8 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
     return {"status": status, "saved": saved, "returned": len(posts)}
 
 
-async def _run_sweep(account_ids: list[int] | None = None) -> dict:
+async def _run_sweep(account_ids: list[int] | None = None,
+                     publish_status: bool = True) -> dict:
     from app.database import CelerySessionLocal
     from app.models import AppSettings, TrackedAccount
     from app.services import apify_client
@@ -226,10 +227,18 @@ async def _run_sweep(account_ids: list[int] | None = None) -> dict:
             logger.info("account_scan.apify_off", skipped=len(skipped))
 
     total = len(accounts)
-    _set_status(running=True, total=total, done=0, saved=0,
-                started_at=datetime.now(timezone.utc).isoformat(), error=None)
+    # One shared status key describes "the sweep". Individual refreshes must not
+    # write to it: queueing three accounts during a full sweep would have each
+    # overwrite total/done with 1/1, so the sweep's progress bar would report
+    # nonsense. The UI tracks single refreshes by their scan timestamp instead.
+    def _publish(**fields):
+        if publish_status:
+            _set_status(**fields)
+
+    _publish(running=True, total=total, done=0, saved=0,
+             started_at=datetime.now(timezone.utc).isoformat(), error=None)
     if not total:
-        _set_status(running=False, finished_at=datetime.now(timezone.utc).isoformat())
+        _publish(running=False, finished_at=datetime.now(timezone.utc).isoformat())
         return {"accounts": 0, "saved": 0}
 
     done = saved_total = 0
@@ -237,11 +246,11 @@ async def _run_sweep(account_ids: list[int] | None = None) -> dict:
         result = await _scan_one(account, lang_filter)
         done += 1
         saved_total += result.get("saved", 0)
-        _set_status(done=done, saved=saved_total,
-                    current=f"{account.platform}:{account.handle}")
+        _publish(done=done, saved=saved_total,
+                 current=f"{account.platform}:{account.handle}")
 
-    _set_status(running=False, done=done, saved=saved_total,
-                finished_at=datetime.now(timezone.utc).isoformat())
+    _publish(running=False, done=done, saved=saved_total,
+             finished_at=datetime.now(timezone.utc).isoformat())
     logger.info("account_scan.done", accounts=done, saved=saved_total)
     return {"accounts": done, "saved": saved_total}
 
@@ -270,5 +279,9 @@ def account_scan(self, account_ids: list[int] | None = None) -> dict:
     time_limit=420,
 )
 def refresh_account(self, account_id: int) -> dict:
-    """On-demand refresh of a single account, behind the UI's Refresh button."""
-    return asyncio.run(_run_sweep([account_id]))
+    """On-demand refresh of a single account, behind the UI's Refresh button.
+
+    Several of these can be in flight at once — the UI queues them — so this
+    deliberately does not publish to the shared sweep status.
+    """
+    return asyncio.run(_run_sweep([account_id], publish_status=False))

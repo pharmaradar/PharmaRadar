@@ -421,9 +421,18 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
               <h2 className="text-lg font-bold text-pharma-blue dark:text-[#e2e8f0] truncate">
                 {account?.label || account?.handle || "Loading…"}
               </h2>
-              <p className="text-xs text-gray-400">
-                @{account?.handle} · {meta?.label}
-                {account?.full_name && ` · ${account.full_name}`}
+              <p className="text-xs text-gray-400 flex items-center gap-1.5 flex-wrap">
+                <span>
+                  @{account?.handle} · {meta?.label}
+                  {account?.full_name && ` · ${account.full_name}`}
+                </span>
+                {account && profileUrl(account) && (
+                  <a href={profileUrl(account)!} target="_blank" rel="noreferrer"
+                    className="inline-flex items-center gap-1 text-pharma-blue hover:underline"
+                    title={`Open @${account.handle} on ${meta?.label ?? account.platform}`}>
+                    <ExternalLink size={11} /> Open profile
+                  </a>
+                )}
               </p>
             </div>
           </div>
@@ -654,57 +663,69 @@ export default function AccountTracking() {
     refetchInterval: (q) => (q.state.data?.running || watching ? 1500 : false),
   });
 
-  // Which account is mid-collect, so only that card spins rather than all of
-  // them. Cleared when its scan timestamp moves, or by the safety timeout.
-  const [pendingId, setPendingId] = useState<number | null>(null);
-  const pendingSince = useRef<string | null>(null);
-  const [justDone, setJustDone] = useState<
-    { id: number; status: string | null; posts: number } | null>(null);
+  // Accounts currently queued for collection, mapped to the scan timestamp they
+  // had when queued. Clicking collect on a second account while the first is
+  // running adds it here rather than replacing it — Celery already queues the
+  // tasks, so losing the earlier one from the UI was purely a display bug.
+  const [queued, setQueued] = useState<Record<number, string | null>>({});
+  const queuedIds = Object.keys(queued).map(Number);
 
-  // Clear the confirmation after a few seconds so it does not become furniture.
+  const [justDone, setJustDone] = useState<
+    Record<number, { status: string | null; posts: number }>>({});
+
+  // Clear each confirmation after a few seconds so it does not become furniture.
   useEffect(() => {
-    if (!justDone) return;
-    const timer = setTimeout(() => setJustDone(null), 6000);
+    if (!Object.keys(justDone).length) return;
+    const timer = setTimeout(() => setJustDone({}), 6000);
     return () => clearTimeout(timer);
   }, [justDone]);
 
   const watch = (accountId: number | null, previousScan?: string | null) => {
-    setWatchUntil(Date.now() + 120_000);
-    setPendingId(accountId);
-    pendingSince.current = previousScan ?? null;
+    setWatchUntil(Date.now() + 180_000);
+    if (accountId != null) {
+      setQueued((q) => ({ ...q, [accountId]: previousScan ?? null }));
+    }
     qc.invalidateQueries({ queryKey: ["accounts-status"] });
   };
 
-  // Poll the list while something is collecting, and stop the spinner once that
-  // account reports a newer scan.
+  // Poll the list while anything is queued, clearing each account as its scan
+  // timestamp moves. Timestamps are the source of truth rather than the shared
+  // status key, which a concurrent collect would overwrite.
   useQuery({
-    queryKey: ["accounts-watch", pendingId, watching],
+    queryKey: ["accounts-watch", queuedIds.join(","), watching],
     queryFn: async () => {
       const fresh = await api.accounts.list();
       qc.setQueryData(["accounts"], fresh);
-      if (pendingId != null) {
-        const row = fresh.accounts.find((a) => a.id === pendingId);
-        if (row && row.last_scanned_at && row.last_scanned_at !== pendingSince.current) {
-          // A collect can finish in under a second, so the spinner alone is
-          // easy to miss — that is exactly what "nothing happened" looked like.
-          // Leave a short confirmation on the card instead.
-          setJustDone({ id: pendingId, status: row.last_scan_status, posts: row.post_count });
-          setPendingId(null);
-          setWatchUntil(0);
+      const done: Record<number, { status: string | null; posts: number }> = {};
+      const stillQueued: Record<number, string | null> = {};
+      for (const [key, since] of Object.entries(queued)) {
+        const id = Number(key);
+        const row = fresh.accounts.find((a) => a.id === id);
+        if (row && row.last_scanned_at && row.last_scanned_at !== since) {
+          // A collect can finish in under a second, so the spinner alone is easy
+          // to miss — that is what "nothing happened" looked like.
+          done[id] = { status: row.last_scan_status, posts: row.post_count };
+        } else {
+          stillQueued[id] = since;
         }
+      }
+      if (Object.keys(done).length) {
+        setJustDone((prev) => ({ ...prev, ...done }));
+        setQueued(stillQueued);
+        if (!Object.keys(stillQueued).length) setWatchUntil(0);
       }
       return fresh;
     },
-    enabled: watching || pendingId != null,
+    enabled: watching || queuedIds.length > 0,
     refetchInterval: 2000,
   });
 
-  // Safety net: never spin forever if the worker dies or the task is unregistered.
+  // Safety net: never queue forever if a worker dies or the task is unregistered.
   useEffect(() => {
-    if (pendingId == null) return;
-    const timer = setTimeout(() => { setPendingId(null); setWatchUntil(0); }, 120_000);
+    if (!queuedIds.length) return;
+    const timer = setTimeout(() => { setQueued({}); setWatchUntil(0); }, 180_000);
     return () => clearTimeout(timer);
-  }, [pendingId]);
+  }, [queuedIds.length]);
 
   const scanMut = useMutation({
     mutationFn: api.accounts.scanAll,
@@ -718,7 +739,13 @@ export default function AccountTracking() {
       const current = (data?.accounts ?? []).find((a) => a.id === id);
       watch(id, current?.last_scanned_at ?? null);
     },
-    onError: () => { setPendingId(null); setWatchUntil(0); },
+    onError: (_e, id) => {
+      setQueued((q) => {
+        const next = { ...q };
+        delete next[id];
+        return next;
+      });
+    },
   });
   const deleteMut = useMutation({
     mutationFn: (id: number) => api.accounts.remove(id),
@@ -766,19 +793,20 @@ export default function AccountTracking() {
         )}
       </div>
 
-      {(running || pendingId !== null) && (
+      {(running || queuedIds.length > 0) && (
         <div className="glass rounded-xl p-3">
           <div className="flex items-center justify-between text-xs text-gray-500 dark:text-[#94a3b8] mb-1.5">
             <span>
-              Collecting {status?.current
-                ?? (pendingId !== null
-                      ? (data?.accounts ?? []).find((a) => a.id === pendingId)?.handle ?? ""
-                      : "")}
+              {queuedIds.length > 1
+                ? `Collecting ${queuedIds.length} accounts`
+                : `Collecting ${status?.current
+                    ?? (data?.accounts ?? []).find((a) => a.id === queuedIds[0])?.handle
+                    ?? ""}`}
             </span>
             <span className="tabular-nums">
               {status?.running
                 ? `${status?.done ?? 0}/${status?.total ?? 0} · ${status?.saved ?? 0} new posts`
-                : "starting…"}
+                : queuedIds.length > 1 ? `${queuedIds.length} in queue` : "starting…"}
             </span>
           </div>
           <div className="h-1.5 rounded-full bg-slate-100 dark:bg-white/5 overflow-hidden">
@@ -845,8 +873,9 @@ export default function AccountTracking() {
               onRefresh={() => refreshMut.mutate(account.id)}
               onToggle={() => toggleMut.mutate({ id: account.id, active: !account.active })}
               onDelete={() => deleteMut.mutate(account.id)}
-              refreshing={pendingId === account.id}
-              justDone={justDone?.id === account.id ? justDone : null} />
+              refreshing={account.id in queued}
+              queuePosition={queuedIds.length > 1 ? queuedIds.indexOf(account.id) : -1}
+              justDone={justDone[account.id] ?? null} />
           ))}
         </div>
       )}
@@ -864,12 +893,35 @@ export default function AccountTracking() {
  *  The yield badge is the point of the card: an account showing 0 is not
  *  decoration, it is the only signal that a handle is wrong — measured on this
  *  data, every French Facebook slug was wrong and silently produced nothing. */
+/** Where this account actually lives, for opening the real profile.
+ *
+ *  `account.url` wins when set — it is what the Facebook scraper is pointed at,
+ *  and it is the only reliable form for LinkedIn, where an organisation lives
+ *  under /company/ but a person under /in/ and the handle alone cannot say
+ *  which. The guesses below are correct for every other platform we collect. */
+function profileUrl(account: TrackedAccountFull): string | null {
+  if (account.url) return account.url;
+  const handle = (account.handle || "").replace(/^@/, "");
+  if (!handle) return null;
+  switch (account.platform) {
+    case "twitter":   return `https://x.com/${handle}`;
+    case "instagram": return `https://www.instagram.com/${handle}/`;
+    case "facebook":  return `https://www.facebook.com/${handle}`;
+    // Most tracked LinkedIn handles are organisations; a person's profile is
+    // stored with an explicit url above.
+    case "linkedin":  return `https://www.linkedin.com/company/${handle}`;
+    default:          return null;
+  }
+}
+
 function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle,
-                      onDelete, refreshing, justDone }: {
+                      onDelete, refreshing, queuePosition, justDone }: {
   account: TrackedAccountFull; isAdmin: boolean;
   onOpen: () => void; onEdit: () => void; onRefresh: () => void;
   onToggle: () => void; onDelete: () => void;
   refreshing: boolean;
+  /** Index in the collect queue when more than one is pending; -1 otherwise. */
+  queuePosition: number;
   justDone: { status: string | null; posts: number } | null;
 }) {
   const meta = PLATFORM_META[account.platform];
@@ -930,7 +982,8 @@ function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle,
             refreshing ? "text-pharma-blue font-medium"
               : justDone ? "text-emerald-600 dark:text-emerald-400 font-medium"
               : "text-gray-400")}>
-            {refreshing ? "collecting…" : justDone ? (
+            {refreshing ? (queuePosition > 0 ? `queued · #${queuePosition + 1}` : "collecting…")
+              : justDone ? (
               justDone.status === "empty"
                 ? "collected — found nothing"
                 : `collected — ${justDone.posts} posts`
@@ -953,6 +1006,14 @@ function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle,
                 className="p-1 text-gray-400 hover:text-pharma-blue">
                 <Pencil size={12} />
               </button>
+              {profileUrl(account) && (
+                <a href={profileUrl(account)!} target="_blank" rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  title={`Open @${account.handle} on ${PLATFORM_META[account.platform]?.label ?? account.platform}`}
+                  className="p-1 text-gray-400 hover:text-pharma-blue">
+                  <ExternalLink size={12} />
+                </a>
+              )}
               <button onClick={onToggle}
                 title={account.active ? "Pause — keep it, stop collecting" : "Resume"}
                 className="p-1 text-gray-400 hover:text-pharma-blue">
