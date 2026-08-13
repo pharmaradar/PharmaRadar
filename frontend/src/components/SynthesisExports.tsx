@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Building2, ChevronDown, ChevronRight, Download, ExternalLink,
-  FileText, Layers, Loader2, RefreshCw, Users,
+  BookOpen, Building2, Download, ExternalLink,
+  FileText, Layers, Loader2, RefreshCw, Users, X,
 } from "lucide-react";
 import { api, type SynthesisReport, type SynthesisScope } from "@/lib/api";
 import { useGenQuota } from "@/hooks/useGenQuota";
@@ -50,11 +50,11 @@ function Bullets({ items, label }: { items: string[]; label: string }) {
   if (!items?.length) return null;
   return (
     <div>
-      <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-1.5">{label}</p>
-      <ul className="space-y-1.5">
+      <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2.5">{label}</p>
+      <ul className="space-y-2.5">
         {items.map((text, i) => (
-          <li key={i} className="flex items-start gap-2 text-sm text-gray-700 dark:text-[#e2e8f0]">
-            <span className="w-1.5 h-1.5 rounded-full bg-pharma-blue mt-1.5 shrink-0" />
+          <li key={i} className="flex items-start gap-2.5 text-[15px] leading-relaxed text-gray-700 dark:text-[#e2e8f0]">
+            <span className="w-1.5 h-1.5 rounded-full bg-pharma-blue mt-2.5 shrink-0" />
             <span>{text}</span>
           </li>
         ))}
@@ -65,13 +65,13 @@ function Bullets({ items, label }: { items: string[]; label: string }) {
 
 function ReportBody({ report }: { report: SynthesisReport }) {
   return (
-    <div className="space-y-4 pt-4 border-t border-slate-200/50 dark:border-white/5">
+    <div className="space-y-6">
       <Bullets items={report.main} label="Main information" />
 
       {report.so_what && (
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-1.5">So what</p>
-          <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-line">{report.so_what}</p>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2.5">So what</p>
+          <p className="text-[15px] leading-relaxed text-gray-700 dark:text-[#e2e8f0] whitespace-pre-line">{report.so_what}</p>
         </div>
       )}
 
@@ -80,7 +80,7 @@ function ReportBody({ report }: { report: SynthesisReport }) {
 
       {report.key_posts?.length > 0 && (
         <div>
-          <p className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 mb-1.5">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 mb-2.5">
             Key articles &amp; posts
           </p>
           <div className="space-y-2">
@@ -97,7 +97,7 @@ function ReportBody({ report }: { report: SynthesisReport }) {
                     </a>
                   )}
                 </div>
-                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] mt-1">{post.why}</p>
+                <p className="text-[15px] leading-relaxed text-gray-700 dark:text-[#e2e8f0] mt-1">{post.why}</p>
               </div>
             ))}
           </div>
@@ -106,12 +106,12 @@ function ReportBody({ report }: { report: SynthesisReport }) {
 
       {report.sources?.length > 0 && (
         <details className="group">
-          <summary className="text-[10px] font-semibold uppercase tracking-wide text-gray-400 cursor-pointer hover:text-pharma-blue">
+          <summary className="text-[11px] font-semibold uppercase tracking-wider text-gray-400 cursor-pointer hover:text-pharma-blue">
             Sources ({report.sources.length})
           </summary>
           <ul className="mt-2 space-y-1">
             {report.sources.map((s) => (
-              <li key={s.n} className="text-xs text-gray-500 dark:text-[#94a3b8]">
+              <li key={s.n} className="text-[13px] leading-relaxed text-gray-500 dark:text-[#94a3b8]">
                 <span className="text-pharma-blue dark:text-blue-300">[{s.n}]</span> {s.target}
                 {s.source_name && ` — ${s.source_name}`}
                 {s.url && (
@@ -128,6 +128,80 @@ function ReportBody({ report }: { report: SynthesisReport }) {
     </div>
   );
 }
+
+/**
+ * The synthesis rendered in a dialog rather than inside its card.
+ *
+ * These reports run to six sections and a source list, so expanding one in place
+ * pushed it down a third of the dashboard grid and left it in a ~380px column —
+ * a reading width of roughly forty characters, with the other two cards stranded
+ * beside a very tall neighbour. A dialog gives it the full width and its own
+ * scroll, and leaves the grid alone.
+ */
+function ReportModal({ report, label, blurb, icon: Icon, accent, onClose, onPdf }: {
+  report: SynthesisReport;
+  label: string;
+  blurb: string;
+  icon: React.ElementType;
+  accent: string;
+  onClose: () => void;
+  onPdf: () => void;
+}) {
+  // Escape closes, and the page behind must not scroll while the dialog owns
+  // the scroll — otherwise the wheel moves the dashboard under the overlay.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = previous;
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+      onClick={onClose} role="dialog" aria-modal="true" aria-label={label}>
+      <div className="bg-white dark:bg-[#111827] rounded-2xl shadow-2xl w-full max-w-3xl max-h-[88vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}>
+
+        {/* Header stays put so the title and PDF button survive a long scroll. */}
+        <div className="flex-none flex items-start justify-between gap-3 px-6 py-4 border-b border-slate-200/60 dark:border-white/10">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="p-2 bg-slate-100 dark:bg-white/5 rounded-lg shrink-0">
+              <Icon size={18} className={accent} />
+            </div>
+            <div className="min-w-0">
+              <h2 className="font-bold text-base text-gray-900 dark:text-white">{label}</h2>
+              <p className="text-xs text-gray-400 leading-snug">{blurb}</p>
+              <p className="text-[11px] text-gray-400 mt-1">
+                {report.insight_count} statements · {new Date(report.generated_at).toLocaleDateString()}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {report.pdf_url && (
+              <button onClick={onPdf}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-pharma-blue text-white rounded-lg hover:bg-pharma-light transition-colors">
+                <Download size={12} /> PDF
+              </button>
+            )}
+            <button onClick={onClose} aria-label="Close"
+              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-white/5 transition-colors">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5">
+          <ReportBody report={report} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function SynthesisCard({ scope, label, blurb, icon: Icon, accent }: (typeof SCOPES)[number]) {
   const qc = useQueryClient();
@@ -195,10 +269,10 @@ function SynthesisCard({ scope, label, blurb, icon: Icon, accent }: (typeof SCOP
           </button>
         )}
         {report && (
-          <button onClick={() => setOpen(!open)}
-            className="flex items-center gap-1 text-xs text-gray-500 hover:text-pharma-blue transition-colors">
-            {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-            {open ? "Hide" : "Read"}
+          <button onClick={() => setOpen(true)}
+            title="Read the full synthesis"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-slate-300 dark:border-white/10 rounded-lg text-gray-600 dark:text-[#94a3b8] hover:bg-slate-50 dark:hover:bg-white/5 hover:text-pharma-blue transition-colors">
+            <BookOpen size={12} /> Read
           </button>
         )}
       </div>
@@ -224,7 +298,17 @@ function SynthesisCard({ scope, label, blurb, icon: Icon, accent }: (typeof SCOP
         {pdfError && <span className="text-red-400"> · {pdfError}</span>}
       </div>
 
-      {open && report && <ReportBody report={report} />}
+      {open && report && (
+        <ReportModal
+          report={report}
+          label={label}
+          blurb={blurb}
+          icon={Icon}
+          accent={accent}
+          onClose={() => setOpen(false)}
+          onPdf={openPdf}
+        />
+      )}
     </div>
   );
 }
