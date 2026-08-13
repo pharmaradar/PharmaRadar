@@ -242,33 +242,51 @@ def test_french_sources_outrank_anglophone_news_under_french_scope():
     assert _signal_score("https://gustaveroussy.fr/a", ids, "fr") == 9
     assert _signal_score("https://gustaveroussy.fr/a", ids, "global") == 0
     assert _signal_score("https://statnews.com/a", ids, "fr") == 8
-    # The target's own handle still wins — that is the KOL's own voice.
-    assert _signal_score("https://x.com/drbesse/status/1", ids, "fr") == 10
+    # The target's own handle still wins — that is the KOL's own voice, and it
+    # now carries the authorship bonus on top of the handle match, because the
+    # URL proves the post is theirs rather than one that merely names them.
+    assert _signal_score("https://x.com/drbesse/status/1", ids, "fr") == 16
+    assert (_signal_score("https://x.com/drbesse/status/1", ids, "fr")
+            > _signal_score("https://gustaveroussy.fr/a", ids, "fr"))
 
 
-def test_reservation_never_leaves_fetch_slots_unspent():
-    """A hard French-only cut starves targets whose French coverage is thin that
-    week, and a target ending Pass 1 with zero posts escalates to the agent-only
-    rescue — the one path that actually bills credits."""
+def test_thin_french_supply_stays_french_rather_than_topping_up():
+    """The client asked for French sources, so a thin French week returns fewer
+    posts rather than filling the remaining slots with global ones.
+
+    This replaces an earlier quota rule that topped the selection up to the cap
+    from anywhere. Backfilling defeats the point: the spare slots were always
+    filled by the global sources the France scope exists to exclude."""
     candidates = (
         [{"url": f"https://global{i}.com/x", "score": 8} for i in range(20)]
         + [{"url": f"https://centre{i}.fr/y", "score": 9} for i in range(2)]
     )
     candidates.sort(key=lambda c: c["score"], reverse=True)
     selected = _select_candidates(candidates, limit=10, scope="fr")
-    assert len(selected) == 10, "unused French slots must fall back to other sources"
-    assert sum(1 for c in selected if ".fr" in c["url"]) == 2
+    assert len(selected) == 2, "French supply is the cap, not a floor"
+    assert all(".fr" in c["url"] for c in selected)
 
 
-def test_reservation_protects_french_slots_when_supply_is_plentiful():
+def test_zero_french_supply_still_returns_something():
+    """The one case where non-French sources are still used.
+
+    A target that ends Pass 1 with nothing escalates to the agent-only rescue,
+    which is the single path that bills TinyFish credits. Returning ranked
+    global candidates is cheaper than an empty result, so the French-only rule
+    yields exactly when there is no French supply at all to be strict about."""
+    candidates = [{"url": f"https://global{i}.com/x", "score": 8} for i in range(20)]
+    selected = _select_candidates(candidates, limit=10, scope="fr")
+    assert len(selected) == 10, "an empty result would escalate to the billed agent"
+
+
+def test_plentiful_french_supply_fills_every_slot_with_french():
     candidates = (
         [{"url": f"https://g{i}.com/x", "score": 8} for i in range(20)]
         + [{"url": f"https://c{i}.fr/y", "score": 9} for i in range(20)]
     )
     candidates.sort(key=lambda c: c["score"], reverse=True)
     selected = _select_candidates(candidates, limit=10, scope="fr")
-    french = sum(1 for c in selected if ".fr" in c["url"])
-    assert french == 6, "60% of slots reserved for French sources"
+    assert sum(1 for c in selected if ".fr" in c["url"]) == 10
     assert len(selected) == 10
 
 

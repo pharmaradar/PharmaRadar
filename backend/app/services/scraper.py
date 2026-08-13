@@ -19,6 +19,7 @@ import asyncio
 import itertools
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -518,14 +519,113 @@ def _is_binary(url: str) -> bool:
     return (url or "").lower().endswith(HARD_SKIP_SUFFIXES)
 
 
-def _signal_score(url: str, ids: dict, scope: str = "fr") -> int:
-    """Rank a candidate URL. Higher = kept when the candidate list is truncated.
+# Relevance weights. Being about the right person or subject is worth more than
+# any source tier, because a France-only filter already guarantees the source —
+# what it cannot guarantee is that the page has anything to do with the target.
+_REL_FULL_NAME = 6   # every distinctive part of the name is present
+_REL_PARTIAL = 2     # only one part — a namesake, more often than not
+_REL_TOPIC = 3       # the page is at least about the right subject
 
-    Under the French scope a French source outranks the anglophone news tier:
-    HIGH_SIGNAL_DOMAINS and NEWS_SITES contain no .fr host, so before this a
-    French source scored 0 and was the first thing dropped by the `[:10 + n]`
-    cut — the platform could search France and still store nothing from it.
-    A KOL's own handle still wins, since that is the target's own voice.
+# The floor for "this page is worth fetching": named in full, or on-topic. A
+# bare surname does not clear it — "Besse" is an ordinary French surname, and
+# matching it alone pulled in a different Michael Besse and a marketing
+# consultant, then reported them as on-target.
+_REL_FLOOR = 3
+
+
+def _name_tokens(name: str) -> list[str]:
+    """Distinctive parts of a target name, lowercased.
+
+    Short particles ("de", "le") match everything, so only tokens long enough to
+    discriminate are used. Works for either name order — the codebase stores
+    "BESSE BENJAMIN" while the world writes "Benjamin Besse".
+    """
+    return [t.lower() for t in re.split(r"[\s,]+", name or "") if len(t) > 3]
+
+
+_AUTHORED_URL_RE = re.compile(
+    r"linkedin\.com/posts/([^/_?#]+)|(?:twitter|x)\.com/([^/?#]+)/status/", re.IGNORECASE)
+
+
+def _url_author(url: str) -> str | None:
+    """The account that authored a social post, taken from the URL itself.
+
+    LinkedIn and X encode the author in the path, which is a far stronger signal
+    than anything in the text: a post's snippet is often a list of tagged people.
+    """
+    match = _AUTHORED_URL_RE.search(url or "")
+    if not match:
+        return None
+    return (match.group(1) or match.group(2) or "").lower()
+
+
+def _authored_by_target(url: str, name: str, ids: dict) -> bool | None:
+    """Whether a social post was written BY the target. None when not a post URL.
+
+    This exists because text matching cannot survive LinkedIn tag lists. A post
+    by "michael-besse" whose snippet reads "… Michael Besse Benjamin Nanceau …"
+    contains both parts of "BESSE BENJAMIN" belonging to two different people,
+    and scored as a perfect name match. The author slug does not lie.
+    """
+    author = _url_author(url)
+    if author is None:
+        return None
+    for handle in ids.values():
+        if handle and handle.lower() in author:
+            return True
+    tokens = _name_tokens(name)
+    # The slug is "firstname-lastname-1234"; require every distinctive part.
+    return bool(tokens) and all(t in author for t in tokens)
+
+
+def _relevance_score(url: str, snippet: str, name: str,
+                     focus_terms: tuple[str, ...] = (), ids: dict | None = None) -> int:
+    """How much this page looks like it is actually about the target.
+
+    Source quality and topical relevance are different questions. A France-only
+    scope answers the first; without this, every French page scored identically
+    and the fetch cap filled with French pages about other people — a marketing
+    post and an unrelated namesake outranked the KOL's own coverage.
+    """
+    # A social post is authored by whoever the URL says. If that is somebody
+    # else, the target being *mentioned* in a tag list does not make the post
+    # theirs — and tag lists are exactly what defeats text matching here.
+    authored = _authored_by_target(url, name, ids or {})
+    if authored is False:
+        return _REL_TOPIC if (
+            focus_terms and any(t.strip('"').lower() in f"{url} {snippet or ''}".lower()
+                                for t in focus_terms)) else 0
+
+    haystack = f"{url} {snippet or ''}".lower()
+    score = 0
+    tokens = _name_tokens(name)
+    if authored:
+        return _REL_FULL_NAME + (_REL_TOPIC if (
+            focus_terms and any(t.strip('"').lower() in haystack for t in focus_terms)) else 0)
+    if tokens:
+        hits = sum(1 for t in tokens if t in haystack)
+        # All parts present, in any order — "Benjamin Besse" and "BESSE BENJAMIN"
+        # both satisfy this, while a different person sharing one name does not.
+        if hits == len(tokens):
+            score += _REL_FULL_NAME
+        elif hits:
+            score += _REL_PARTIAL
+    if focus_terms and any(t.strip('"').lower() in haystack for t in focus_terms):
+        score += _REL_TOPIC
+    return score
+
+
+def _signal_score(url: str, ids: dict, scope: str = "fr", *, snippet: str = "",
+                  name: str = "", focus_terms: tuple[str, ...] = ()) -> int:
+    """Rank a candidate URL: how good the source is, plus whether it is on-target.
+
+    Under the French scope a curated registry source (edimark.fr, splf.fr,
+    gustaveroussy.fr) outranks a bare .fr host, which in turn outranks nothing —
+    HIGH_SIGNAL_DOMAINS and NEWS_SITES contain no .fr at all, so before this a
+    French source scored 0 and was the first thing dropped by the cap.
+
+    Relevance is added on top rather than folded in, so an on-topic page beats an
+    off-topic one from the same tier and the KOL's own handle still wins outright.
     """
     host = _domain(url)
     score = 0
@@ -533,12 +633,14 @@ def _signal_score(url: str, ids: dict, scope: str = "fr") -> int:
         if handle and handle.lower() in url.lower():
             score = max(score, 10)
     if scope == FR_SCOPE and is_french_source(url):
-        score = max(score, 9)
+        # A curated source we chose to monitor is worth more than any .fr host
+        # that happens to exist.
+        score = max(score, 9 if source_category(url) else 5)
     if any(host == d or host.endswith("." + d) for d in HIGH_SIGNAL_DOMAINS):
         score = max(score, 8)
     if any(n in host for n in NEWS_SITES):
         score = max(score, 6)
-    return score
+    return score + _relevance_score(url, snippet, name, focus_terms, ids)
 
 
 # ── Query building ────────────────────────────────────────
@@ -836,17 +938,20 @@ def _process_url_agent(
 # posts is escalated to the Wave-2 rescue, which is agent-only and therefore the
 # one path that actually bills TinyFish credits. Reserving keeps French sources
 # from being crowded out without ever emptying a target.
-_FR_SLOT_SHARE = 0.6
-
-
 def _select_candidates(candidates: list[dict], limit: int, scope: str = "fr") -> list[dict]:
-    """Pick which candidates get fetched, reserving slots for French sources.
+    """Pick which candidates get fetched. Under the French scope: French only.
 
-    Candidates arrive score-sorted. Under the global scope this is a plain top-N.
-    Under the French scope, up to `_FR_SLOT_SHARE` of the slots are filled from
-    French sources first, then the remainder from everything else in score order,
-    and any unused French slots fall back to non-French candidates so the fetch
-    budget is never left unspent.
+    A target scoped to France collects from French sources and nothing else — the
+    instruction is "France only", not "France mostly", so a non-French candidate
+    is dropped rather than allowed to fill a spare slot.
+
+    ONE exception, and it exists to avoid an expensive failure rather than to
+    soften the rule: if a target has no French candidate at all, the ranked list
+    is used instead. Wave 1 ending with zero posts escalates that target to the
+    Wave-2 rescue, which is agent-only and the single path that actually bills
+    TinyFish credits — so starving a target costs money AND still yields
+    non-French content. Falling back keeps it on the free fetch path. This is
+    logged so a target that keeps hitting it can have French sources added.
     """
     if limit <= 0:
         return []
@@ -854,17 +959,24 @@ def _select_candidates(candidates: list[dict], limit: int, scope: str = "fr") ->
         return candidates[:limit]
 
     french = [c for c in candidates if is_french_source(c["url"])]
-    other = [c for c in candidates if not is_french_source(c["url"])]
+    if french:
+        # Prefer French sources that look like they are about this target. A
+        # France-only filter guarantees the source but not the subject, so
+        # without this the cap fills with French pages about other people —
+        # a marketing post and an unrelated namesake crowding out the KOL's
+        # own coverage. Off-topic French pages still backfill spare slots.
+        on_topic = [c for c in french if c.get("relevant")]
+        if len(on_topic) >= limit:
+            return on_topic[:limit]
+        rest = [c for c in french if not c.get("relevant")]
+        return (on_topic + rest)[:limit]
 
-    fr_slots = min(len(french), max(1, int(limit * _FR_SLOT_SHARE)))
-    selected = french[:fr_slots]
-    selected += other[: limit - len(selected)]
-    # Unused non-French capacity (few other candidates) goes back to French ones.
-    if len(selected) < limit:
-        taken = {id(c) for c in selected}
-        selected += [c for c in french if id(c) not in taken][: limit - len(selected)]
-    # Restore global score order so the fetch pool is still ranked.
-    return sorted(selected, key=lambda c: c["score"], reverse=True)
+    if candidates:
+        logger.info("scrape.no_french_candidates",
+                    hint="falling back to ranked candidates so the target does not "
+                         "escalate to the billed agent rescue",
+                    candidates=len(candidates))
+    return candidates[:limit]
 
 
 # ── Main scrape service ───────────────────────────────────
@@ -900,6 +1012,8 @@ class ScrapeService:
         run_id = ctx.run_id
 
         # ── Pass 1: parallel search + parallel fetch ───────────────────────
+        from app.services.fr_sources import focus_terms as _focus_terms
+        focus_terms = _focus_terms(disease_area, scope)
         logger.info("scrape.pass1.start", target=name, scope=scope, focus=disease_area)
         queries = build_search_queries(name, ids, scope=scope, disease_area=disease_area)
 
@@ -912,7 +1026,7 @@ class ScrapeService:
         for ku in (known_urls or []):
             if ku and not _is_binary(ku):
                 seen_urls.add(ku)
-                candidates.append({"url": ku, "snippet": "", "score": 10})
+                candidates.append({"url": ku, "snippet": "", "score": 10, "relevant": True})
 
         # Search queries in parallel
         def _do_search(q: str):
@@ -926,7 +1040,14 @@ class ScrapeService:
                         candidates.append({
                             "url": url,
                             "snippet": hit.get("snippet", ""),
-                            "score": _signal_score(url, ids, scope=scope),
+                            "score": _signal_score(
+                                url, ids, scope=scope,
+                                snippet=hit.get("snippet", ""),
+                                name=name, focus_terms=focus_terms,
+                            ),
+                            "relevant": _relevance_score(
+                                url, hit.get("snippet", ""), name, focus_terms,
+                                ids) >= _REL_FLOOR,
                         })
 
         with ThreadPoolExecutor(max_workers=_SEARCH_WORKERS) as ex:
