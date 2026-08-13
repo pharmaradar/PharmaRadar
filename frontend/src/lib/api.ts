@@ -563,6 +563,58 @@ export interface TopicsData {
 }
 
 // ── API calls ─────────────────────────────────────────────
+
+/** A social account the platform collects directly, rather than by keyword luck. */
+export interface TrackedAccountFull {
+  id: number;
+  platform: "twitter" | "linkedin" | "instagram" | "facebook";
+  handle: string;
+  url: string | null;
+  label: string | null;
+  full_name: string | null;
+  role: string | null;
+  category: string | null;
+  notes: string | null;
+  active: boolean;
+  post_count: number;
+  last_scanned_at: string | null;
+  /** ok | empty | error — "empty" means the scan ran and found nothing, which
+   *  is what a mistyped handle looks like from the outside. */
+  last_scan_status: "ok" | "empty" | "error" | null;
+}
+
+export interface AccountPost {
+  id: number;
+  url: string;
+  text: string | null;
+  likes: number;
+  comments: number;
+  views: number;
+  language: string | null;
+  kind: string;
+  /** When they published. Null on LinkedIn and X, whose search results carry no
+   *  publication date — so the UI shows collected_at and labels it honestly. */
+  posted_at: string | null;
+  collected_at: string | null;
+}
+
+export interface AccountDetail {
+  account: TrackedAccountFull;
+  window_days: number;
+  posts: AccountPost[];
+  stats: { posts_in_window: number; total_engagement: number; dated_posts: number };
+}
+
+export interface AccountScanStatus {
+  running: boolean;
+  total?: number;
+  done?: number;
+  saved?: number;
+  current?: string;
+  error?: string | null;
+  finished_at?: string;
+}
+
 export const api = {
   stats: () => req<Stats>("/stats"),
   combinedSynthesis: (refresh = false) =>
@@ -743,6 +795,25 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ query, lang, refresh }),
       }),
+  },
+
+  accounts: {
+    list: () => req<{
+      accounts: TrackedAccountFull[]; platforms: string[]; roles: string[];
+      totals: { accounts: number; active: number; producing: number; posts: number };
+    }>("/accounts"),
+    detail: (id: number, days = 90) =>
+      req<AccountDetail>(`/accounts/${id}?days=${days}`),
+    create: (body: Partial<TrackedAccountFull>) =>
+      req<TrackedAccountFull>("/accounts", { method: "POST", body: JSON.stringify(body) }),
+    update: (id: number, body: Partial<TrackedAccountFull>) =>
+      req<TrackedAccountFull>(`/accounts/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    remove: (id: number) =>
+      req<{ deleted: number }>(`/accounts/${id}`, { method: "DELETE" }),
+    refresh: (id: number) =>
+      req<{ queued: boolean }>(`/accounts/${id}/refresh`, { method: "POST" }),
+    scanAll: () => req<{ queued: boolean }>("/accounts/scan", { method: "POST" }),
+    status: () => req<AccountScanStatus>("/accounts/status"),
   },
 
   social: {

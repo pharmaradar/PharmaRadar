@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, FileText, History, Settings, Bot, Compass,
   Flame, Zap, Building2, ChevronLeft, ChevronRight, Sun, Moon, X, LogOut, ShieldCheck,
+  AtSign,
 } from "lucide-react";
 import { useAppStore } from "@/store";
 import { useAuthStore } from "@/store/auth";
@@ -15,6 +16,7 @@ const NAV = [
   { to: "/topics",    icon: Compass,         label: "Topic Explorer" },
   { to: "/burning-topics", icon: Zap,        label: "Burning Topics" },
   { to: "/social",    icon: Flame,           label: "Social Trends"  },
+  { to: "/accounts",  icon: AtSign,          label: "Account Tracking" },
   // Run History exposes raw pipeline internals and the destructive run-delete
   // action, so it is superadmin-only rather than admin-only.
   { to: "/history",   icon: History,         label: "Run History",    superadmin: true },

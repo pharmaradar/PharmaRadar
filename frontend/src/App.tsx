@@ -5,6 +5,7 @@ import Sidebar from "@/components/Sidebar";
 import Dashboard from "@/pages/Dashboard";
 import Targets from "@/pages/Targets";
 import KolModule from "@/pages/KolModule";
+import AccountTracking from "@/pages/AccountTracking";
 import Reports from "@/pages/Reports";
 import RunHistory from "@/pages/RunHistory";
 import SettingsPage from "@/pages/Settings";
@@ -85,6 +86,7 @@ function AuthedApp() {
           <Route path="/agent"     element={<Padded><Agent /></Padded>} />
           <Route path="/profile"   element={<Padded><Profile /></Padded>} />
           <Route path="/kols"      element={<Padded><KolModule /></Padded>} />
+          <Route path="/accounts"  element={<Padded><AccountTracking /></Padded>} />
           <Route path="/targets"   element={<Padded><Targets /></Padded>} />
           <Route path="/competitors" element={<Padded><Competitors /></Padded>} />
           {/* Admin-only */}

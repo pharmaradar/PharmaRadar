@@ -6,7 +6,6 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
 import SocialTrends from "./SocialTrends";
 import StandardKeywords from "@/components/StandardKeywords";
-import TrackedAccounts from "@/components/TrackedAccounts";
 
 export default function SocialPage() {
   const qc = useQueryClient();
@@ -70,7 +69,6 @@ export default function SocialPage() {
       {showConfig && (
         <div className="flex-none max-h-[60vh] overflow-y-auto border-b border-slate-200/50 dark:border-white/10 px-5 py-4 space-y-4">
           <StandardKeywords />
-          <TrackedAccounts />
         </div>
       )}
 
