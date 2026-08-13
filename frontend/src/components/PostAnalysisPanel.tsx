@@ -84,14 +84,20 @@ function ReachBlock({ reach }: { reach: PostAnalysis["reach"] }) {
   );
 }
 
-export default function PostAnalysisPanel({ postId, post, onClose, withDescribe = false }: {
+export default function PostAnalysisPanel({ postId, post, onClose, withDescribe = false,
+                                           kind = "post", title = "Post analysis" }: {
   postId: number;
   post?: { text?: string | null; author?: string | null; platform?: string; url?: string | null };
   onClose: () => void;
   /** Also show the older what / so-what-for-pharma describe, which Social
    *  Trends already offered and which the client wants kept alongside this. */
   withDescribe?: boolean;
+  /** Insights are KOL/competitor statements rather than social posts; the
+   *  sections are identical, only the endpoints differ. */
+  kind?: "post" | "insight";
+  title?: string;
 }) {
+  const isInsight = kind === "insight";
   const qc = useQueryClient();
 
   useEffect(() => {
@@ -109,8 +115,10 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
   // Reuse is free and generation is not, so a post is paid for at most once —
   // reopening it never spends again.
   const { data: cached, isFetching: checking } = useQuery({
-    queryKey: ["post-analysis", postId],
-    queryFn: () => api.social.postAnalysis(postId),
+    queryKey: [isInsight ? "insight-analysis" : "post-analysis", postId],
+    queryFn: () => (isInsight
+      ? api.reports.insightAnalysis(postId)
+      : api.social.postAnalysis(postId)),
     retry: false,
   });
 
@@ -122,8 +130,11 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
   });
 
   const analyseMut = useMutation({
-    mutationFn: (refresh: boolean) => api.social.analysePost(postId, refresh),
-    onSuccess: (res) => qc.setQueryData(["post-analysis", postId], res),
+    mutationFn: (refresh: boolean) => (isInsight
+      ? api.reports.analyseInsight(postId, refresh)
+      : api.social.analysePost(postId, refresh)),
+    onSuccess: (res) => qc.setQueryData(
+      [isInsight ? "insight-analysis" : "post-analysis", postId], res),
   });
 
   const sections = analyseMut.data?.sections ?? cached?.sections ?? null;
@@ -148,7 +159,7 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="text-base font-bold text-pharma-blue dark:text-[#e2e8f0]">
-              Post analysis
+              {title}
             </h2>
             <p className="text-xs text-gray-400 truncate">
               {post?.author && <span>{post.author} · </span>}
@@ -156,7 +167,7 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
               {post?.url && (
                 <a href={post.url} target="_blank" rel="noreferrer"
                   className="ml-2 inline-flex items-center gap-1 text-pharma-blue hover:underline">
-                  <ExternalLink size={11} /> Open post
+                  <ExternalLink size={11} /> {isInsight ? "Open source" : "Open post"}
                 </a>
               )}
             </p>

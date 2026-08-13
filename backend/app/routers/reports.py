@@ -250,3 +250,139 @@ async def download_pdf(file_path: str, inline: bool = False):
     if not url:
         raise HTTPException(status_code=404, detail="File not found")
     return RedirectResponse(url=url, status_code=302)
+
+
+# ── Single-insight analysis ───────────────────────────────
+
+async def _load_insight(db: AsyncSession, insight_id: int):
+    """The insight with the target that said it and the post it came from."""
+    from app.models import ScrapedPost
+
+    row = (await db.execute(
+        select(ExtractedInsight, Target, ScrapedPost)
+        .join(Target, ExtractedInsight.target_id == Target.id)
+        .outerjoin(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
+        .where(ExtractedInsight.id == insight_id)
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Insight not found")
+    return row
+
+
+@router.get("/insight/{insight_id}/analysis")
+async def get_insight_analysis(insight_id: int, db: AsyncSession = Depends(get_db),
+                               user=Depends(get_current_user)):
+    """Whatever analysis is stored. Never calls the LLM, so opening is free."""
+    import json
+
+    insight, _target, _post = await _load_insight(db, insight_id)
+    if not insight.analysis_sections:
+        return {"sections": None, "cached": False}
+    try:
+        return {"sections": json.loads(insight.analysis_sections), "cached": True}
+    except Exception:                               # noqa: BLE001
+        return {"sections": None, "cached": False}
+
+
+@router.post("/insight/{insight_id}/analyse")
+async def analyse_insight(insight_id: int, refresh: bool = False,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(get_current_user)):
+    """Analyse one KOL or competitor statement in the standard report format."""
+    import json
+    from datetime import datetime, timezone
+
+    insight, target, post = await _load_insight(db, insight_id)
+
+    if insight.analysis_sections and not refresh:
+        try:
+            return {"sections": json.loads(insight.analysis_sections), "cached": True}
+        except Exception:                           # noqa: BLE001 - rewrite bad cache
+            pass
+
+    statement = (insight.what_they_said or "").strip()
+    if not statement:
+        raise HTTPException(422, "This insight has no statement to analyse")
+
+    # Voice is EXACT here, unlike a social post: the row is joined to a tracked
+    # Target, so we know both who spoke and in what capacity. No classifier
+    # guessing, and no confidence caveat to render.
+    voice = {
+        "bucket": "kol" if target.target_type == "kol" else "organisation",
+        "confidence": "exact",
+        "evidence": f"tracked {target.target_type or 'target'}: {target.name}",
+        "name": target.name,
+        "target_type": target.target_type,
+    }
+
+    # Web articles carry no engagement — measured 0 of 27 scraped posts have any.
+    # Reporting zeros would read as "nobody engaged" rather than "not measurable".
+    engagement = (getattr(post, "likes", None) or 0) + (getattr(post, "views", None) or 0)
+    reach = {
+        "available": engagement > 0,
+        "likes": getattr(post, "likes", None) or 0,
+        "views": getattr(post, "views", None) or 0,
+        "engagement": engagement,
+        "source_name": getattr(post, "source_name", None) or insight.__dict__.get("source_name"),
+        "note": (None if engagement > 0 else
+                 "This came from a web article rather than a social platform, so "
+                 "engagement figures are not available."),
+    }
+
+    prompt = (
+        "You are a pharma intelligence analyst monitoring the French market for "
+        "Roche. Analyse this SINGLE statement from a tracked "
+        f"{'KOL' if target.target_type == 'kol' else 'competitor'}.\n\n"
+        "Output EXACTLY these sections, each starting with its marker:\n\n"
+        "##EXEC_SUMMARY##\n2-3 sentences: what was said, by whom, in what "
+        "context.\n\n"
+        "##SO_WHAT##\n2-3 sentences on the strategic implication for a pharma "
+        "medical affairs team — the signal, opportunity or risk, and what to do "
+        "about it. Be specific and actionable.\n\n"
+        "##WHAT_IS_SAID##\n2-4 sentences on the substance: the actual claims, "
+        "products, trials or positions stated.\n\n"
+        "##VOICE##\n1-2 sentences on who is speaking and what standing they "
+        f"carry. This is a tracked {target.target_type or 'target'} named "
+        f"{target.name} — treat that as established fact, not inference.\n\n"
+        "##REACH##\n1-2 sentences on how far this is likely to travel and who "
+        "sees it. "
+        + ("Engagement figures are NOT available for this source — say so "
+           "plainly and do not invent numbers.\n\n" if not reach["available"]
+           else f"Engagement: {reach['likes']} likes, {reach['views']} views.\n\n")
+        + "##SUBTOPICS##\n3-5 lines starting '- ': the themes worth tracking "
+        "from this statement.\n\n"
+        "Base every statement on the material. Do not speculate beyond it.\n\n"
+        f"Speaker: {target.name} ({target.target_type})\n"
+        f"Topic: {insight.topic or '-'}\n"
+        f"Category: {insight.category or '-'}\n"
+        f"Sentiment recorded: {insight.sentiment or '-'}\n"
+        f"Published: {getattr(post, 'published_date', None) or '-'}\n\n"
+        f"What they said:\n{statement[:4000]}\n\n"
+        f"Context:\n{(insight.context or '')[:2000]}"
+    )
+
+    from app.services.llm_router import call_llm_async
+    try:
+        # gemini-2.5-flash counts reasoning against this budget; a small cap
+        # truncates the tail sections silently.
+        reply = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=6000)
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(502, f"LLM call failed: {str(exc)[:200]}") from exc
+
+    from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
+
+    raw = reply or ""
+    sections = {
+        "exec_summary": trim_incomplete(extract_section(raw, "EXEC_SUMMARY")),
+        "so_what": trim_incomplete(extract_section(raw, "SO_WHAT")),
+        "what_is_said": trim_incomplete(extract_section(raw, "WHAT_IS_SAID")),
+        "voice_note": trim_incomplete(extract_section(raw, "VOICE")),
+        "reach_note": trim_incomplete(extract_section(raw, "REACH")),
+        "subtopics": parse_bullets(extract_section(raw, "SUBTOPICS")),
+        "voice": voice,
+        "reach": reach,
+    }
+    insight.analysis_sections = json.dumps(sections)
+    insight.analysed_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"sections": sections, "cached": False}

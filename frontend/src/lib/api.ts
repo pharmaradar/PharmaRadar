@@ -768,6 +768,13 @@ export const api = {
 
   reports: {
     latest: (limit = 20) => req<Insight[]>(`/reports/latest?limit=${limit}`),
+    /** Cached analysis of one insight — never triggers an LLM call. */
+    insightAnalysis: (id: number) =>
+      req<{ sections: PostAnalysis | null; cached: boolean }>(
+        `/reports/insight/${id}/analysis`),
+    analyseInsight: (id: number, refresh = false) =>
+      req<{ sections: PostAnalysis; cached: boolean }>(
+        `/reports/insight/${id}/analyse?refresh=${refresh}`, { method: "POST" }),
     list: () => req<{ path: string; name: string; size: number; url: string; uploadedAt?: string }[]>("/reports/"),
     triggerGlobalSynthesis: () =>
       req<{ status: string }>("/reports/global-synthesis", { method: "POST" }),

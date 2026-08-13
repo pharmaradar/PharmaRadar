@@ -9,6 +9,7 @@ import { api, type Insight, type DailyBriefPoint } from "@/lib/api";
 import { formatDateTime, SENTIMENT_COLORS, cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
 import { useAuthStore } from "@/store/auth";
+import PostAnalysisPanel from "@/components/PostAnalysisPanel";
 import SynthesisExports from "@/components/SynthesisExports";
 import { useGenQuota } from "@/hooks/useGenQuota";
 
@@ -997,78 +998,17 @@ export default function Dashboard() {
 
     {/* Insight Drawer */}
     {drawerInsight && (
-      <div className="fixed inset-0 z-50 flex">
-        <div className="flex-1 bg-black/30" onClick={() => setDrawerInsight(null)} />
-        <div className="w-full max-w-md bg-white dark:bg-slate-900 shadow-2xl flex flex-col h-full overflow-y-auto">
-          {/* Drawer header */}
-          <div className="flex items-start justify-between p-5 border-b border-gray-100 dark:border-slate-800">
-            <div>
-              <p className="text-xs font-medium text-pharma-light mb-1">{drawerInsight.target_name}</p>
-              <h2 className="font-semibold text-gray-900 dark:text-[#e2e8f0] text-base leading-snug">{drawerInsight.topic}</h2>
-            </div>
-            <button onClick={() => setDrawerInsight(null)} className="ml-4 text-gray-400 hover:text-gray-600 shrink-0">
-              <X size={20} />
-            </button>
-          </div>
-
-          {/* Drawer body */}
-          <div className="p-5 space-y-5 flex-1">
-            {/* Sentiment + category */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className={cn("text-xs px-2.5 py-1 rounded-full font-medium", SENTIMENT_COLORS[drawerInsight.sentiment] ?? SENTIMENT_COLORS.neutral)}>
-                {drawerInsight.sentiment}
-              </span>
-              {drawerInsight.category && (
-                <span className="text-xs px-2.5 py-1 rounded-full bg-gray-100 dark:bg-[#1e3a5f]/40 text-gray-600 dark:text-[#94a3b8]">
-                  {drawerInsight.category.replace(/_/g, " ")}
-                </span>
-              )}
-            </div>
-
-            {/* What they said */}
-            <div>
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">What they said</p>
-              <p className="text-sm text-gray-800 dark:text-[#e2e8f0] leading-relaxed">{drawerInsight.what_they_said}</p>
-            </div>
-
-            {/* Context */}
-            {drawerInsight.context && (
-              <div>
-                <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Context</p>
-                <p className="text-sm text-gray-600 dark:text-[#94a3b8] leading-relaxed">{drawerInsight.context}</p>
-              </div>
-            )}
-
-            {/* Meta */}
-            <div className="pt-3 border-t border-gray-100 dark:border-[#1e3a5f]/50 space-y-2">
-              {drawerInsight.published_date && (
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-400">Published</span>
-                  <span className="text-gray-600 dark:text-[#94a3b8]">{drawerInsight.published_date}</span>
-                </div>
-              )}
-              {drawerInsight.source_name && (
-                <div className="flex justify-between text-xs">
-                  <span className="text-gray-400">Source</span>
-                  <span className="text-gray-600 dark:text-[#94a3b8]">{drawerInsight.source_name}</span>
-                </div>
-              )}
-            </div>
-
-            {/* Source link */}
-            {drawerInsight.source_url && (
-              <a
-                href={drawerInsight.source_url}
-                target="_blank"
-                rel="noreferrer"
-                className="flex items-center justify-center gap-2 w-full py-2.5 border border-pharma-light text-pharma-light rounded-lg text-sm font-medium hover:bg-pharma-light hover:text-white transition-colors"
-              >
-                <ExternalLink size={14} /> View Original Post
-              </a>
-            )}
-          </div>
-        </div>
-      </div>
+      <PostAnalysisPanel
+        postId={drawerInsight.id}
+        kind="insight"
+        title={drawerInsight.topic || "Insight analysis"}
+        onClose={() => setDrawerInsight(null)}
+        post={{
+          text: drawerInsight.what_they_said,
+          author: drawerInsight.target_name,
+          platform: drawerInsight.source_name || "web",
+          url: drawerInsight.source_url,
+        }} />
     )}
     <>
       {selectedPoint && (
