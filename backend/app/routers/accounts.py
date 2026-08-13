@@ -6,6 +6,7 @@ not a setting of the keyword scan, it is the thing the client asked for. These
 endpoints add what the panel could not answer — what has this account actually
 published, when was it last checked, and refresh it now.
 """
+import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -69,6 +70,14 @@ def _normalise_handle(platform: str, raw: str) -> str:
     return value.strip().lstrip("@").strip("/")
 
 
+def _loads_list(raw) -> list:
+    try:
+        value = json.loads(raw) if raw else []
+        return value if isinstance(value, list) else []
+    except Exception:                               # noqa: BLE001
+        return []
+
+
 def _out(account: TrackedAccount) -> dict:
     return {
         "id": account.id,
@@ -82,6 +91,16 @@ def _out(account: TrackedAccount) -> dict:
         "notes": account.notes,
         "active": account.active,
         "post_count": account.post_count or 0,
+        "analysis": {
+            "summary": account.analysis_summary,
+            "so_what": account.analysis_so_what,
+            "themes": _loads_list(account.analysis_themes),
+            "generated_at": account.analysis_at.isoformat() if account.analysis_at else None,
+            # True when posts arrived after the analysis was written, so the UI
+            # can say "based on 12 of 22 posts" instead of implying it is current.
+            "stale": (account.post_count or 0) > (account.analysis_post_count or 0),
+            "post_count": account.analysis_post_count or 0,
+        },
         "last_scanned_at": account.last_scanned_at.isoformat() if account.last_scanned_at else None,
         "last_scan_status": account.last_scan_status,
     }
@@ -234,6 +253,9 @@ async def account_detail(account_id: int, days: int = 90, limit: int = 50,
             "id": post.id,
             "url": post.post_url,
             "text": post.text,
+            "thumbnail_url": post.thumbnail_url,
+            "platform": post.platform,
+            "author": post.author,
             "likes": post.likes or 0,
             "comments": post.comments or 0,
             "views": post.views or 0,
@@ -257,3 +279,104 @@ async def account_detail(account_id: int, days: int = 90, limit: int = 50,
             "dated_posts": sum(1 for p in posts if p.posted_at),
         },
     }
+
+
+@router.post("/{account_id}/analyse", dependencies=[Depends(require_admin)])
+async def analyse_account(account_id: int, refresh: bool = False,
+                          db: AsyncSession = Depends(get_db)):
+    """What this account talks about, and what it means for us.
+
+    Cached on the account: the same posts produce the same read, so paying for
+    it on every open would be charging twice for one answer. `refresh=true`
+    forces a rewrite, and the cache is also bypassed once new posts have landed.
+    """
+    account = await db.get(TrackedAccount, account_id)
+    if not account:
+        raise HTTPException(404, "account not found")
+
+    fresh_needed = (
+        refresh
+        or not account.analysis_summary
+        or (account.post_count or 0) > (account.analysis_post_count or 0)
+    )
+    if not fresh_needed:
+        return {**_out(account), "cached": True}
+
+    rows = await db.execute(
+        select(SocialPost)
+        .where(SocialPost.tracked_account_id == account_id)
+        .where(social_not_ae())
+        .order_by(desc(SocialPost.scraped_at))
+        .limit(40)
+    )
+    posts = rows.scalars().all()
+    if not posts:
+        raise HTTPException(422, "No posts collected for this account yet")
+
+    excerpts = "\n\n".join(
+        f"- ({p.platform}, {p.likes or 0} likes) {(p.text or '')[:400]}"
+        for p in posts if (p.text or "").strip()
+    )[:12000]
+
+    prompt = (
+        "You are a pharma intelligence analyst monitoring the French market for "
+        "Roche. Below are recent posts from ONE tracked account. Summarise what "
+        "this account is saying and what it means for us.\n\n"
+        "Respond in exactly these three sections with these exact headers:\n\n"
+        "SUMMARY: [3-4 sentences: what this account posts about, their angle, "
+        "who they speak to.]\n\n"
+        "SO WHAT: [2-3 sentences on the implication for a pharma medical affairs "
+        "team — what signal, opportunity or risk this represents. Be specific.]\n\n"
+        "THEMES: [3-6 short bullet lines starting with '- ', one recurring theme "
+        "each.]\n\n"
+        "Base every statement on the posts. Do not speculate beyond them.\n\n"
+        f"Account: @{account.handle} ({account.platform})"
+        f"{' — ' + account.label if account.label else ''}\n"
+        f"Posts analysed: {len(posts)}\n\n{excerpts}"
+    )
+
+    from app.services.llm_router import call_llm_async
+    try:
+        # gemini-2.5-flash spends this budget on reasoning as well as output, so
+        # a "generous" 1200 truncated the reply mid-summary and the SO WHAT and
+        # THEMES sections never arrived at all. Same reason burning_topics uses
+        # 8192 for its multi-section prompt.
+        reply = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=6000)
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(502, f"LLM call failed: {str(exc)[:200]}") from exc
+
+    summary, so_what, themes = _parse_analysis(reply or "")
+    account.analysis_summary = summary
+    account.analysis_so_what = so_what
+    account.analysis_themes = json.dumps(themes)
+    account.analysis_at = datetime.now(timezone.utc)
+    # Record what it was written from, so staleness is measurable rather than
+    # guessed from a timestamp.
+    account.analysis_post_count = account.post_count or len(posts)
+    await db.commit()
+    await db.refresh(account)
+    return {**_out(account), "cached": False, "posts_analysed": len(posts)}
+
+
+def _parse_analysis(raw: str) -> tuple[str, str | None, list[str]]:
+    """Split the reply into its three sections.
+
+    Models drift on formatting, so each header is matched loosely and anything
+    unparseable falls back to the whole reply as the summary — a report with a
+    blunt summary beats an empty panel.
+    """
+    import re
+
+    def _section(name: str) -> str:
+        pattern = rf"{name}\s*:?\s*\n?(.*?)(?=\n\s*(?:SUMMARY|SO WHAT|THEMES)\s*:|\Z)"
+        found = re.search(pattern, raw, re.S | re.I)
+        return (found.group(1).strip() if found else "")
+
+    summary = _section("SUMMARY") or raw.strip()
+    so_what = _section("SO WHAT") or None
+    themes = [
+        line.lstrip("-•* ").strip()
+        for line in _section("THEMES").splitlines()
+        if line.strip().startswith(("-", "•", "*"))
+    ]
+    return summary, so_what, [t for t in themes if t][:6]
