@@ -237,6 +237,73 @@ def fr_account_groups(platform: str, group_size: int = _X_GROUP_SIZE) -> list[st
     return groups
 
 
+# ── France vs. merely francophone ─────────────────────────
+# Measured 2026-08-12: searching social platforms with French *terms* returns
+# 10/10 French-language results — but "French-language" includes Quebec, Wallonia
+# and francophone Africa. `coloncanada` posting "essai clinique" is perfect
+# French and useless to a client tracking the French market. Language is not
+# geography, so the geography has to be tested separately.
+_NON_FRANCE_FRANCOPHONE_TLDS: frozenset[str] = frozenset({
+    ".ca", ".be", ".ch", ".lu", ".mc", ".sn", ".ci", ".ma", ".tn", ".dz", ".cd", ".ht",
+})
+_NON_FRANCE_MARKERS: tuple[str, ...] = (
+    "canada", "quebec", "québec", "montreal", "montréal", "belgique", "belgium",
+    "wallonie", "bruxelles", "suisse", "swiss", "romande", "luxembourg",
+    "senegal", "sénégal", "maroc", "morocco", "tunisie", "algerie", "algérie",
+)
+
+
+def is_francophone_not_france(url_or_handle: str, text: str = "") -> bool:
+    """True for francophone sources that are NOT French-market.
+
+    Applied *after* the French test, never instead of it: this only removes
+    Quebec/Belgium/Swiss/African francophone sources that a language-based
+    filter would happily wave through as "French".
+    """
+    lowered = (url_or_handle or "").lower()
+    host = normalize_host(lowered) if "/" in lowered or "." in lowered else lowered
+    # A curated French source outranks any marker in its URL path.
+    if is_french_source(host):
+        return False
+    for tld in _NON_FRANCE_FRANCOPHONE_TLDS:
+        if host.endswith(tld):
+            return True
+    blob = f"{lowered} {(text or '')[:400].lower()}"
+    return any(marker in blob for marker in _NON_FRANCE_MARKERS)
+
+
+def french_voice(url: str, author: str = "", text_language: str | None = None,
+                 tracked: tuple[str, ...] = ()) -> bool:
+    """Whether a SOCIAL post comes from a French-market voice.
+
+    `is_french_source` alone cannot answer this: it reads the domain, and a
+    social post's domain is always the platform. Measured on the live table,
+    that made `@SPLF_SocPneumo` — a French learned society in our own registry —
+    come back "global" simply because it posts on x.com. Only fr.linkedin.com
+    ever scored French, which is a property of LinkedIn, not of the data.
+
+    So the source of a social post is its ACCOUNT, tested widest-first:
+    the French locale host, the curated registry, the team's tracked accounts,
+    a French marker in the handle, and finally French text. Any one is enough;
+    a non-France francophone marker vetoes all of them.
+    """
+    handle = (author or "").strip().lstrip("@").lower()
+    if is_francophone_not_france(url, "") or is_francophone_not_france(handle, ""):
+        return False
+    if is_french_source(url):                       # fr.linkedin.com and .fr hosts
+        return True
+    if is_fr_account_url(url):                      # curated registry
+        return True
+    if handle:
+        if any(handle == t.strip().lstrip("@").lower() for t in tracked if t):
+            return True
+        if handle.endswith(".fr") or "france" in handle or "_fr" in handle:
+            return True
+    # A post written in French, from an account with no non-France marker, is
+    # French-market by default — the client's audience writes in French.
+    return (text_language or "") == "fr"
+
+
 def is_fr_account_url(url: str) -> bool:
     """True if a social URL belongs to a verified French account in the registry."""
     lowered = (url or "").lower()

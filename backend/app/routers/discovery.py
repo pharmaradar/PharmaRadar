@@ -229,6 +229,10 @@ def _to_out(r: DiscoveryResult, from_cache: bool) -> dict:
         "media_type": r.media_type or "article",
         "thumbnail_url": r.thumbnail_url,
         "language": r.language or "en",
+        # Where it came from, as recorded at ingest. The UI filters on this
+        # rather than `language`: a French source is a France fact, whereas the
+        # detected language of a snippet is a guess about its text.
+        "source_scope": r.source_scope or "global",
         "llm_description": r.llm_description,
     }
 
@@ -330,9 +334,19 @@ def _deep_queries(query: str, lang: str | None = "fr") -> list[str]:
     return [_localize(v, lang) for v in unscoped] + scoped
 
 
-async def _save_hit(db, query: str, hit: dict, seen_urls: set) -> dict | None:
+async def _save_hit(db, query: str, hit: dict, seen_urls: set,
+                    fr_only: bool = False) -> dict | None:
+    """Persist one search hit. `fr_only` drops non-French sources at write time.
+
+    Query-side `site:` scoping already biases towards French sources, but a
+    search engine will still return the odd international result inside a scoped
+    query. Dropping it here means a France-only scope never *stores* a
+    non-French source, rather than storing it and filtering at display.
+    """
     url = hit.get("url", "")
     if not url or _is_skipped_domain(url) or url in seen_urls:
+        return None
+    if fr_only and not is_french_source(url):
         return None
     seen_urls.add(url)
 
@@ -422,7 +436,7 @@ async def search(body: SearchRequest, db: AsyncSession = Depends(get_db),
         for hit in hits:
             if len(results) >= MAX_RESULTS:
                 break
-            saved = await _save_hit(db, query, hit, seen_urls)
+            saved = await _save_hit(db, query, hit, seen_urls, fr_only=(scope == 'fr'))
             if saved:
                 results.append(saved)
 
@@ -532,7 +546,7 @@ async def deep_search(body: SearchRequest, db: AsyncSession = Depends(get_db)):
         for hit in hits:
             if len(all_results) >= DEEP_MAX_RESULTS:
                 break
-            saved = await _save_hit(db, deep_key, hit, seen_urls)
+            saved = await _save_hit(db, deep_key, hit, seen_urls, fr_only=(scope == 'fr'))
             if saved:
                 all_results.append(saved)
 

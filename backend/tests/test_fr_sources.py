@@ -499,3 +499,41 @@ def test_instagram_search_is_france_scoped_and_free():
 
     variants = _search_variants("instagram", "cancer du poumon", "fr")
     assert variants == ["cancer du poumon site:instagram.com"]
+
+
+# ── French SOURCE for social: the account, not the domain ──
+
+def test_french_voice_recognises_a_french_society_on_a_global_platform():
+    """The defect this replaces: `is_french_source` reads the domain, and every
+    social post lives on a global platform domain. Measured on the live table,
+    that labelled @SPLF_SocPneumo — a French learned society in our own curated
+    registry — "global", simply because it posts on x.com."""
+    from app.services.fr_sources import french_voice
+    assert french_voice("https://x.com/SPLF_SocPneumo/status/1",
+                        "@SPLF_SocPneumo", "fr")
+    assert french_voice("https://x.com/GustaveRoussy/status/1",
+                        "@GustaveRoussy", "en"), "a French centre posting in English is still French"
+
+
+def test_french_voice_rejects_francophone_sources_outside_france():
+    """French is not France. Searching in French returns Quebec and Wallonia
+    too, and the client tracks the French market specifically."""
+    from app.services.fr_sources import french_voice
+    assert not french_voice("https://www.facebook.com/coloncanada/posts/x",
+                            "coloncanada", "fr")
+    assert not french_voice("https://x.com/sante_quebec/status/1",
+                            "@sante_quebec", "fr")
+
+
+def test_french_voice_rejects_anglophone_accounts():
+    from app.services.fr_sources import french_voice
+    assert not french_voice("https://x.com/MDAnderson/status/1", "@MDAnderson", "en")
+    assert not french_voice("https://www.instagram.com/p/X/",
+                            "huntsmancancerinstitute", "en")
+
+
+def test_french_voice_accepts_a_tracked_account_in_any_language():
+    from app.services.fr_sources import french_voice
+    assert french_voice("https://www.instagram.com/p/X/", "bms_france", None)
+    assert french_voice("https://www.instagram.com/p/X/", "unicancer", "en",
+                        tracked=("unicancer",))

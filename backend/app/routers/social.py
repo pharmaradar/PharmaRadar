@@ -17,6 +17,7 @@ from app.database import get_db
 from app.models import SocialPost, SearchHistory, User
 from app.auth import get_current_user, require_admin, daily_gen_guard
 from app.services.ae_filter import social_not_ae
+from app.services.fr_sources import Scope
 
 router = APIRouter(prefix="/api/social", tags=["social"])
 
@@ -157,7 +158,12 @@ async def trends(
     if kind and kind != "all":
         q = q.where(SocialPost.kind == kind)
     if language and language != "all":
-        q = q.where(SocialPost.language == language)
+        # "fr" means French SOURCE, not French text. Filtering on the detected
+        # language both over- and under-selects: it admitted francophone Quebec
+        # accounts and hid French institutions that post in English. source_scope
+        # is set from the account at ingest, so it answers the question asked.
+        q = (q.where(SocialPost.source_scope == Scope.FR.value) if language == "fr"
+             else q.where(SocialPost.language == language))
     # Pull a generous slice then rank in Python (engagement+recency isn't SQL-cheap)
     q = q.order_by(desc(SocialPost.scraped_at)).limit(1000)
 
@@ -369,9 +375,11 @@ async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
         func.lower(SocialPost.query).like(like),
         func.lower(SocialPost.hashtags).like(like),
     )).where(social_not_ae())
-    # Filter cached posts by language when not in "all" mode
+    # Filter cached posts by source when not in "all" mode — see the note in
+    # `trends`: French source, not French text.
     if lang and lang != "all":
-        base = base.where(SocialPost.language == lang)
+        base = (base.where(SocialPost.source_scope == Scope.FR.value) if lang == "fr"
+                else base.where(SocialPost.language == lang))
     rows = await db.execute(base.order_by(desc(SocialPost.scraped_at)).limit(500))
     posts = rows.scalars().all()
     ranked = sorted(posts, key=lambda p: _trend_score(p, now), reverse=True)

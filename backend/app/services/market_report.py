@@ -128,7 +128,11 @@ async def research(session, question: str, queries: list[str],
         for hit in hits or []:
             try:
                 # Stored under the question so _gather_web's ILIKE finds it.
-                if await _save_hit(session, question, hit, seen):
+                # France-only when the report is scoped to France, so the
+                # corpus a report is written from never contains a source the
+                # scope excludes.
+                if await _save_hit(session, question, hit, seen,
+                                   fr_only=(scope == "fr")):
                     saved += 1
             except Exception:                          # noqa: BLE001
                 continue

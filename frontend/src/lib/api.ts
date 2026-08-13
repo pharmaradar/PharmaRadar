@@ -254,6 +254,10 @@ export interface TrackedAccount {
   label: string | null;
   category: string | null;
   active: boolean;
+  /** Posts attributed to this account so far. 0 means the handle has never
+   *  yielded anything — usually a wrong slug, which fails silently otherwise. */
+  post_count?: number;
+  last_seen?: string | null;
 }
 
 export interface SocialPost {
@@ -376,6 +380,8 @@ export interface DiscoveryResult {
   media_type: "article" | "video" | "pdf" | "linkedin" | "twitter" | "social" | "research";
   thumbnail_url: string | null;
   language: string;
+  /** Provenance recorded at ingest: "fr" when the domain is a French source. */
+  source_scope: "fr" | "global";
   llm_description: string | null;
 }
 

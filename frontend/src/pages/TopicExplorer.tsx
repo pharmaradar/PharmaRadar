@@ -149,7 +149,12 @@ export default function TopicExplorer() {
   const webRaw      = searchMut.data?.results ?? [];
   const fromCache   = searchMut.data?.from_cache ?? false;
   const webAll      = webRaw
-    .filter(r => langFilter === "all" || r.language === langFilter)
+    // France filters on the SOURCE, not the detected language of the snippet:
+    // the backend already stores only French domains under the "fr" scope, so
+    // re-testing the text here could only ever hide French sources that happen
+    // to publish in English.
+    .filter(r => langFilter === "all"
+      || (langFilter === "fr" ? r.source_scope === "fr" : r.language === langFilter))
     .filter(r => !fromDate || !r.published_date || r.published_date >= fromDate)
     .filter(r => !toDate   || !r.published_date || r.published_date <= toDate);
   const webArticles = webAll.filter(r => r.media_type === "article" || r.media_type === "pdf" || r.media_type === "research");
