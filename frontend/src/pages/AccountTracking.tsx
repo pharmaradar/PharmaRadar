@@ -125,8 +125,8 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-2xl h-full overflow-y-auto glass-panel border-l border-slate-200/50 dark:border-white/10 p-6 space-y-5">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative w-full max-w-2xl h-full overflow-y-auto overlay-panel border-l p-6 space-y-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
             <div className="p-2 rounded-lg bg-slate-100 dark:bg-white/5 shrink-0">
