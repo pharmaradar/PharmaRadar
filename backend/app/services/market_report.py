@@ -335,6 +335,11 @@ async def gather(session, question: str, *, terms: list[str] | None = None,
         from app.services.question import expand
         terms = expand(question, language=language)["terms"]
     search_terms = [t for t in (terms or [question]) if t and t.strip()]
+    # The corpus is French; questions are usually typed in English. Without this
+    # a question about "subcutaneous administration" matched 0 rows while the
+    # French wording sat in the database. Expansion only adds spellings.
+    from app.services.term_expansion import expand_terms as _bilingual
+    search_terms = _bilingual(search_terms)
 
     # Search the discriminating terms first. Corpus-wide staples ("study",
     # "cancer", "patients") match almost every row, so including them up front

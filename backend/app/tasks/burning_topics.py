@@ -85,9 +85,16 @@ async def _load_congress_questions(congress_id: int) -> list:
 
 
 def _topic_terms(topic) -> tuple[list[str], list[str]]:
+    from app.services.term_expansion import expand_terms
+
     terms = [topic.name.strip()]
     terms.extend(item.strip() for item in _loads(topic.restriction_terms)
                  if isinstance(item, str) and item.strip())
+    # Topic names are written in English against a deliberately French corpus,
+    # so the literal name matches almost nothing — "subcutaneous administration"
+    # scored 0 rows while the French wording was present. Expansion only ever
+    # adds spellings, so a topic keeps everything it matched before.
+    terms = expand_terms(terms)
     exclusions = [item.strip() for item in _loads(topic.exclusion_words)
                   if isinstance(item, str) and item.strip()]
     return list(dict.fromkeys(terms)), list(dict.fromkeys(exclusions))
