@@ -334,7 +334,13 @@ export interface MarketReportSource {
 
 export interface MarketReportKeyPost {
   kind: string; author: string; url: string; source_name: string;
-  date: string; text: string; engagement: number; why: string;
+  date: string; text: string; engagement: number;
+  /** Combined line, kept for reports generated before the split below. */
+  why: string;
+  /** What this specific item claims or reports. */
+  says?: string;
+  /** How Roche can use it — the action, opening or risk it creates. */
+  benefit?: string;
 }
 
 export interface MarketReport {
@@ -615,6 +621,12 @@ export interface AccountAnalysis {
     voices_note?: string;
     volume_note?: string;
     subtopics?: string[];
+    /** Per-post reading: what a specific post says and how we can use it. */
+    key_posts?: {
+      url: string; author: string; platform: string; date: string;
+      engagement: number; comments: number;
+      says: string; benefit: string; text: string;
+    }[];
     voice_rows?: MarketReportVoiceRow[];
     voice_exact_share?: number;
     volume?: MarketReportVolume;

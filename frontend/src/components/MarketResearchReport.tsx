@@ -90,7 +90,19 @@ function ReportBody({ report }: { report: MarketReport }) {
                     </a>
                   )}
                 </div>
-                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] mt-1">{post.why}</p>
+                {/* `says`/`benefit` are split for reports generated after that
+                    change; older ones only have the combined `why`. */}
+                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] mt-1">
+                  {post.says || post.why}
+                </p>
+                {post.benefit && (
+                  <p className="text-sm text-emerald-700 dark:text-emerald-300 mt-1.5 leading-relaxed">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider mr-1.5">
+                      How we can use it
+                    </span>
+                    {post.benefit}
+                  </p>
+                )}
               </div>
             ))}
           </div>

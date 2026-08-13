@@ -504,7 +504,13 @@ def build_prompt(question: str, material: Material) -> str:
         "##SUBTOPICS##\n"
         "4-6 lines starting '- ': the sub-topics worth tracking next, each with why.\n\n"
         "##KEY_POSTS##\n"
-        "Up to 8 lines, each exactly '[n] one sentence on why this item matters'.\n\n"
+        "Up to 8 lines, each EXACTLY in this form:\n"
+        "[n] SAYS: what that specific item actually claims or reports, in one "
+        "sentence. | BENEFIT: how Roche can use it — the concrete action, "
+        "opening or risk it creates for us, in one sentence.\n"
+        "Only the items themselves are available: engagement counts are a "
+        "signal, but the text of comments is NOT collected, so never state or "
+        "imply what commenters said.\n\n"
         f"MATERIAL ({material.total} items):\n{material.numbered()}"
     )
 
@@ -546,10 +552,23 @@ def parse_report(raw: str, material: Material) -> dict:
         if not (0 <= idx < len(material.items)):
             continue
         item = material.items[idx]
+        body = _CITATION_RE.sub("", line, count=1).strip(" -–—:").strip()
+        # Split the reading from the use. `why` stays populated because the PDF
+        # renderer and older stored reports both expect it.
+        says, benefit = body, ""
+        lowered = body.lower()
+        if "benefit:" in lowered:
+            cut = lowered.index("benefit:")
+            says, benefit = body[:cut], body[cut + len("benefit:"):]
+        says = says.strip().strip("|—-").strip()
+        if says.lower().startswith("says:"):
+            says = says[5:].strip()
         key_posts.append({
             **{k: item.get(k) for k in
                ("kind", "author", "url", "source_name", "date", "text", "engagement")},
-            "why": _CITATION_RE.sub("", line, count=1).strip(" -–—:").strip(),
+            "says": says,
+            "benefit": benefit.strip().strip("|").strip(),
+            "why": body,
         })
 
     return {
@@ -649,8 +668,10 @@ def render_html(question: str, report: dict, now: datetime, window_days: int) ->
         "<div class='post-card'>"
         f"<div class='who'>{_esc(p.get('author') or p.get('source_name'))} · {_esc(p.get('kind'))}"
         f"{' · ' + _esc(p.get('date')) if p.get('date') else ''}</div>"
-        f"<p class='body'>{_esc(p.get('why'))}</p>"
-        f"<p class='body'><em>&ldquo;{_esc((p.get('text') or '')[:200])}&rdquo;</em></p>"
+        f"<p class='body'>{_esc(p.get('says') or p.get('why'))}</p>"
+        + (f"<p class='body'><strong>How we can use it:</strong> "
+           f"{_esc(p.get('benefit'))}</p>" if p.get("benefit") else "")
+        + f"<p class='body'><em>&ldquo;{_esc((p.get('text') or '')[:200])}&rdquo;</em></p>"
         + (f"<div class='link'>{_esc(p.get('url'))}</div>" if p.get("url") else "")
         + "</div>"
         for p in report["key_posts"]

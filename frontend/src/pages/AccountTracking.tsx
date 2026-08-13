@@ -308,6 +308,38 @@ function AnalysisPanel({ account, onGenerate, busy, onPdf, pdfBusy }: {
           <Section n={6} title="Key sub-topics to consider">
             <SubtopicList items={sec.subtopics ?? []} />
           </Section>
+          {(sec.key_posts?.length ?? 0) > 0 && (
+            <Section n={7} title="What specific posts say, and how we can use them">
+              <div className="space-y-2">
+                {sec.key_posts!.map((post) => (
+                  <div key={post.url}
+                    className="p-3 rounded-lg border border-slate-200/60 dark:border-white/5 bg-white/50 dark:bg-white/[0.02]">
+                    <div className="flex items-center gap-2 mb-1.5 text-[10px] text-gray-400 flex-wrap">
+                      <span className="capitalize">{post.platform}</span>
+                      {post.date && <span>· {post.date}</span>}
+                      {post.engagement > 0 && <span>· {post.engagement} engagement</span>}
+                      {post.comments > 0 && <span>· {post.comments} comments</span>}
+                      <a href={post.url} target="_blank" rel="noreferrer"
+                        className="ml-auto text-gray-400 hover:text-pharma-blue" title="Open post">
+                        <ExternalLink size={11} />
+                      </a>
+                    </div>
+                    <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-relaxed">
+                      {post.says}
+                    </p>
+                    {post.benefit && (
+                      <p className="mt-1.5 text-sm text-emerald-700 dark:text-emerald-300 leading-relaxed">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider mr-1.5">
+                          How we can use it
+                        </span>
+                        {post.benefit}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
         </div>
       ) : (
         /* Analyses written before the six-section format. Regenerating upgrades

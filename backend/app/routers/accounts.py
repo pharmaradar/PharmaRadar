@@ -8,6 +8,7 @@ published, when was it last checked, and refresh it now.
 """
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -69,6 +70,68 @@ def _normalise_handle(platform: str, raw: str) -> str:
         value = parts[0] if parts else value
     value = value.split("?")[0].split("#")[0]
     return value.strip().lstrip("@").strip("/")
+
+
+
+_PICK_RE = re.compile(r"\[(\d+)\]\s*(.*)", re.S)
+
+
+def _parse_post_picks(section: str, posts, account) -> list[dict]:
+    """Turn "- [3] SAYS: … | BENEFIT: …" lines back into real posts.
+
+    The model cites post numbers rather than restating text, so the URL, author
+    and engagement come from the row it pointed at — a quote reconstructed by
+    the model could drift from what the account actually published.
+
+    Parsing is deliberately forgiving about the separator: models alternate
+    between '|', '—' and a newline, and losing a whole section to punctuation
+    would be worse than an occasional imperfect split.
+    """
+    picks: list[dict] = []
+    seen: set[int] = set()
+    seen_urls: set[str] = set()
+    for line in (section or "").splitlines():
+        line = line.strip().lstrip("-•* ").strip()
+        if not line:
+            continue
+        match = _PICK_RE.search(line)
+        if not match:
+            continue
+        index = int(match.group(1)) - 1
+        if index < 0 or index >= len(posts) or index in seen:
+            continue
+        seen.add(index)
+
+        body = match.group(2).strip()
+        says, benefit = body, ""
+        lowered = body.lower()
+        if "benefit:" in lowered:
+            cut = lowered.index("benefit:")
+            says, benefit = body[:cut], body[cut + len("benefit:"):]
+        # Strip the separator from BOTH ends: it leads when the model omits a
+        # SAYS label and trails when BENEFIT follows on the same line.
+        says = says.strip().strip("|—-").strip()
+        if says.lower().startswith("says:"):
+            says = says[5:].strip()
+
+        post = posts[index]
+        # Different indices can point at near-duplicate posts (the same
+        # statement re-shared), which would list one item twice.
+        if post.post_url in seen_urls:
+            continue
+        seen_urls.add(post.post_url)
+        picks.append({
+            "url": post.post_url,
+            "author": post.author or account.handle,
+            "platform": post.platform,
+            "date": post.posted_at.date().isoformat() if post.posted_at else "",
+            "engagement": (post.likes or 0) + (post.comments or 0) + (post.views or 0),
+            "comments": post.comments or 0,
+            "says": says,
+            "benefit": benefit.strip().strip("|").strip(),
+            "text": (post.text or "")[:400],
+        })
+    return picks
 
 
 def _loads_obj(raw) -> dict:
@@ -438,8 +501,19 @@ async def analyse_account(account_id: int, refresh: bool = False,
         f"account posts, given {len(posts)} posts analysed.\n\n"
         "##SUBTOPICS##\n4-6 lines starting '- ': the sub-topics worth tracking "
         "from this account, each with why it matters.\n\n"
+        "##KEY_POSTS##\n4-6 lines, each EXACTLY in this form:\n"
+        "- [n] SAYS: what that specific post actually claims or reports, in one "
+        "sentence. | BENEFIT: how Roche can use it — the concrete action, "
+        "opening or risk it creates for us, in one sentence.\n"
+        "Use the post numbers shown in the material. Pick the posts that carry "
+        "the most signal, not simply the most engagement.\n\n"
         "Base every statement on the posts. Do not speculate beyond them. "
         "Write in English about French-language material.\n\n"
+        "IMPORTANT: only the posts themselves are available. Comment COUNTS are "
+        "given as an engagement signal, but the text of comments is NOT "
+        "collected — never state or imply what commenters said, and never "
+        "attribute an opinion to an audience. Where a post drew unusual "
+        "discussion, say that the volume is notable and stop there.\n\n"
         f"Account: @{account.handle} ({account.platform})"
         f"{' — ' + account.label if account.label else ''}\n"
         f"Posts analysed: {len(posts)}\n\n{excerpts}"
@@ -464,6 +538,7 @@ async def analyse_account(account_id: int, refresh: bool = False,
         "voices_note": trim_incomplete(extract_section(raw, "VOICES")),
         "volume_note": trim_incomplete(extract_section(raw, "VOLUME")),
         "subtopics": parse_bullets(extract_section(raw, "SUBTOPICS")),
+        "key_posts": _parse_post_picks(extract_section(raw, "KEY_POSTS"), posts, account),
         "voice_rows": voice_rows,
         "voice_exact_share": round(voices.exact_share * 100),
         "volume": volume,
@@ -531,15 +606,32 @@ async def account_report_pdf(account_id: int, db: AsyncSession = Depends(get_db)
     # The renderer expects citation-numbered sources and "key posts" with a
     # reason. The analysis does not rank individual posts, so the reason states
     # the engagement rather than inventing an editorial justification.
-    key_posts = [{
-        "author": post.author or account.handle,
-        "kind": f"{post.platform} post",
-        "date": _when(post),
-        "why": (f"{(post.likes or 0) + (post.comments or 0)} reactions"
-                if (post.likes or post.comments) else "Collected from this account"),
-        "text": post.text or "",
-        "url": post.post_url,
-    } for post in posts[:8]]
+    # Prefer the analysed posts: each carries what it says and how we can use
+    # it, which is the point of the section. Fall back to plain recent posts
+    # only when the analysis predates that (or the model cited nothing).
+    analysed = sections.get("key_posts") or []
+    if analysed:
+        key_posts = [{
+            "author": pick.get("author") or account.handle,
+            "kind": f"{pick.get('platform', account.platform)} post",
+            "date": pick.get("date") or "",
+            "why": " ".join(filter(None, [
+                pick.get("says"),
+                f"Benefit: {pick['benefit']}" if pick.get("benefit") else "",
+            ])),
+            "text": pick.get("text") or "",
+            "url": pick.get("url"),
+        } for pick in analysed]
+    else:
+        key_posts = [{
+            "author": post.author or account.handle,
+            "kind": f"{post.platform} post",
+            "date": _when(post),
+            "why": (f"{(post.likes or 0) + (post.comments or 0)} reactions"
+                    if (post.likes or post.comments) else "Collected from this account"),
+            "text": post.text or "",
+            "url": post.post_url,
+        } for post in posts[:8]]
 
     sources = [{
         "n": i,
