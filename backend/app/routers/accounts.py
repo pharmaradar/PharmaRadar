@@ -6,6 +6,7 @@ not a setting of the keyword scan, it is the thing the client asked for. These
 endpoints add what the panel could not answer — what has this account actually
 published, when was it last checked, and refresh it now.
 """
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -109,6 +110,7 @@ def _out(account: TrackedAccount) -> dict:
             "stale": (account.post_count or 0) > (account.analysis_post_count or 0),
             "post_count": account.analysis_post_count or 0,
             "sections": _loads_obj(account.analysis_sections),
+            "pdf_url": account.analysis_pdf_url,
         },
         "last_scanned_at": account.last_scanned_at.isoformat() if account.last_scanned_at else None,
         "last_scan_status": account.last_scan_status,
@@ -482,3 +484,93 @@ async def analyse_account(account_id: int, refresh: bool = False,
     return {**_out(account), "cached": False, "posts_analysed": len(posts)}
 
 
+
+
+@router.post("/{account_id}/report/pdf", dependencies=[Depends(require_admin)])
+async def account_report_pdf(account_id: int, db: AsyncSession = Depends(get_db)):
+    """Render the account's analysis as a PDF.
+
+    Reuses the market-research renderer rather than growing a second one: the
+    analysis already has that exact shape, so the account report reads like
+    every other report the client receives instead of a near-miss of it.
+    """
+    account = await db.get(TrackedAccount, account_id)
+    if not account:
+        raise HTTPException(404, "account not found")
+
+    sections = _loads_obj(account.analysis_sections)
+    if not sections.get("exec_summary"):
+        raise HTTPException(422, "Analyse this account first — there is no report to export")
+
+    rows = await db.execute(
+        select(SocialPost)
+        .where(SocialPost.tracked_account_id == account_id)
+        .where(social_not_ae())
+        .order_by(desc(SocialPost.scraped_at))
+        .limit(20)
+    )
+    posts = rows.scalars().all()
+
+    def _when(post) -> str:
+        stamp = post.posted_at or post.scraped_at
+        return stamp.date().isoformat() if stamp else ""
+
+    # The renderer expects citation-numbered sources and "key posts" with a
+    # reason. The analysis does not rank individual posts, so the reason states
+    # the engagement rather than inventing an editorial justification.
+    key_posts = [{
+        "author": post.author or account.handle,
+        "kind": f"{post.platform} post",
+        "date": _when(post),
+        "why": (f"{(post.likes or 0) + (post.comments or 0)} reactions"
+                if (post.likes or post.comments) else "Collected from this account"),
+        "text": post.text or "",
+        "url": post.post_url,
+    } for post in posts[:8]]
+
+    sources = [{
+        "n": i,
+        "author": post.author or account.handle,
+        "source_name": account.label or account.handle,
+        "kind": f"{post.platform} post",
+        "url": post.post_url,
+    } for i, post in enumerate(posts, 1)]
+
+    report = {
+        "exec_summary": sections.get("exec_summary") or "",
+        "so_what": sections.get("so_what") or "",
+        "what_is_said": sections.get("what_is_said") or "",
+        "voices_note": sections.get("voices_note") or "",
+        "volume_note": sections.get("volume_note") or "",
+        "subtopics": sections.get("subtopics") or [],
+        "voice_rows": sections.get("voice_rows") or [],
+        "voice_exact_share": sections.get("voice_exact_share") or 0,
+        "volume": sections.get("volume") or {},
+        "main_authors": [{
+            "author": account.label or account.handle,
+            "mentions": sections.get("item_count") or len(posts),
+            "engagement": sum((p.likes or 0) + (p.comments or 0) for p in posts),
+            "platforms": [account.platform],
+            "tracked": True,
+        }],
+        "key_posts": key_posts,
+        "sources": sources,
+        "item_count": sections.get("item_count") or len(posts),
+    }
+
+    from app.services.market_report import render_pdf, slugify
+
+    title = f"{account.label or account.handle} (@{account.handle}) on {account.platform}"
+    try:
+        url = await asyncio.to_thread(
+            render_pdf, title, report, datetime.now(timezone.utc), 365,
+            slugify(f"account-{account.handle}"),
+        )
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(502, f"PDF generation failed: {str(exc)[:200]}") from exc
+
+    if not url:
+        raise HTTPException(502, "PDF generation produced no file")
+    account.analysis_pdf_url = url
+    await db.commit()
+    return {"pdf_url": url}

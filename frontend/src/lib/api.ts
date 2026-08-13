@@ -606,6 +606,8 @@ export interface AccountAnalysis {
   post_count: number;
   /** Full market-research analysis. Voice distribution and volume are computed
    *  from the rows, not written by the model. */
+  /** Blob/local URL of the last exported PDF, if one was generated. */
+  pdf_url?: string | null;
   sections?: {
     exec_summary?: string;
     so_what?: string;
@@ -861,6 +863,8 @@ export const api = {
     refresh: (id: number) =>
       req<{ queued: boolean }>(`/accounts/${id}/refresh`, { method: "POST" }),
     scanAll: () => req<{ queued: boolean }>("/accounts/scan", { method: "POST" }),
+    reportPdf: (id: number) =>
+      req<{ pdf_url: string }>(`/accounts/${id}/report/pdf`, { method: "POST" }),
     analyse: (id: number, refresh = false) =>
       req<TrackedAccountFull & { cached: boolean; posts_analysed?: number }>(
         `/accounts/${id}/analyse?refresh=${refresh}`, { method: "POST" }),

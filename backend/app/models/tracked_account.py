@@ -68,6 +68,7 @@ class TrackedAccount(Base):
     # the headline fields the account card renders, so the list view never has
     # to parse this.
     analysis_sections: Mapped[str | None] = mapped_column(Text)
+    analysis_pdf_url: Mapped[str | None] = mapped_column(Text)
 
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

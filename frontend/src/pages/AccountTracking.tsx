@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, AtSign, Check, ExternalLink, Eye, Facebook, Heart,
   Instagram, Linkedin, Loader2, MessageCircle, Plus, RefreshCw, Search,
-  Pencil, Sparkles, Trash2, Twitter, X,
+  Download, Pencil, Sparkles, Trash2, Twitter, X,
 } from "lucide-react";
 import {
   api, type AccountPost, type TrackedAccountFull,
@@ -239,8 +239,9 @@ function Section({ n, title, children }: {
   );
 }
 
-function AnalysisPanel({ account, onGenerate, busy }: {
+function AnalysisPanel({ account, onGenerate, busy, onPdf, pdfBusy }: {
   account: TrackedAccountFull; onGenerate: () => void; busy: boolean;
+  onPdf: () => void; pdfBusy: boolean;
 }) {
   const a = account.analysis;
   const has = !!a?.summary;
@@ -263,6 +264,14 @@ function AnalysisPanel({ account, onGenerate, busy }: {
           <Sparkles size={14} className="text-pharma-blue dark:text-blue-300" />
           <h3 className="text-sm font-semibold text-gray-800 dark:text-[#e2e8f0]">AI analysis</h3>
         </div>
+        {has && (
+          <button onClick={onPdf} disabled={pdfBusy}
+            title="Download this analysis as a PDF"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-pharma-blue text-white rounded-lg hover:bg-pharma-light disabled:opacity-50 transition-colors">
+            {pdfBusy ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            PDF
+          </button>
+        )}
         <button onClick={onGenerate} disabled={busy || !account.post_count}
           title={account.post_count ? "Read this account's posts and summarise them"
                                     : "Nothing collected yet to analyse"}
@@ -344,6 +353,16 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
   const { data, isLoading } = useQuery({
     queryKey: ["account-detail", id, days],
     queryFn: () => api.accounts.detail(id, days),
+  });
+
+  // Opening the PDF is a separate step from generating it: the file lands in
+  // blob storage, and re-rendering it just to read it again would be waste.
+  const pdfMut = useMutation({
+    mutationFn: () => api.accounts.reportPdf(id),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["account-detail", id] });
+      if (res.pdf_url) api.reports.openPdf(res.pdf_url).catch(() => undefined);
+    },
   });
 
   const analyseMut = useMutation({
@@ -499,7 +518,13 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
 
         {account && (
           <AnalysisPanel account={account} busy={analyseMut.isPending}
-            onGenerate={() => analyseMut.mutate(!!account.analysis?.summary)} />
+            onGenerate={() => analyseMut.mutate(!!account.analysis?.summary)}
+            onPdf={() => pdfMut.mutate()} pdfBusy={pdfMut.isPending} />
+        )}
+        {pdfMut.isError && (
+          <p className="text-xs text-red-400">
+            PDF failed: {(pdfMut.error as Error)?.message?.slice(0, 160)}
+          </p>
         )}
         {analyseMut.isError && (
           <p className="text-xs text-red-400">
