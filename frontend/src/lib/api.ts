@@ -604,6 +604,20 @@ export interface AccountAnalysis {
   generated_at: string | null;
   stale: boolean;
   post_count: number;
+  /** Full market-research analysis. Voice distribution and volume are computed
+   *  from the rows, not written by the model. */
+  sections?: {
+    exec_summary?: string;
+    so_what?: string;
+    what_is_said?: string;
+    voices_note?: string;
+    volume_note?: string;
+    subtopics?: string[];
+    voice_rows?: MarketReportVoiceRow[];
+    voice_exact_share?: number;
+    volume?: MarketReportVolume;
+    item_count?: number;
+  };
 }
 
 export interface AccountPost {

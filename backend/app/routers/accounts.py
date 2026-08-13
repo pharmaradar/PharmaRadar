@@ -70,6 +70,14 @@ def _normalise_handle(platform: str, raw: str) -> str:
     return value.strip().lstrip("@").strip("/")
 
 
+def _loads_obj(raw) -> dict:
+    try:
+        value = json.loads(raw) if raw else {}
+        return value if isinstance(value, dict) else {}
+    except Exception:                               # noqa: BLE001
+        return {}
+
+
 def _loads_list(raw) -> list:
     try:
         value = json.loads(raw) if raw else []
@@ -100,6 +108,7 @@ def _out(account: TrackedAccount) -> dict:
             # can say "based on 12 of 22 posts" instead of implying it is current.
             "stale": (account.post_count or 0) > (account.analysis_post_count or 0),
             "post_count": account.analysis_post_count or 0,
+            "sections": _loads_obj(account.analysis_sections),
         },
         "last_scanned_at": account.last_scanned_at.isoformat() if account.last_scanned_at else None,
         "last_scan_status": account.last_scan_status,
@@ -314,22 +323,60 @@ async def analyse_account(account_id: int, refresh: bool = False,
         raise HTTPException(422, "No posts collected for this account yet")
 
     excerpts = "\n\n".join(
-        f"- ({p.platform}, {p.likes or 0} likes) {(p.text or '')[:400]}"
-        for p in posts if (p.text or "").strip()
-    )[:12000]
+        f"[{i}] ({p.platform}, {p.likes or 0} likes, "
+        f"{p.posted_at.date().isoformat() if p.posted_at else 'undated'}) "
+        f"{(p.text or '')[:500]}"
+        for i, p in enumerate(posts, 1) if (p.text or "").strip()
+    )[:16000]
+
+    # Voice distribution and volume are COMPUTED from the rows, not written by
+    # the model — a chart that presents an invention as a measurement is worse
+    # than no chart, because it gets acted on. The model interprets them.
+    from app.services.market_report import compute_volume
+    from app.services.voice_profile import build_breakdown
+
+    # `is_tracked_kol` must reflect what this account actually is. Hardcoding it
+    # true filed the Haute Autorité de Santé under "KOLs" at 100% — an
+    # institution presented as a key opinion leader, which is exactly the kind
+    # of confident-and-wrong figure a reader would act on.
+    is_kol = (account.role or "").lower() == "kol"
+    as_items = [{
+        "author": p.author or account.handle,
+        "url": p.post_url,
+        "is_tracked_kol": is_kol,
+        "target_type": account.role,
+        "kind": f"{p.platform} post",
+        "platform": p.platform,
+        "engagement": (p.likes or 0) + (p.comments or 0) + (p.views or 0),
+        "date": p.posted_at.date().isoformat() if p.posted_at else "",
+    } for p in posts]
+    voices = build_breakdown(as_items)
+    volume = compute_volume(as_items, 365)
+    voice_rows = voices.as_rows()
 
     prompt = (
         "You are a pharma intelligence analyst monitoring the French market for "
-        "Roche. Below are recent posts from ONE tracked account. Summarise what "
-        "this account is saying and what it means for us.\n\n"
-        "Respond in exactly these three sections with these exact headers:\n\n"
-        "SUMMARY: [3-4 sentences: what this account posts about, their angle, "
-        "who they speak to.]\n\n"
-        "SO WHAT: [2-3 sentences on the implication for a pharma medical affairs "
-        "team — what signal, opportunity or risk this represents. Be specific.]\n\n"
-        "THEMES: [3-6 short bullet lines starting with '- ', one recurring theme "
-        "each.]\n\n"
-        "Base every statement on the posts. Do not speculate beyond them.\n\n"
+        "Roche. Below are recent posts from ONE tracked account. Write a "
+        "market-research style analysis of this account.\n\n"
+        "Output EXACTLY these sections, each on its own line starting with the "
+        "marker, and nothing else:\n\n"
+        "##EXEC_SUMMARY##\n2-3 paragraphs: who this account is, what they "
+        "publish, their angle and who they speak to.\n\n"
+        "##SO_WHAT##\n2-3 paragraphs on the strategic implication for a pharma "
+        "medical affairs team — the signal, opportunity or risk, and what to do "
+        "about it. Be specific and actionable.\n\n"
+        "##WHAT_IS_SAID##\n2-3 paragraphs on the substance: the actual claims, "
+        "topics and positions in these posts. Cite post numbers like [3].\n\n"
+        "##VOICES##\n1-2 paragraphs interpreting WHO is speaking here, given "
+        f"this account is classified as: {account.role or 'unclassified'}. "
+        "State plainly that this is a single account, so the distribution "
+        "describes one voice rather than a market.\n\n"
+        "##VOLUME##\n1-2 paragraphs interpreting how much and how often this "
+        f"account posts, given {len(posts)} posts analysed.\n\n"
+        "##SUBTOPICS##\n4-6 lines starting '- ': the sub-topics worth tracking "
+        "from this account, each with why it matters.\n\n"
+        "Base every statement on the posts. Do not speculate beyond them. "
+        "Write in English about French-language material.\n\n"
         f"Account: @{account.handle} ({account.platform})"
         f"{' — ' + account.label if account.label else ''}\n"
         f"Posts analysed: {len(posts)}\n\n{excerpts}"
@@ -338,17 +385,33 @@ async def analyse_account(account_id: int, refresh: bool = False,
     from app.services.llm_router import call_llm_async
     try:
         # gemini-2.5-flash spends this budget on reasoning as well as output, so
-        # a "generous" 1200 truncated the reply mid-summary and the SO WHAT and
-        # THEMES sections never arrived at all. Same reason burning_topics uses
-        # 8192 for its multi-section prompt.
-        reply = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=6000)
+        # a small cap truncates the tail sections silently — 1200 lost SO WHAT
+        # and THEMES entirely.
+        reply = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
     except Exception as exc:                        # noqa: BLE001
         raise HTTPException(502, f"LLM call failed: {str(exc)[:200]}") from exc
 
-    summary, so_what, themes = _parse_analysis(reply or "")
-    account.analysis_summary = summary
-    account.analysis_so_what = so_what
-    account.analysis_themes = json.dumps(themes)
+    from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
+
+    raw = reply or ""
+    sections = {
+        "exec_summary": trim_incomplete(extract_section(raw, "EXEC_SUMMARY")),
+        "so_what": trim_incomplete(extract_section(raw, "SO_WHAT")),
+        "what_is_said": trim_incomplete(extract_section(raw, "WHAT_IS_SAID")),
+        "voices_note": trim_incomplete(extract_section(raw, "VOICES")),
+        "volume_note": trim_incomplete(extract_section(raw, "VOLUME")),
+        "subtopics": parse_bullets(extract_section(raw, "SUBTOPICS")),
+        "voice_rows": voice_rows,
+        "voice_exact_share": round(voices.exact_share * 100),
+        "volume": volume,
+        "item_count": len(posts),
+    }
+
+    # The card shows the headline fields, so they stay as their own columns.
+    account.analysis_summary = sections["exec_summary"] or raw.strip()[:2000]
+    account.analysis_so_what = sections["so_what"] or None
+    account.analysis_themes = json.dumps(sections["subtopics"])
+    account.analysis_sections = json.dumps(sections)
     account.analysis_at = datetime.now(timezone.utc)
     # Record what it was written from, so staleness is measurable rather than
     # guessed from a timestamp.
@@ -358,25 +421,3 @@ async def analyse_account(account_id: int, refresh: bool = False,
     return {**_out(account), "cached": False, "posts_analysed": len(posts)}
 
 
-def _parse_analysis(raw: str) -> tuple[str, str | None, list[str]]:
-    """Split the reply into its three sections.
-
-    Models drift on formatting, so each header is matched loosely and anything
-    unparseable falls back to the whole reply as the summary — a report with a
-    blunt summary beats an empty panel.
-    """
-    import re
-
-    def _section(name: str) -> str:
-        pattern = rf"{name}\s*:?\s*\n?(.*?)(?=\n\s*(?:SUMMARY|SO WHAT|THEMES)\s*:|\Z)"
-        found = re.search(pattern, raw, re.S | re.I)
-        return (found.group(1).strip() if found else "")
-
-    summary = _section("SUMMARY") or raw.strip()
-    so_what = _section("SO WHAT") or None
-    themes = [
-        line.lstrip("-•* ").strip()
-        for line in _section("THEMES").splitlines()
-        if line.strip().startswith(("-", "•", "*"))
-    ]
-    return summary, so_what, [t for t in themes if t][:6]

@@ -64,6 +64,10 @@ class TrackedAccount(Base):
     analysis_themes: Mapped[str | None] = mapped_column(Text)   # JSON list[str]
     analysis_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     analysis_post_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Full six-section market-research analysis as JSON. The columns above hold
+    # the headline fields the account card renders, so the list view never has
+    # to parse this.
+    analysis_sections: Mapped[str | None] = mapped_column(Text)
 
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

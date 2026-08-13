@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, AtSign, Check, ExternalLink, Eye, Facebook, Heart,
@@ -8,6 +8,7 @@ import {
 import {
   api, type AccountPost, type TrackedAccountFull,
 } from "@/lib/api";
+import { Prose, SubtopicList, VoiceChart, VolumeBlock } from "@/components/MarketSections";
 import { useAuthStore } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
@@ -122,11 +123,38 @@ function PostCard({ post, onClick }: { post: AccountPost; onClick: () => void })
 }
 
 /** The AI read of an account: what they talk about and what it means for us. */
+function Section({ n, title, children }: {
+  n: number; title: string; children: React.ReactNode;
+}) {
+  return (
+    <section className="space-y-2">
+      <h4 className="flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-[#e2e8f0]">
+        <span className="w-5 h-5 rounded-full bg-pharma-blue/10 text-pharma-blue dark:text-blue-300 text-[11px] flex items-center justify-center font-bold">
+          {n}
+        </span>
+        {title}
+      </h4>
+      {children}
+    </section>
+  );
+}
+
 function AnalysisPanel({ account, onGenerate, busy }: {
   account: TrackedAccountFull; onGenerate: () => void; busy: boolean;
 }) {
   const a = account.analysis;
   const has = !!a?.summary;
+  const sec = a?.sections?.exec_summary ? a.sections : null;
+
+  // Staleness is stated, not implied: an analysis written from 12 of 22 posts
+  // should not read as though it covers all of them.
+  const staleNote = a?.stale ? (
+    <p className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+      <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+      Written from {a.post_count} posts; {account.post_count} collected since.
+      Regenerate to include them.
+    </p>
+  ) : null;
 
   return (
     <div className="rounded-xl border border-slate-200/60 dark:border-white/10 p-4 space-y-3">
@@ -147,20 +175,36 @@ function AnalysisPanel({ account, onGenerate, busy }: {
       {!has ? (
         <p className="text-xs text-gray-400">
           {account.post_count
-            ? "Not analysed yet — this reads their posts and summarises the angle, plus what it means for us."
+            ? "Not analysed yet — this reads their posts and writes a market-research analysis of them."
             : "No posts collected yet, so there is nothing to analyse."}
         </p>
+      ) : sec ? (
+        <div className="space-y-5">
+          {staleNote}
+          <Section n={1} title="Executive summary"><Prose text={sec.exec_summary} /></Section>
+          <Section n={2} title="So what — strategic implications">
+            <div className="rounded-lg bg-amber-50/60 dark:bg-amber-900/10 border border-amber-100 dark:border-amber-900/30 px-4 py-3">
+              <Prose text={sec.so_what} />
+            </div>
+          </Section>
+          <Section n={3} title="What is being said"><Prose text={sec.what_is_said} /></Section>
+          <Section n={4} title="Voice distribution">
+            <VoiceChart rows={sec.voice_rows ?? []} exactShare={sec.voice_exact_share ?? 0} />
+            <Prose text={sec.voices_note} />
+          </Section>
+          <Section n={5} title="Volume of mentions">
+            <VolumeBlock volume={sec.volume ?? {}} />
+            <Prose text={sec.volume_note} />
+          </Section>
+          <Section n={6} title="Key sub-topics to consider">
+            <SubtopicList items={sec.subtopics ?? []} />
+          </Section>
+        </div>
       ) : (
+        /* Analyses written before the six-section format. Regenerating upgrades
+           them; until then the earlier shape still renders. */
         <div className="space-y-3">
-          {/* Staleness is stated, not implied: an analysis written from 12 of 22
-              posts should not read as though it covers all of them. */}
-          {a!.stale && (
-            <p className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
-              <AlertTriangle size={12} className="shrink-0 mt-0.5" />
-              Written from {a!.post_count} posts; {account.post_count} collected since.
-              Regenerate to include them.
-            </p>
-          )}
+          {staleNote}
           <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-relaxed whitespace-pre-wrap">
             {a!.summary}
           </p>
@@ -222,10 +266,23 @@ function AccountDetailPanel({ id, onClose }: { id: number; onClose: () => void }
   const meta = account ? PLATFORM_META[account.platform] : null;
   const Icon = meta?.icon ?? AtSign;
 
+  // Escape closes, and the page behind must not scroll while this is open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
-      <div className="relative w-full max-w-2xl h-full overflow-y-auto overlay-panel border-l p-6 space-y-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      onClick={onClose} role="dialog" aria-modal="true">
+      <div onClick={(e) => e.stopPropagation()}
+        className="overlay-panel rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto p-6 space-y-5">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-start gap-3 min-w-0">
             <div className="p-2 rounded-lg bg-slate-100 dark:bg-white/5 shrink-0">
