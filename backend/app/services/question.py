@@ -85,6 +85,46 @@ def phrase_candidates(question: str) -> list[str]:
     return [f"{a} {b}" for a, b in zip(words, words[1:])][:4]
 
 
+def expand_for_search(question: str, *, language: str | None = "fr",
+                     ttl_secs: int = 86_400) -> list[str]:
+    """Search terms for a typed question, cached so repeat searches are free.
+
+    The social search bar previously matched the WHOLE typed string with a
+    single LIKE, so "does KOL think subcutaneous is better than IV" looked for
+    that exact sentence inside post text and found nothing — measured 0 rows
+    against a corpus that does contain the subject.
+
+    Enrichment costs an LLM call, which is fine once per question and wasteful
+    on every keystroke-submit, so the result is cached in Redis under the
+    normalised question. Redis being down only makes this slower, never wrong.
+    """
+    from app.services.term_expansion import expand_terms
+
+    key = f"question:terms:{(language or 'fr')}:{(question or '').strip().lower()}"
+    client = None
+    try:
+        import redis as _redis
+
+        from app.config import get_settings
+        client = _redis.Redis.from_url(get_settings().redis_url, socket_timeout=2)
+        cached = client.get(key)
+        if cached:
+            return json.loads(cached)
+    except Exception:                            # noqa: BLE001 - cache is optional
+        client = None
+
+    terms = expand(question, language=language)["terms"]
+    # Bilingual/accent variants on top: the corpus is French, questions are not.
+    terms = expand_terms(terms)
+
+    if client is not None:
+        try:
+            client.setex(key, ttl_secs, json.dumps(terms))
+        except Exception:                        # noqa: BLE001
+            pass
+    return terms
+
+
 def expand(question: str, *, language: str | None = "fr") -> dict:
     """Search terms for a question: deterministic terms plus LLM enrichment.
 

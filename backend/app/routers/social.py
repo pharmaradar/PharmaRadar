@@ -10,7 +10,7 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc, or_, func
+from sqlalchemy import select, desc, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -355,6 +355,7 @@ async def timeseries(days: int = 30, top: int = 6, db: AsyncSession = Depends(ge
 
 @router.get("/discover")
 async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
+                   limit: int = 120,
                    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     """Return social posts matching a query, ranked.
 
@@ -368,22 +369,107 @@ async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
     await db.commit()
 
     now = datetime.now(timezone.utc)
-    like = f"%{term.lower()}%"
-    base = select(SocialPost).where(or_(
-        func.lower(SocialPost.text).like(like),
-        func.lower(SocialPost.topic).like(like),
-        func.lower(SocialPost.query).like(like),
-        func.lower(SocialPost.hashtags).like(like),
-    )).where(social_not_ae())
+
+    # A typed question never appears verbatim inside a post, so matching the
+    # whole string finds nothing — "does KOL think subcutaneous is better than
+    # IV" scored 0 rows against a corpus that does discuss it. Anything longer
+    # than a couple of words is treated as a question and broken into terms
+    # (bilingual, because the corpus is French and questions usually are not).
+    # Short queries stay literal: they are already a term, and expansion would
+    # cost an LLM call to tell us so.
+    terms = [term]
+    if len(term.split()) >= 3:
+        try:
+            from app.services.question import expand_for_search
+            expanded = expand_for_search(term, language=(lang or "fr"))
+            if expanded:
+                terms = list(dict.fromkeys([term] + expanded))
+        except Exception:                        # noqa: BLE001 - never fail the search
+            pass
+
+    # `topic` and `query` record HOW a post was collected, not what it says —
+    # `query` literally stores the search that retrieved it. Matching a typed
+    # question against those is a false-positive machine: the term "KOL" hit a
+    # post about spinal muscular atrophy purely because it had been collected
+    # under an older search called "what do kol think about evrysdi".
+    # Provenance is still worth matching for a short literal query (finding
+    # everything gathered under a topic is a real use), so it is only the
+    # expanded question path that restricts itself to content.
+    def _match_clause(candidates: list[str], content_only: bool):
+        conditions = []
+        for candidate in candidates:
+            like = f"%{candidate.lower()}%"
+            conditions.append(func.lower(SocialPost.text).like(like))
+            conditions.append(func.lower(SocialPost.hashtags).like(like))
+            if content_only:
+                # `topic` is a subject label for keyword-collected posts
+                # ("Evrysdi") but provenance for account-collected ones
+                # ("account:msd-france") — a question mentioning France would
+                # otherwise pull in every post from that account.
+                conditions.append(and_(
+                    func.lower(SocialPost.topic).like(like),
+                    ~func.lower(func.coalesce(SocialPost.topic, "")).like("account:%"),
+                ))
+            else:
+                conditions.append(func.lower(SocialPost.topic).like(like))
+                conditions.append(func.lower(SocialPost.query).like(like))
+        return or_(*conditions)
+
+    # Expansion yields discriminating terms ("sous-cutané") alongside filler the
+    # question happened to contain ("better", "think"). Filler matches almost
+    # every post, so searching everything at once buries the on-topic results.
+    # Search the specific terms first and only widen if that came back thin.
+    search_terms = terms
+    if len(terms) > 1:
+        from app.services.question import split_by_specificity
+        specific, _fallback = split_by_specificity(terms)
+        if specific:
+            search_terms = specific
+
+    expanded_mode = len(terms) > 1
+    base = (select(SocialPost)
+            .where(_match_clause(search_terms, expanded_mode))
+            .where(social_not_ae()))
     # Filter cached posts by source when not in "all" mode — see the note in
     # `trends`: French source, not French text.
     if lang and lang != "all":
         base = (base.where(SocialPost.source_scope == Scope.FR.value) if lang == "fr"
                 else base.where(SocialPost.language == lang))
-    rows = await db.execute(base.order_by(desc(SocialPost.scraped_at)).limit(500))
+    scoped = base
+    rows = await db.execute(scoped.order_by(desc(SocialPost.scraped_at)).limit(1000))
     posts = rows.scalars().all()
-    ranked = sorted(posts, key=lambda p: _trend_score(p, now), reverse=True)
-    results = [_to_out(p, now) for p in ranked[:60]]
+
+    # Too thin to be useful — widen to every term rather than show an empty page.
+    if len(posts) < 5 and len(search_terms) < len(terms):
+        widened = (select(SocialPost)
+                   .where(_match_clause(terms, expanded_mode))
+                   .where(social_not_ae()))
+        if lang and lang != "all":
+            widened = (widened.where(SocialPost.source_scope == Scope.FR.value)
+                       if lang == "fr" else widened.where(SocialPost.language == lang))
+        posts = (await db.execute(
+            widened.order_by(desc(SocialPost.scraped_at)).limit(1000))).scalars().all()
+        search_terms = terms
+
+    # With many terms, "matched any" is a weak signal on its own — a post
+    # hitting six of the question's terms is more on-topic than one hitting a
+    # single common word. Rank by how much of the question a post covers, then
+    # fall back to the usual engagement/recency score.
+    lowered = [t.lower() for t in search_terms if t and t.strip()]
+
+    def _relevance(post) -> int:
+        parts = [post.text or "", post.hashtags or ""]
+        topic = post.topic or ""
+        if not topic.lower().startswith("account:"):
+            parts.append(topic)
+        if not expanded_mode:
+            parts.append(post.query or "")
+        haystack = " ".join(parts).lower()
+        return sum(1 for t in lowered if t in haystack)
+
+    ranked = sorted(posts, key=lambda p: (_relevance(p), _trend_score(p, now)),
+                    reverse=True)
+    results = [_to_out(p, now) for p in ranked[:max(1, min(limit, 200))]]
 
     fetching = False
     from app.services import apify_client
@@ -393,7 +479,11 @@ async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
         discover_fetch.delay(term, lang)
         fetching = True
 
-    return {"query": term, "results": results, "fetching": fetching}
+    # `terms` is returned so the UI can show what was actually searched for —
+    # a question that silently became ten terms is otherwise unexplainable when
+    # the results look surprising.
+    return {"query": term, "results": results, "fetching": fetching,
+            "terms": terms if len(terms) > 1 else [], "total_matched": len(posts)}
 
 
 @router.get("/discover/history")

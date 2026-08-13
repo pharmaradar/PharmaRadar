@@ -860,9 +860,15 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ id }),
       }),
-    discover: (q: string, fresh = true, lang: string = "fr") =>
-      req<{ query: string; results: SocialPost[]; fetching: boolean }>(
-        `/social/discover?q=${encodeURIComponent(q)}&fresh=${fresh}&lang=${lang}`
+    /** Ad-hoc social search. A multi-word query is treated as a question and
+     *  expanded into bilingual terms server-side, so `terms` reports what was
+     *  actually matched and `total_matched` the pool before the display cap. */
+    discover: (q: string, fresh = true, lang: string = "fr", limit = 120) =>
+      req<{
+        query: string; results: SocialPost[]; fetching: boolean;
+        terms?: string[]; total_matched?: number;
+      }>(
+        `/social/discover?q=${encodeURIComponent(q)}&fresh=${fresh}&lang=${lang}&limit=${limit}`
       ),
     discoverStatus: (q: string) =>
       req<{ running: boolean; inserted?: number; error?: string; terms?: string[] }>(

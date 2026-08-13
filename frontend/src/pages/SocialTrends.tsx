@@ -4,6 +4,7 @@ import {
   Flame, Heart, MessageCircle, Eye, Share2, ExternalLink, X,
   Sparkles, Loader2, Search, RefreshCw, SlidersHorizontal, Clock,
 } from "lucide-react";
+import MarketResearchReport from "@/components/MarketResearchReport";
 import { api, type SocialPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
@@ -200,7 +201,12 @@ export default function SocialTrends() {
     enabled: searching && submitted.length > 1,
     refetchInterval: searching ? 3000 : false,
   });
-  const expandedTerms = discoverStatus?.terms ?? [];
+  // Terms the search actually matched on. The read path expands the question
+  // itself now, so this no longer waits for a live scrape to report back —
+  // which never happened at all when Apify was out of quota.
+  const expandedTerms = searchData?.terms?.length
+    ? searchData.terms
+    : (discoverStatus?.terms ?? []);
 
   // Drive searching state from discoverStatus.running, not a fixed poll count.
   // "Done" only when we've confirmed the task started (seenRunning OR >15s elapsed)
@@ -486,6 +492,21 @@ export default function SocialTrends() {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
                   {searchPosts.map(p => <PostCard key={p.id} post={p} onClick={() => setSelected(p)} />)}
+                </div>
+              )}
+
+              {/* A question deserves an answer, not just a list of posts. Same
+                  component as Topic Explorer, so the format is identical: it
+                  reuses an existing report for this question and only writes a
+                  new one when there is none. Skipped for one-word lookups,
+                  which are a filter rather than a question. */}
+              {submitted.trim().split(/\s+/).length >= 3 && (
+                <div className="mt-5">
+                  <MarketResearchReport
+                    question={submitted}
+                    windowDays={30}
+                    lang={language === "fr" ? "fr" : language}
+                  />
                 </div>
               )}
             </div>
