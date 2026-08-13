@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, ExternalLink, Loader2, Sparkles, X,
@@ -105,9 +105,10 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
     };
   }, [onClose]);
 
-  // Only read the cache on open — analysing costs an LLM call, so it is an
-  // explicit action rather than a side effect of clicking a post.
-  const { data: cached } = useQuery({
+  // Read the cache first, then analyse automatically if there is nothing yet.
+  // Reuse is free and generation is not, so a post is paid for at most once —
+  // reopening it never spends again.
+  const { data: cached, isFetching: checking } = useQuery({
     queryKey: ["post-analysis", postId],
     queryFn: () => api.social.postAnalysis(postId),
     retry: false,
@@ -127,6 +128,18 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
 
   const sections = analyseMut.data?.sections ?? cached?.sections ?? null;
   const busy = analyseMut.isPending;
+
+  // Analyse on open, once per post. The ref stops the effect re-firing after a
+  // failure, which would otherwise retry forever while the panel stays open.
+  const autoTried = useRef<number | null>(null);
+  useEffect(() => {
+    // `cached === undefined` means the cache check has not resolved yet.
+    // Firing before it does would pay for a post that is already analysed.
+    if (checking || cached === undefined || sections || busy) return;
+    if (autoTried.current === postId) return;
+    autoTried.current = postId;
+    analyseMut.mutate(false);
+  }, [postId, checking, cached, sections, busy, analyseMut]);
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -191,10 +204,17 @@ export default function PostAnalysisPanel({ postId, post, onClose, withDescribe 
         )}
 
         {!sections ? (
-          <p className="text-xs text-gray-400">
-            {busy
-              ? "Reading this post and writing the analysis…"
-              : "Not analysed yet — press Analyse to read this post on its own."}
+          <p className="flex items-center gap-2 text-xs text-gray-400">
+            {busy || checking ? (
+              <>
+                <Loader2 size={13} className="animate-spin" />
+                Reading this post and writing the analysis…
+              </>
+            ) : (
+              // Only reached if the automatic attempt failed; the button above
+              // is the retry.
+              "Could not analyse this post. Use Analyse to try again."
+            )}
           </p>
         ) : (
           <div className="space-y-5">
