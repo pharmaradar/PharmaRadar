@@ -500,7 +500,20 @@ async def account_report_pdf(account_id: int, db: AsyncSession = Depends(get_db)
 
     sections = _loads_obj(account.analysis_sections)
     if not sections.get("exec_summary"):
-        raise HTTPException(422, "Analyse this account first — there is no report to export")
+        # Analyses written before the six-section format only filled the
+        # headline columns. Refusing those was wrong twice over: the account HAS
+        # been analysed, and the missing half is computed from the rows anyway —
+        # so the export is rebuilt from what exists rather than demanding the
+        # client pay for a fresh LLM run to read a report already on screen.
+        if not account.analysis_summary:
+            raise HTTPException(
+                422, "Analyse this account first — there is no report to export")
+        sections = {
+            "exec_summary": account.analysis_summary,
+            "so_what": account.analysis_so_what or "",
+            "subtopics": _loads_list(account.analysis_themes),
+            "legacy": True,
+        }
 
     rows = await db.execute(
         select(SocialPost)
@@ -535,6 +548,27 @@ async def account_report_pdf(account_id: int, db: AsyncSession = Depends(get_db)
         "kind": f"{post.platform} post",
         "url": post.post_url,
     } for i, post in enumerate(posts, 1)]
+
+    if sections.get("legacy") and posts:
+        from app.services.market_report import compute_volume
+        from app.services.voice_profile import build_breakdown
+
+        is_kol = (account.role or "").lower() == "kol"
+        computed = [{
+            "author": post.author or account.handle,
+            "url": post.post_url,
+            "is_tracked_kol": is_kol,
+            "target_type": account.role,
+            "kind": f"{post.platform} post",
+            "platform": post.platform,
+            "engagement": (post.likes or 0) + (post.comments or 0) + (post.views or 0),
+            "date": _when(post),
+        } for post in posts]
+        breakdown = build_breakdown(computed)
+        sections["voice_rows"] = breakdown.as_rows()
+        sections["voice_exact_share"] = round(breakdown.exact_share * 100)
+        sections["volume"] = compute_volume(computed, 365)
+        sections["item_count"] = len(posts)
 
     report = {
         "exec_summary": sections.get("exec_summary") or "",

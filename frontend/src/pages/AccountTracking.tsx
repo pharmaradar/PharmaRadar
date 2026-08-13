@@ -311,9 +311,16 @@ function AnalysisPanel({ account, onGenerate, busy, onPdf, pdfBusy }: {
         </div>
       ) : (
         /* Analyses written before the six-section format. Regenerating upgrades
-           them; until then the earlier shape still renders. */
+           them; until then the earlier shape still renders, and the PDF is
+           rebuilt from these fields plus computed voice/volume. */
         <div className="space-y-3">
           {staleNote}
+          <p className="flex items-start gap-1.5 text-[11px] text-gray-400">
+            <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+            Written in the earlier format. Regenerate for the full market-research
+            report — executive summary, what is being said, voice distribution,
+            volume and sub-topics.
+          </p>
           <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-relaxed whitespace-pre-wrap">
             {a!.summary}
           </p>
