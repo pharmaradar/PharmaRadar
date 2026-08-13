@@ -742,6 +742,40 @@ def _expand_query(query: str) -> dict[str, list[str]]:
 
 
 _DISCOVER_STATUS_KEY = "social_discover:status:{q}"
+# Marks a phrase as already collected. A live fetch spends Apify credit, and the
+# same phrase typed twice in a week returns the same posts the second time — so
+# the second search reads the corpus instead of paying for it again.
+_DISCOVER_FETCHED_KEY = "social_discover:fetched:{q}"
+_DISCOVER_FETCHED_TTL = 86_400  # 24h
+
+
+def mark_query_fetched(query: str) -> None:
+    try:
+        import redis as _redis
+
+        from app.config import get_settings
+        client = _redis.Redis.from_url(get_settings().redis_url, socket_timeout=2)
+        client.setex(_DISCOVER_FETCHED_KEY.format(q=query.lower().strip()),
+                     _DISCOVER_FETCHED_TTL, "1")
+    except Exception:                               # noqa: BLE001 - cache is optional
+        pass
+
+
+def query_recently_fetched(query: str) -> bool:
+    """True when this phrase was scraped inside the TTL.
+
+    Redis being unavailable returns False, which re-fetches. That errs towards
+    spending money rather than showing stale data, and matches how the rest of
+    the status plumbing degrades.
+    """
+    try:
+        import redis as _redis
+
+        from app.config import get_settings
+        client = _redis.Redis.from_url(get_settings().redis_url, socket_timeout=2)
+        return bool(client.get(_DISCOVER_FETCHED_KEY.format(q=query.lower().strip())))
+    except Exception:                               # noqa: BLE001
+        return False
 
 
 def _set_discover_status(query: str, **fields) -> None:
@@ -880,5 +914,6 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
 
     all_terms = list(dict.fromkeys(hashtags + keywords))
     _set_discover_status(query, running=False, inserted=inserted, terms=all_terms)
+    mark_query_fetched(query)
     logger.info("discover_fetch.done", query=query, inserted=inserted, terms=all_terms)
     return {"inserted": inserted, "terms": all_terms}

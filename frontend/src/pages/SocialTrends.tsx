@@ -177,6 +177,18 @@ export default function SocialTrends() {
     queryFn: () => api.social.discover(submitted, false, language),
     enabled: submitted.length > 1,
   });
+  // Explicit re-collection, bypassing the "already fetched" cache.
+  const forceMut = useMutation({
+    mutationFn: () => api.social.discover(submitted, true, language, 120, true),
+    onMutate: () => {
+      setPolls(0);
+      setSearching(true);
+      searchStartedAt.current = Date.now();
+      seenRunning.current = false;
+    },
+    onError: () => setSearching(false),
+  });
+
   const searchMut = useMutation({
     mutationFn: () => api.social.discover(submitted, true, language),
     // onMutate (not onSuccess): setSubmitted() enables the searchData query
@@ -471,6 +483,21 @@ export default function SocialTrends() {
                 {searching && (
                   <span className="flex items-center gap-1.5 text-xs text-orange-500">
                     <RefreshCw size={11} className="animate-spin" /> Searching…
+                  </span>
+                )}
+                {/* Say when a search was answered from what we already hold. A
+                    repeat search costs nothing, and the user should know that
+                    rather than wonder why nothing was collected. */}
+                {!searching && searchData?.cached && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-white/5 text-gray-500">
+                      from posts already collected
+                    </span>
+                    <button onClick={() => forceMut.mutate()}
+                      title="Collect this phrase again from the platforms (uses Apify credit)"
+                      className="text-[10px] text-pharma-blue hover:underline">
+                      collect again
+                    </button>
                   </span>
                 )}
                 {/* Show LLM-expanded terms once available */}

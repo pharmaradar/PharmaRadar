@@ -48,12 +48,6 @@ const ROLE_LABELS: Record<string, string> = {
   other: "Other",
 };
 
-const STATUS_STYLE: Record<string, string> = {
-  ok: "text-emerald-600 dark:text-emerald-400",
-  empty: "text-amber-600 dark:text-amber-400",
-  error: "text-red-500",
-};
-
 function relative(iso: string | null): string {
   if (!iso) return "never";
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
@@ -559,75 +553,113 @@ export default function AccountTracking() {
       ) : !accounts.length ? (
         <p className="text-sm text-gray-400">No accounts match.</p>
       ) : (
-        <div className="glass rounded-xl divide-y divide-slate-200/50 dark:divide-white/5">
-          {accounts.map((account) => {
-            const meta = PLATFORM_META[account.platform];
-            const Icon = meta?.icon ?? AtSign;
-            return (
-              <div key={account.id}
-                className={cn("flex items-center gap-3 p-3 hover:bg-slate-50/60 dark:hover:bg-white/[0.02] transition-colors",
-                  !account.active && "opacity-50")}>
-                <Icon size={15} className={cn("shrink-0", meta?.tint)} />
-
-                <button onClick={() => setOpenId(account.id)} className="min-w-0 flex-1 text-left">
-                  <p className="text-sm font-medium text-gray-800 dark:text-[#e2e8f0] truncate">
-                    {account.label || account.handle}
-                    {account.role && (
-                      <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-gray-500">
-                        {ROLE_LABELS[account.role] ?? account.role}
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-[11px] text-gray-400 truncate">
-                    @{account.handle} · last checked {relative(account.last_scanned_at)}
-                    {account.last_scan_status && (
-                      <span className={cn(" · ", STATUS_STYLE[account.last_scan_status])}>
-                        {account.last_scan_status === "empty" ? "found nothing" : account.last_scan_status}
-                      </span>
-                    )}
-                  </p>
-                </button>
-
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className={cn("text-xs tabular-nums px-2 py-0.5 rounded-lg",
-                    account.post_count > 0
-                      ? "text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10"
-                      : "text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10")}
-                    title={account.post_count > 0
-                      ? `${account.post_count} posts collected`
-                      : "Nothing collected yet — check the handle is exactly right"}>
-                    {account.post_count}
-                  </span>
-                  {isAdmin && (
-                    <>
-                      <button onClick={() => refreshMut.mutate(account.id)}
-                        disabled={refreshMut.isPending}
-                        title="Collect this account now"
-                        className="p-1.5 text-gray-400 hover:text-pharma-blue disabled:opacity-40">
-                        <RefreshCw size={13} />
-                      </button>
-                      <button onClick={() => toggleMut.mutate({ id: account.id, active: !account.active })}
-                        title={account.active ? "Pause — keep it, stop collecting" : "Resume"}
-                        className="p-1.5 text-gray-400 hover:text-pharma-blue">
-                        {account.active ? <X size={13} /> : <Check size={13} />}
-                      </button>
-                      <button onClick={() => deleteMut.mutate(account.id)}
-                        title="Remove. Posts already collected are kept."
-                        className="p-1.5 text-gray-400 hover:text-red-500">
-                        <Trash2 size={13} />
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+          {accounts.map((account) => (
+            <AccountCard key={account.id} account={account} isAdmin={isAdmin}
+              onOpen={() => setOpenId(account.id)}
+              onRefresh={() => refreshMut.mutate(account.id)}
+              onToggle={() => toggleMut.mutate({ id: account.id, active: !account.active })}
+              onDelete={() => deleteMut.mutate(account.id)}
+              refreshing={refreshMut.isPending} />
+          ))}
         </div>
       )}
 
       {openId !== null && (
         <AccountDetailPanel id={openId} onClose={() => setOpenId(null)} />
       )}
+    </div>
+  );
+}
+
+/** One tracked account, in the card shape used on Social Trends.
+ *
+ *  The yield badge is the point of the card: an account showing 0 is not
+ *  decoration, it is the only signal that a handle is wrong — measured on this
+ *  data, every French Facebook slug was wrong and silently produced nothing. */
+function AccountCard({ account, isAdmin, onOpen, onRefresh, onToggle, onDelete, refreshing }: {
+  account: TrackedAccountFull; isAdmin: boolean;
+  onOpen: () => void; onRefresh: () => void; onToggle: () => void; onDelete: () => void;
+  refreshing: boolean;
+}) {
+  const meta = PLATFORM_META[account.platform];
+  const Icon = meta?.icon ?? AtSign;
+  const produces = account.post_count > 0;
+  const analysed = !!account.analysis?.summary;
+
+  return (
+    <div onClick={onOpen}
+      className={cn(
+        "glass-panel rounded-xl overflow-hidden cursor-pointer hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col",
+        !account.active && "opacity-60")}>
+      <div className="p-3 flex-1 flex flex-col">
+        <div className="flex items-start gap-2 mb-2">
+          <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium capitalize flex items-center gap-1",
+            PLATFORM_TINT[account.platform] ?? "bg-gray-100 text-gray-600")}>
+            <Icon size={10} /> {meta?.label ?? account.platform}
+          </span>
+          {!account.active && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-white/5 text-gray-500">
+              paused
+            </span>
+          )}
+          <span className={cn("ml-auto text-xs tabular-nums px-2 py-0.5 rounded font-medium",
+            produces
+              ? "text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10"
+              : "text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-500/10")}
+            title={produces ? `${account.post_count} posts collected`
+                            : "Nothing collected yet — check the handle is exactly right"}>
+            {account.post_count}
+          </span>
+        </div>
+
+        <p className="text-sm font-semibold text-gray-800 dark:text-[#e2e8f0] truncate">
+          {account.label || account.handle}
+        </p>
+        <p className="text-[11px] text-gray-400 truncate">@{account.handle}</p>
+
+        {account.role && (
+          <span className="mt-1.5 self-start text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-gray-500">
+            {ROLE_LABELS[account.role] ?? account.role}
+          </span>
+        )}
+
+        {analysed ? (
+          <p className="text-xs text-gray-600 dark:text-[#94a3b8] line-clamp-2 mt-2 flex-1">
+            {account.analysis!.summary}
+          </p>
+        ) : (
+          <p className="text-[11px] text-gray-400 mt-2 flex-1">
+            {produces ? "Not analysed yet — open to read what they post about."
+                      : "No posts collected yet."}
+          </p>
+        )}
+
+        <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-100 dark:border-slate-800">
+          <span className="text-[10px] text-gray-400 truncate">
+            checked {relative(account.last_scanned_at)}
+            {account.last_scan_status === "empty" && " · found nothing"}
+          </span>
+          {isAdmin && (
+            <span className="ml-auto flex items-center gap-0.5 shrink-0"
+              onClick={(e) => e.stopPropagation()}>
+              <button onClick={onRefresh} disabled={refreshing} title="Collect this account now"
+                className="p-1 text-gray-400 hover:text-pharma-blue disabled:opacity-40">
+                <RefreshCw size={12} />
+              </button>
+              <button onClick={onToggle}
+                title={account.active ? "Pause — keep it, stop collecting" : "Resume"}
+                className="p-1 text-gray-400 hover:text-pharma-blue">
+                {account.active ? <X size={12} /> : <Check size={12} />}
+              </button>
+              <button onClick={onDelete} title="Remove. Posts already collected are kept."
+                className="p-1 text-gray-400 hover:text-red-500">
+                <Trash2 size={12} />
+              </button>
+            </span>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -883,12 +883,19 @@ export const api = {
     /** Ad-hoc social search. A multi-word query is treated as a question and
      *  expanded into bilingual terms server-side, so `terms` reports what was
      *  actually matched and `total_matched` the pool before the display cap. */
-    discover: (q: string, fresh = true, lang: string = "fr", limit = 120) =>
+    /** Ad-hoc social search. A multi-word query is treated as a question and
+     *  expanded into bilingual terms server-side, so `terms` reports what was
+     *  actually matched and `total_matched` the pool before the display cap.
+     *  `cached: true` means this phrase was already collected recently and no
+     *  paid fetch was issued — pass `force` to collect again anyway. */
+    discover: (q: string, fresh = true, lang: string = "fr", limit = 120,
+               force = false) =>
       req<{
-        query: string; results: SocialPost[]; fetching: boolean;
+        query: string; results: SocialPost[]; fetching: boolean; cached?: boolean;
         terms?: string[]; total_matched?: number;
       }>(
-        `/social/discover?q=${encodeURIComponent(q)}&fresh=${fresh}&lang=${lang}&limit=${limit}`
+        `/social/discover?q=${encodeURIComponent(q)}&fresh=${fresh}&lang=${lang}` +
+        `&limit=${limit}&force=${force}`
       ),
     discoverStatus: (q: string) =>
       req<{ running: boolean; inserted?: number; error?: string; terms?: string[] }>(

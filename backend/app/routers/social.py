@@ -355,7 +355,7 @@ async def timeseries(days: int = 30, top: int = 6, db: AsyncSession = Depends(ge
 
 @router.get("/discover")
 async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
-                   limit: int = 120,
+                   limit: int = 120, force: bool = False,
                    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     """Return social posts matching a query, ranked.
 
@@ -472,17 +472,26 @@ async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
     results = [_to_out(p, now) for p in ranked[:max(1, min(limit, 200))]]
 
     fetching = False
+    cached = False
     from app.services import apify_client
     if fresh and apify_client.is_configured():
-        from app.tasks.social import discover_fetch
-        # Pass lang override to the fetch task (None means use settings default)
-        discover_fetch.delay(term, lang)
-        fetching = True
+        from app.tasks.social import discover_fetch, query_recently_fetched
+        # Searching the same phrase again inside the TTL reads what that search
+        # already collected. A live fetch costs Apify credit and returns
+        # substantially the same posts, so repeating it charges twice for one
+        # answer — the whole monthly budget is $5.
+        if query_recently_fetched(term) and not force:
+            cached = True
+        else:
+            # Pass lang override to the fetch task (None means use settings default)
+            discover_fetch.delay(term, lang)
+            fetching = True
 
     # `terms` is returned so the UI can show what was actually searched for —
     # a question that silently became ten terms is otherwise unexplainable when
     # the results look surprising.
     return {"query": term, "results": results, "fetching": fetching,
+            "cached": cached,
             "terms": terms if len(terms) > 1 else [], "total_matched": len(posts)}
 
 
