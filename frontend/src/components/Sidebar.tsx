@@ -2,6 +2,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Users, FileText, History, Settings, Bot, Compass,
   Flame, Zap, Building2, ChevronLeft, ChevronRight, Sun, Moon, X, LogOut, ShieldCheck,
+  AtSign,
 } from "lucide-react";
 import { useAppStore } from "@/store";
 import { useAuthStore } from "@/store/auth";
@@ -9,15 +10,19 @@ import { cn } from "@/lib/utils";
 
 const NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard"      },
-  { to: "/targets",   icon: Users,           label: "Targets"        },
+  { to: "/kols",      icon: Users,           label: "KOL Module"     },
   { to: "/competitors", icon: Building2,     label: "Competitors"    },
-  { to: "/reports",   icon: FileText,        label: "Reports"        },
+  { to: "/reports",   icon: FileText,        label: "KOL Report"     },
   { to: "/topics",    icon: Compass,         label: "Topic Explorer" },
   { to: "/burning-topics", icon: Zap,        label: "Burning Topics" },
   { to: "/social",    icon: Flame,           label: "Social Trends"  },
-  { to: "/history",   icon: History,         label: "Run History",    admin: true },
+  { to: "/accounts",  icon: AtSign,          label: "Account Tracking" },
+  // Run History exposes raw pipeline internals and the destructive run-delete
+  // action, so it is superadmin-only rather than admin-only.
+  { to: "/history",   icon: History,         label: "Run History",    superadmin: true },
   { to: "/agent",     icon: Bot,             label: "Hermes AI"      },
   { to: "/users",     icon: ShieldCheck,     label: "Users",          admin: true },
+  { to: "/targets",   icon: Users,           label: "Targets"        },
   { to: "/settings",  icon: Settings,        label: "Settings",       admin: true },
 ];
 
@@ -27,7 +32,8 @@ export default function Sidebar() {
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const isAdmin = user?.role === "admin";
-  const nav = NAV.filter((n) => !n.admin || isAdmin);
+  const isSuperadmin = !!user?.is_superadmin;
+  const nav = NAV.filter((n) => (!n.admin || isAdmin) && (!n.superadmin || isSuperadmin));
 
   return (
     <>

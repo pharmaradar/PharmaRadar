@@ -9,7 +9,17 @@ import { cn } from "@/lib/utils";
 const EMPTY_FORM = {
   name: "", known_urls: "", notes: "", twitter_handle: "", linkedin_url: "",
   target_type: "kol" as "kol" | "competitor",
+  disease_area: "",
 };
+
+/** Disease focus narrows every search query for this target to one therapeutic
+ *  area (backend: services/fr_sources.DISEASE_FOCUS). Competitors are tracked
+ *  on lung cancer only, so their other announcements never crowd out the
+ *  content the reports are about. */
+const DISEASE_AREAS = [
+  { value: "",            label: "All topics" },
+  { value: "lung_cancer", label: "Lung cancer only" },
+];
 
 function linkLabel(url: string): string {
   try {
@@ -71,6 +81,7 @@ export default function Targets() {
       twitter_handle: t.twitter_handle || "",
       linkedin_url: t.linkedin_url || "",
       target_type: t.target_type || "kol",
+      disease_area: t.disease_area || "",
     });
     setShowForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -83,6 +94,7 @@ export default function Targets() {
         known_urls: form.known_urls.split("\n").map((u) => u.trim()).filter(Boolean),
         notes: form.notes || null,
         target_type: form.target_type,
+        disease_area: form.disease_area || null,
         twitter_handle: form.twitter_handle.trim() || null,
         linkedin_url: form.linkedin_url.trim() || null,
       };
@@ -197,6 +209,25 @@ export default function Targets() {
                 onChange={(e) => setForm((f) => ({ ...f, linkedin_url: e.target.value }))}
                 className="w-full px-3 py-2 border border-gray-200 dark:border-[#1e3a5f] rounded-lg text-sm bg-transparent"
               />
+            </div>
+            <div>
+              <label className="text-xs text-slate-500 dark:text-slate-400 mb-1 block">
+                Disease focus
+              </label>
+              <select
+                value={form.disease_area}
+                onChange={(e) => setForm((f) => ({ ...f, disease_area: e.target.value }))}
+                className="w-full px-3 py-2 border border-gray-200 dark:border-[#1e3a5f] rounded-lg text-sm bg-transparent"
+              >
+                {DISEASE_AREAS.map((d) => (
+                  <option key={d.value} value={d.value} className="dark:bg-[#0d1424]">{d.label}</option>
+                ))}
+              </select>
+              <p className="text-[11px] text-slate-400 mt-1">
+                {form.disease_area
+                  ? "Every search for this target is restricted to this area, in French sources."
+                  : "No restriction — searches cover this target's full pharma activity."}
+              </p>
             </div>
             <input
               placeholder="Notes (optional)"

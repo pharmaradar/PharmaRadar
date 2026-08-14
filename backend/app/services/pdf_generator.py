@@ -16,8 +16,10 @@ from app.services.run_context import RunContext
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
-# Weekly run cadence — the daily summary's "findings this week" section covers this many days
-SUMMARY_WINDOW_DAYS = 7
+# Reporting window for the summary PDF's findings section. 30 days per client
+# spec ("standard reports and summaries default to the last 30 days") — wider
+# than the weekly run cadence on purpose, so a report is never one thin run.
+SUMMARY_WINDOW_DAYS = 30
 
 # Lower rank = higher priority in PDFs
 _CATEGORY_RANK = {
@@ -248,7 +250,7 @@ def _build_analytics_section(all_insights: list) -> str:
 </div>"""
 
 
-# ── CSS shared by individual + daily ──────────────────────────────────────────
+# ── CSS shared by the per-target and per-run summary PDFs ────────────────────
 _BASE_CSS = """
 @page { margin: 40px; }
 body { font-family: Georgia, 'Times New Roman', serif; color: #1a1a2e; background: #fff; font-size: 13px; }
@@ -482,19 +484,29 @@ class PDFService:
 
     # ── Daily summary ──────────────────────────────────────────────────────────
 
-    def generate_daily_summary(self, run_id: int, ctx: RunContext) -> dict:
-        return asyncio.run(self._daily_async(run_id))
+    def generate_run_summary(self, run_id: int, ctx: RunContext) -> dict:
+        return asyncio.run(self._run_summary_async(run_id))
 
-    async def _daily_async(self, run_id: int) -> dict:
+    async def _run_summary_async(self, run_id: int) -> dict:
         from app.database import CelerySessionLocal
-        from app.models import PersonSummary, Target, ExtractedInsight, ScrapedPost
+        from app.models import AppSettings, PersonSummary, Target, ExtractedInsight, ScrapedPost
         from sqlalchemy import select
 
-        # Weekly cadence — findings section covers the last 7 days (run once a week)
+        # Findings section covers the last SUMMARY_WINDOW_DAYS (30) — see the constant.
         window_cutoff = datetime.now(timezone.utc) - timedelta(days=SUMMARY_WINDOW_DAYS)
 
+        # The report names itself after the configured cadence, so a weekly
+        # schedule produces a "Weekly Report" and a monthly one a "Monthly
+        # Report" — rather than a fixed label that drifts from reality the way
+        # the old "Daily_Summary_" did.
+        cadence = "Weekly"
+        async with CelerySessionLocal() as cfg_sess:
+            cfg = await cfg_sess.get(AppSettings, 1)
+            if cfg and (cfg.cron_frequency or "").strip().lower() == "monthly":
+                cadence = "Monthly"
+
         async with CelerySessionLocal() as sess:
-            # Insights from the last 7 days (this week's findings)
+            # Insights from the reporting window (recent findings)
             from app.services.ae_filter import post_not_ae
             ins_rows = await sess.execute(
                 select(ExtractedInsight, ScrapedPost, Target)
@@ -506,7 +518,7 @@ class PDFService:
             )
             all_insights = ins_rows.all()
 
-            # Fallback: if nothing was extracted in the last 7 days (e.g. regenerating
+            # Fallback: if nothing was extracted in the window (e.g. regenerating
             # an old run from existing data), use all existing insights so the PDF is
             # never empty when data exists — no re-scrape needed.
             if not all_insights:
@@ -596,7 +608,7 @@ class PDFService:
                 f'</div>'
                 f'{recap_block}'
                 f'{kol_analytics}'
-                f'{cards or "<div class=\'empty-card\'>No new findings this week — summary above from prior runs.</div>"}'
+                f'{cards or "<div class=\'empty-card\'>No new findings in the last 30 days — summary above from prior runs.</div>"}'
                 f'</div>'
             )
 
@@ -606,8 +618,8 @@ class PDFService:
             names_html = "".join(f'<li>{_html.escape(n)}</li>' for n in sorted(empty_kols))
             empty_block = (
                 f'<div class="empty-kols">'
-                f'<h2>No data this week</h2>'
-                f'<div class="lab">{len(empty_kols)} KOL(s) with no new findings or summary this week</div>'
+                f'<h2>No data in the last 30 days</h2>'
+                f'<div class="lab">{len(empty_kols)} KOL(s) with no new findings or summary in the last 30 days</div>'
                 f'<ul>{names_html}</ul>'
                 f'</div>'
             )
@@ -630,7 +642,7 @@ class PDFService:
 <style>
 {_BASE_CSS}
 {_DAILY_EXTRA_CSS}
-/* Analytics section inside daily PDF */
+/* Analytics section inside the run-summary PDF */
 .analytics-section {{ page-break-inside: avoid; margin-bottom: 20px; }}
 .empty-kols {{ margin-top: 28px; padding-top: 16px; border-top: 1px solid #d1d9e6; page-break-inside: avoid; }}
 .empty-kols h2 {{ font-size: 15px; color: #64748b; margin: 0 0 4px; }}
@@ -648,7 +660,7 @@ class PDFService:
 </style>
 </head><body>
 <div class="header">
-  <h1>PharmaRadar Weekly Intelligence Summary</h1>
+  <h1>PharmaRadar {cadence} KOL Report</h1>
   <div class="subtitle">Pharma Intelligence Monitoring System</div>
   <div class="meta">
     <strong>Date:</strong> {today}<br>
@@ -664,12 +676,12 @@ class PDFService:
 
 {person_blocks}
 {empty_block}
-<div class="footer">PharmaRadar Summary &nbsp;·&nbsp; {today} &nbsp;·&nbsp; Confidential</div>
+<div class="footer">PharmaRadar {cadence} KOL Report &nbsp;·&nbsp; {today} &nbsp;·&nbsp; Confidential</div>
 </body></html>"""
 
         out_dir = Path(settings.reports_dir) / today
         out_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = out_dir / f"Daily_Summary_{today}.pdf"
+        pdf_path = out_dir / f"{cadence}_KOL_Report_{today}.pdf"
 
         from weasyprint import HTML
         HTML(string=html_doc).write_pdf(str(pdf_path))
@@ -679,26 +691,27 @@ class PDFService:
         vercel_url = None
         if settings.vercel_blob_token:
             try:
-                from app.services.vercel_blob_storage import upload_daily_summary_to_vercel_blob
+                from app.services.vercel_blob_storage import upload_run_summary_to_vercel_blob
                 pdf_binary = pdf_path.read_bytes()
-                vercel_url = upload_daily_summary_to_vercel_blob(
+                vercel_url = upload_run_summary_to_vercel_blob(
                     pdf_binary=pdf_binary,
                     run_date=date.fromisoformat(today),
                     vercel_token=settings.vercel_blob_token,
+                    cadence=cadence,
                 )
-                logger.info("pdf.daily_uploaded_to_blob", url=vercel_url)
+                logger.info("pdf.run_summary_uploaded_to_blob", url=vercel_url)
             except Exception as e:
-                logger.warning("pdf.daily_blob_upload_failed", error=str(e))
+                logger.warning("pdf.run_summary_blob_upload_failed", error=str(e))
                 # Continue with local path on upload failure — don't block the run
 
         result = {"path": str(pdf_path)}
         if vercel_url:
             result["vercel_url"] = vercel_url
-        logger.info("pdf.daily_generated", path=str(pdf_path), insights=total_insights)
+        logger.info("pdf.run_summary_generated", path=str(pdf_path), insights=total_insights)
         return result
 
     def _build_synthesis_html(self, all_insights: list) -> str:
-        """LLM executive synthesis for the daily PDF: takeaway + so-what + most
+        """LLM executive synthesis for the run-summary PDF: takeaway + so-what + most
         impactful findings. Best-effort — returns '' on any failure so the PDF
         still generates. One LLM call per run."""
         if not all_insights:
@@ -715,12 +728,12 @@ class PDFService:
             )
             prompt = (
                 "You are a senior pharma intelligence analyst for Roche France.\n"
-                f"Below are this week's {len(ranked)} most important KOL findings "
+                f"Below are the last 30 days' {len(ranked)} most important KOL findings "
                 "(each prefixed with its [id]).\n\n"
                 f"{listing}\n\n"
                 "Write a concise executive synthesis. Use EXACTLY this format with these markers:\n"
                 "##TAKEAWAY##\n"
-                "3-5 sentences: the key themes across your KOLs this week, notable shifts, "
+                "3-5 sentences: the key themes across your KOLs over the last 30 days, notable shifts, "
                 "drug or competitor mentions, sentiment.\n"
                 "##SO_WHAT##\n"
                 "2-3 sentences on what this means for Roche France and what to act on.\n"
@@ -729,7 +742,7 @@ class PDFService:
                 "Use the real [id] values above.\n\n"
                 "Reference real drug names and KOLs. Be specific."
             )
-            raw = call_pro([{"role": "user", "content": prompt}], max_tokens=4000)
+            raw = call_pro([{"role": "user", "content": prompt}], max_tokens=8192)
             parsed = parse_synthesis(raw)
         except Exception as exc:
             logger.warning("pdf.synthesis_failed", error=str(exc))

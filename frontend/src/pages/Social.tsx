@@ -1,13 +1,18 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Flame, Play, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Flame, Play, Loader2, SlidersHorizontal } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
 import SocialTrends from "./SocialTrends";
+import StandardKeywords from "@/components/StandardKeywords";
 
 export default function SocialPage() {
   const qc = useQueryClient();
   const { socialLang } = useAppStore();
+  // What the platform monitors continuously, kept next to the trends it
+  // produces — the client could not find this buried in Settings.
+  const [showConfig, setShowConfig] = useState(false);
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings.get });
   const { data: status } = useQuery({
     queryKey: ["social-status"],
@@ -37,6 +42,12 @@ export default function SocialPage() {
             </p>
           </div>
         </div>
+        <div className="flex items-center gap-2">
+        <button onClick={() => setShowConfig(!showConfig)}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
+          {showConfig ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          <SlidersHorizontal size={14} /> What we track
+        </button>
         <button onClick={() => scanMut.mutate()} disabled={apifyOff || running || scanMut.isPending}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50",
@@ -46,11 +57,18 @@ export default function SocialPage() {
             ? <><Loader2 size={14} className="animate-spin" /> Scanning…</>
             : <><Play size={14} /> Run Scan</>}
         </button>
+        </div>
       </div>
 
       {apifyOff && (
         <div className="flex-none text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border-b border-amber-200 dark:border-amber-800/40 px-6 py-2.5">
           Apify isn't configured — set <code className="font-mono">APIFY_API_TOKEN</code> in <code className="font-mono">.env</code> to enable scanning.
+        </div>
+      )}
+
+      {showConfig && (
+        <div className="flex-none max-h-[60vh] overflow-y-auto border-b border-slate-200/50 dark:border-white/10 px-5 py-4 space-y-4">
+          <StandardKeywords />
         </div>
       )}
 

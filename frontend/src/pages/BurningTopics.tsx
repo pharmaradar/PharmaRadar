@@ -9,17 +9,17 @@ import { cn } from "@/lib/utils";
 import ReportView, { StatusBadge } from "@/components/ReportView";
 import QuestionEditor from "@/components/QuestionEditor";
 
-const LANGS = [
-  { value: "", label: "All languages" },
-  { value: "fr", label: "French" },
-  { value: "en", label: "English" },
-  { value: "de", label: "German" },
-  { value: "es", label: "Spanish" },
-  { value: "it", label: "Italian" },
+// Region, not language — the backend selects on source_scope, and France is the
+// default. The old list offered "All languages" (empty value) plus de/es/it,
+// but an empty value now resolves to France server-side, so that option told
+// the client the opposite of what it did.
+const REGIONS = [
+  { value: "fr", label: "France" },
+  { value: "all", label: "Worldwide" },
 ];
 
 const EMPTY_TOPIC_FORM = {
-  name: "", description: "", period_days: 30, language_filter: "",
+  name: "", description: "", period_days: 30, language_filter: "fr",
   restriction_terms: "", exclusion_words: "",
 };
 
@@ -64,9 +64,10 @@ function EntryMeta({ entry }: { entry: Entry }) {
         )}
         <div className="flex flex-wrap gap-1.5 mt-2 text-xs text-slate-400">
           <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">last {t.period_days}d</span>
-          {t.language_filter && (
-            <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 uppercase">{t.language_filter}</span>
-          )}
+          {/* Always shown: an unset value means France, not "no region". */}
+          <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">
+            {(t.language_filter || "fr") === "all" ? "Worldwide" : "France"}
+          </span>
           {t.restriction_terms.length > 0 && (
             <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">+{t.restriction_terms.join(", ")}</span>
           )}
@@ -118,8 +119,15 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
       q.state.data?.some((r) => r.status === "pending" || r.status === "running") ? 3000 : false,
   });
 
+  // Date filter: overrides the topic's window for this generation only, so the
+  // team can re-cut a report over a different period without editing the topic.
+  // A congress has fixed dates, so the control is topic-only.
+  const [periodDays, setPeriodDays] = useState<number | undefined>(undefined);
+
   const generateMut = useMutation({
-    mutationFn: () => entry.kind === "topic" ? api.burningTopics.generate(id) : api.congress.generate(id),
+    mutationFn: () => entry.kind === "topic"
+      ? api.burningTopics.generate(id, periodDays)
+      : api.congress.generate(id),
     onSuccess: () => {
       setExpanded(true);
       qc.invalidateQueries({ queryKey: ["entry-reports", entry.kind, id] });
@@ -140,7 +148,10 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
 
   return (
     <div className="glass-panel rounded-xl border border-slate-200/50 dark:border-white/10 shadow-sm overflow-hidden">
-      <div className="px-5 py-4">
+      <div
+        className="px-5 py-4 cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -154,7 +165,23 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
             <EntryMeta entry={entry} />
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+            {entry.kind === "topic" && (
+              <select
+                value={periodDays ?? ""}
+                onChange={(e) => setPeriodDays(e.target.value ? Number(e.target.value) : undefined)}
+                disabled={Boolean(inFlight)}
+                title="Period covered by the next report"
+                className="px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-white/10 bg-transparent text-slate-600 dark:text-slate-300 disabled:opacity-50"
+              >
+                <option value="" className="dark:bg-[#0d1424]">
+                  Default ({entry.data.period_days}d)
+                </option>
+                {[7, 30, 90, 180, 365].map((d) => (
+                  <option key={d} value={d} className="dark:bg-[#0d1424]">Last {d} days</option>
+                ))}
+              </select>
+            )}
             <button
               onClick={() => generateMut.mutate()}
               disabled={Boolean(inFlight) || !entry.data.is_active}
@@ -294,7 +321,7 @@ export default function BurningTopics() {
         name: t.name,
         description: t.description || "",
         period_days: t.period_days,
-        language_filter: t.language_filter || "",
+        language_filter: t.language_filter || "fr",
         restriction_terms: t.restriction_terms.join(", "),
         exclusion_words: t.exclusion_words.join(", "),
       });
@@ -443,13 +470,13 @@ export default function BurningTopics() {
                   />
                 </label>
                 <label className="text-xs text-slate-400">
-                  Language filter
+                  Region
                   <select
                     value={topicForm.language_filter}
                     onChange={(e) => setTopicForm((f) => ({ ...f, language_filter: e.target.value }))}
                     className="w-full mt-1 px-3 py-2 border border-gray-200 dark:border-[#1e3a5f] rounded-lg text-sm bg-transparent dark:bg-[#0f1e38]"
                   >
-                    {LANGS.map((l) => <option key={l.value} value={l.value}>{l.label}</option>)}
+                    {REGIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
                   </select>
                 </label>
               </div>

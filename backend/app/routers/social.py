@@ -10,13 +10,14 @@ from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, desc, or_, func
+from sqlalchemy import select, desc, or_, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import SocialPost, SearchHistory, User
 from app.auth import get_current_user, require_admin, daily_gen_guard
 from app.services.ae_filter import social_not_ae
+from app.services.fr_sources import Scope
 
 router = APIRouter(prefix="/api/social", tags=["social"])
 
@@ -62,9 +63,14 @@ def _to_out(p: SocialPost, now: datetime) -> dict:
 
 # ── Scan trigger + status ─────────────────────────────────
 
-@router.post("/scan")
+@router.post("/scan", dependencies=[Depends(require_admin)])
 async def trigger_scan(lang: str | None = None):
     """Kick off a manual social trend scan via Apify.
+
+    Admin-only: this is the one endpoint that spends real Apify credits, and it
+    was previously reachable by any authenticated user while the far cheaper
+    DELETE /posts below already required admin.
+
     `lang` overrides settings.social_lang_filter for this scan only."""
     from app.services import apify_client
     if not apify_client.is_configured():
@@ -116,11 +122,16 @@ async def scan_status():
 
 @router.get("/trends")
 async def trends(
-    days: int = 180,
+    # Display window defaults to 30 days per client spec. The *scrape* window
+    # stays deep (AppSettings.social_window_days) so widening the view here is
+    # instant and free — the posts are already in the DB.
+    days: int = 30,
     platform: str | None = None,
     kind: str | None = None,
     limit: int = 60,
-    language: str | None = None,
+    # France-first: the platform monitors the French market, so "fr" is the
+    # default rather than an opt-in filter. Pass language="all" to widen.
+    language: str | None = "fr",
     from_date: str | None = None,
     to_date: str | None = None,
     db: AsyncSession = Depends(get_db),
@@ -147,7 +158,12 @@ async def trends(
     if kind and kind != "all":
         q = q.where(SocialPost.kind == kind)
     if language and language != "all":
-        q = q.where(SocialPost.language == language)
+        # "fr" means French SOURCE, not French text. Filtering on the detected
+        # language both over- and under-selects: it admitted francophone Quebec
+        # accounts and hid French institutions that post in English. source_scope
+        # is set from the account at ingest, so it answers the question asked.
+        q = (q.where(SocialPost.source_scope == Scope.FR.value) if language == "fr"
+             else q.where(SocialPost.language == language))
     # Pull a generous slice then rank in Python (engagement+recency isn't SQL-cheap)
     q = q.order_by(desc(SocialPost.scraped_at)).limit(1000)
 
@@ -185,7 +201,7 @@ async def trends(
 # ── Synthesis / takeaway + LLM editor's picks ─────────────
 
 @router.get("/synthesis")
-async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = False,
+async def synthesis(days: int = 30, lang: str | None = "fr", refresh: bool = False,
                     db: AsyncSession = Depends(get_db),
                     user=Depends(daily_gen_guard("social_synthesis"))):
     """On-demand LLM synthesis of the recent social feed (filter-independent).
@@ -196,7 +212,9 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
     from app.config import get_settings
     from app.services.synthesizer import parse_synthesis
 
-    key = f"social_synth:v1:{days}:{lang or 'all'}"
+    # v2: the default scope changed from all-languages to French, so v1 entries
+    # would serve a global synthesis under a French request.
+    key = f"social_synth:v2:{days}:{lang or 'all'}"
     ukey = f"{key}:u{user.id}"   # private regenerate per user; shared key untouched
     r = None
     try:
@@ -255,7 +273,7 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
     err = None
     parsed = {"takeaway": "", "so_what": "", "picks": []}
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2500)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         parsed = parse_synthesis(raw)
     except Exception as exc:
         err = str(exc)[:300]
@@ -290,7 +308,7 @@ async def synthesis(days: int = 30, lang: str | None = None, refresh: bool = Fal
 # ── Time series for the trend wave chart ──────────────────
 
 @router.get("/timeseries")
-async def timeseries(days: int = 180, top: int = 6, db: AsyncSession = Depends(get_db)):
+async def timeseries(days: int = 30, top: int = 6, db: AsyncSession = Depends(get_db)):
     """Weekly engagement per top-N topic over the window — feeds the dashboard
     wave chart. Each series point is total engagement for that topic that week."""
     from collections import defaultdict
@@ -336,10 +354,13 @@ async def timeseries(days: int = 180, top: int = 6, db: AsyncSession = Depends(g
 # ── Discovery: cached matches + background fresh Apify fetch ──
 
 @router.get("/discover")
-async def discover(q: str, fresh: bool = True, lang: str | None = None,
+async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
+                   limit: int = 120, force: bool = False,
                    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
-    """Return social posts matching a query, ranked. `lang` overrides the
-    configured default (fr/en/all). If user picks "Global" in the UI, lang="all"."""
+    """Return social posts matching a query, ranked.
+
+    `lang` defaults to French — the platform monitors the French market, so a
+    global search is the opt-in, not the default. Pass lang="all" to widen."""
     term = (q or "").strip()
     if len(term) < 2:
         return {"query": term, "results": [], "fetching": False}
@@ -348,30 +369,130 @@ async def discover(q: str, fresh: bool = True, lang: str | None = None,
     await db.commit()
 
     now = datetime.now(timezone.utc)
-    like = f"%{term.lower()}%"
-    base = select(SocialPost).where(or_(
-        func.lower(SocialPost.text).like(like),
-        func.lower(SocialPost.topic).like(like),
-        func.lower(SocialPost.query).like(like),
-        func.lower(SocialPost.hashtags).like(like),
-    )).where(social_not_ae())
-    # Filter cached posts by language when not in "all" mode
+
+    # A typed question never appears verbatim inside a post, so matching the
+    # whole string finds nothing — "does KOL think subcutaneous is better than
+    # IV" scored 0 rows against a corpus that does discuss it. Anything longer
+    # than a couple of words is treated as a question and broken into terms
+    # (bilingual, because the corpus is French and questions usually are not).
+    # Short queries stay literal: they are already a term, and expansion would
+    # cost an LLM call to tell us so.
+    terms = [term]
+    if len(term.split()) >= 3:
+        try:
+            from app.services.question import expand_for_search
+            expanded = expand_for_search(term, language=(lang or "fr"))
+            if expanded:
+                terms = list(dict.fromkeys([term] + expanded))
+        except Exception:                        # noqa: BLE001 - never fail the search
+            pass
+
+    # `topic` and `query` record HOW a post was collected, not what it says —
+    # `query` literally stores the search that retrieved it. Matching a typed
+    # question against those is a false-positive machine: the term "KOL" hit a
+    # post about spinal muscular atrophy purely because it had been collected
+    # under an older search called "what do kol think about evrysdi".
+    # Provenance is still worth matching for a short literal query (finding
+    # everything gathered under a topic is a real use), so it is only the
+    # expanded question path that restricts itself to content.
+    def _match_clause(candidates: list[str], content_only: bool):
+        conditions = []
+        for candidate in candidates:
+            like = f"%{candidate.lower()}%"
+            conditions.append(func.lower(SocialPost.text).like(like))
+            conditions.append(func.lower(SocialPost.hashtags).like(like))
+            if content_only:
+                # `topic` is a subject label for keyword-collected posts
+                # ("Evrysdi") but provenance for account-collected ones
+                # ("account:msd-france") — a question mentioning France would
+                # otherwise pull in every post from that account.
+                conditions.append(and_(
+                    func.lower(SocialPost.topic).like(like),
+                    ~func.lower(func.coalesce(SocialPost.topic, "")).like("account:%"),
+                ))
+            else:
+                conditions.append(func.lower(SocialPost.topic).like(like))
+                conditions.append(func.lower(SocialPost.query).like(like))
+        return or_(*conditions)
+
+    # Expansion yields discriminating terms ("sous-cutané") alongside filler the
+    # question happened to contain ("better", "think"). Filler matches almost
+    # every post, so searching everything at once buries the on-topic results.
+    # Search the specific terms first and only widen if that came back thin.
+    search_terms = terms
+    if len(terms) > 1:
+        from app.services.question import split_by_specificity
+        specific, _fallback = split_by_specificity(terms)
+        if specific:
+            search_terms = specific
+
+    expanded_mode = len(terms) > 1
+    base = (select(SocialPost)
+            .where(_match_clause(search_terms, expanded_mode))
+            .where(social_not_ae()))
+    # Filter cached posts by source when not in "all" mode — see the note in
+    # `trends`: French source, not French text.
     if lang and lang != "all":
-        base = base.where(SocialPost.language == lang)
-    rows = await db.execute(base.order_by(desc(SocialPost.scraped_at)).limit(500))
+        base = (base.where(SocialPost.source_scope == Scope.FR.value) if lang == "fr"
+                else base.where(SocialPost.language == lang))
+    scoped = base
+    rows = await db.execute(scoped.order_by(desc(SocialPost.scraped_at)).limit(1000))
     posts = rows.scalars().all()
-    ranked = sorted(posts, key=lambda p: _trend_score(p, now), reverse=True)
-    results = [_to_out(p, now) for p in ranked[:60]]
+
+    # Too thin to be useful — widen to every term rather than show an empty page.
+    if len(posts) < 5 and len(search_terms) < len(terms):
+        widened = (select(SocialPost)
+                   .where(_match_clause(terms, expanded_mode))
+                   .where(social_not_ae()))
+        if lang and lang != "all":
+            widened = (widened.where(SocialPost.source_scope == Scope.FR.value)
+                       if lang == "fr" else widened.where(SocialPost.language == lang))
+        posts = (await db.execute(
+            widened.order_by(desc(SocialPost.scraped_at)).limit(1000))).scalars().all()
+        search_terms = terms
+
+    # With many terms, "matched any" is a weak signal on its own — a post
+    # hitting six of the question's terms is more on-topic than one hitting a
+    # single common word. Rank by how much of the question a post covers, then
+    # fall back to the usual engagement/recency score.
+    lowered = [t.lower() for t in search_terms if t and t.strip()]
+
+    def _relevance(post) -> int:
+        parts = [post.text or "", post.hashtags or ""]
+        topic = post.topic or ""
+        if not topic.lower().startswith("account:"):
+            parts.append(topic)
+        if not expanded_mode:
+            parts.append(post.query or "")
+        haystack = " ".join(parts).lower()
+        return sum(1 for t in lowered if t in haystack)
+
+    ranked = sorted(posts, key=lambda p: (_relevance(p), _trend_score(p, now)),
+                    reverse=True)
+    results = [_to_out(p, now) for p in ranked[:max(1, min(limit, 200))]]
 
     fetching = False
+    cached = False
     from app.services import apify_client
     if fresh and apify_client.is_configured():
-        from app.tasks.social import discover_fetch
-        # Pass lang override to the fetch task (None means use settings default)
-        discover_fetch.delay(term, lang)
-        fetching = True
+        from app.tasks.social import discover_fetch, query_recently_fetched
+        # Searching the same phrase again inside the TTL reads what that search
+        # already collected. A live fetch costs Apify credit and returns
+        # substantially the same posts, so repeating it charges twice for one
+        # answer — the whole monthly budget is $5.
+        if query_recently_fetched(term) and not force:
+            cached = True
+        else:
+            # Pass lang override to the fetch task (None means use settings default)
+            discover_fetch.delay(term, lang)
+            fetching = True
 
-    return {"query": term, "results": results, "fetching": fetching}
+    # `terms` is returned so the UI can show what was actually searched for —
+    # a question that silently became ten terms is otherwise unexplainable when
+    # the results look surprising.
+    return {"query": term, "results": results, "fetching": fetching,
+            "cached": cached,
+            "terms": terms if len(terms) > 1 else [], "total_matched": len(posts)}
 
 
 @router.get("/discover/history")
@@ -462,7 +583,7 @@ async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
     messages = [{"role": "user", "content": prompt}]
 
     try:
-        reply = await call_llm_async(messages, max_tokens=900)
+        reply = await call_llm_async(messages, max_tokens=8192)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(exc)[:200]}")
 
@@ -487,3 +608,317 @@ async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
     post.llm_description = what + (_SEPARATOR + so_what if so_what else "")
     await db.commit()
     return {"description": what, "so_what": so_what, "cached": False}
+
+
+# ── Tracked accounts registry ─────────────────────────────
+# The client asked to "define and track specific social media accounts".
+# Keyword search pays for N results and hopes; a chosen account is on-topic by
+# construction, which is why this is the highest-yield lever on French volume.
+
+class TrackedAccountIn(BaseModel):
+    platform: str
+    handle: str
+    url: str | None = None
+    label: str | None = None
+    category: str | None = None
+    active: bool = True
+
+
+def _account_out(a) -> dict:
+    return {
+        "id": a.id, "platform": a.platform, "handle": a.handle, "url": a.url,
+        "label": a.label, "category": a.category, "active": a.active,
+    }
+
+
+async def _account_coverage(db) -> dict[tuple[str, str], dict]:
+    """Posts collected per tracked account, so a dead account is visible.
+
+    Tracking an account is only worth anything if posts actually arrive from it,
+    and a wrong handle fails silently: seeding LinkedIn turned up `gustaveroussy`,
+    which returns ten results none of which are Gustave Roussy — the real slug is
+    `gustave-roussy`. Without a count per account that stays invisible forever.
+
+    Aggregated in SQL rather than in Python. The obvious version pulls every post
+    and loops the accounts across it, which is 51 x N comparisons on every page
+    load of the Social tab — fine on a dev table, quadratic in production.
+
+    Two attribution routes, because the lanes label differently: the account
+    lanes stamp `query = 'tracked:<platform>:<handle>'`, and every normaliser
+    fills `author`. Both group cleanly; a URL-substring fallback deliberately is
+    not used, since matching "roche" inside a URL also matches "rochester".
+    """
+    from app.models import TrackedAccount
+
+    accounts = (await db.execute(select(TrackedAccount))).scalars().all()
+    if not accounts:
+        return {}
+
+    # Author, normalised the same way the handle is (case-folded, no leading @).
+    author_key = func.lower(func.ltrim(func.trim(SocialPost.author), "@"))
+    by_author = await db.execute(
+        select(SocialPost.platform, author_key,
+               func.count(), func.max(SocialPost.scraped_at))
+        .where(social_not_ae(), SocialPost.author.is_not(None))
+        .group_by(SocialPost.platform, author_key)
+    )
+    by_query = await db.execute(
+        select(SocialPost.platform, func.lower(SocialPost.query),
+               func.count(), func.max(SocialPost.scraped_at))
+        .where(social_not_ae(), SocialPost.query.like("tracked:%"))
+        .group_by(SocialPost.platform, func.lower(SocialPost.query))
+    )
+
+    author_hits: dict[tuple[str, str], tuple[int, object]] = {
+        (platform, key): (count, last)
+        for platform, key, count, last in by_author.all() if key
+    }
+    query_hits: dict[str, tuple[int, object]] = {
+        key: (count, last) for _, key, count, last in by_query.all() if key
+    }
+
+    coverage: dict[tuple[str, str], dict] = {}
+    for account in accounts:
+        handle = (account.handle or "").strip().lstrip("@").lower()
+        if not handle:
+            continue
+        count, last = author_hits.get((account.platform, handle), (0, None))
+        tag_count, tag_last = query_hits.get(
+            f"tracked:{account.platform}:{handle}", (0, None))
+        # The same post can carry both the tag and the author, so take the larger
+        # rather than the sum — adding them would double-count the account lanes.
+        if tag_count > count:
+            count, last = tag_count, tag_last
+        elif tag_last and (last is None or tag_last > last):
+            last = tag_last
+        coverage[(account.platform, handle)] = {
+            "post_count": count,
+            "last_seen": last.isoformat() if last else None,
+        }
+    return coverage
+
+
+@router.get("/accounts")
+async def list_accounts(db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+
+    rows = await db.execute(
+        select(TrackedAccount).order_by(TrackedAccount.platform, TrackedAccount.handle)
+    )
+    accounts = rows.scalars().all()
+    coverage = await _account_coverage(db)
+    out = []
+    for a in accounts:
+        item = _account_out(a)
+        stats = coverage.get((a.platform, (a.handle or "").strip().lstrip("@").lower()),
+                             {"post_count": 0, "last_seen": None})
+        out.append({**item, **stats})
+    return {"accounts": out}
+
+
+@router.post("/accounts", status_code=201, dependencies=[Depends(require_admin)])
+async def create_account(body: TrackedAccountIn, db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+    from app.models.tracked_account import PLATFORMS
+
+    platform = (body.platform or "").strip().lower()
+    if platform not in PLATFORMS:
+        raise HTTPException(status_code=422, detail=f"platform must be one of {', '.join(PLATFORMS)}")
+    handle = (body.handle or "").strip().lstrip("@")
+    if not handle:
+        raise HTTPException(status_code=422, detail="handle is required")
+
+    existing = await db.execute(
+        select(TrackedAccount).where(
+            TrackedAccount.platform == platform,
+            func.lower(TrackedAccount.handle) == handle.lower(),
+        )
+    )
+    if existing.scalars().first():
+        raise HTTPException(status_code=409, detail="That account is already tracked")
+
+    row = TrackedAccount(
+        platform=platform, handle=handle,
+        url=(body.url or "").strip() or (f"https://x.com/{handle}" if platform == "twitter" else None),
+        label=(body.label or "").strip() or None,
+        category=(body.category or "").strip() or None,
+        active=body.active,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _account_out(row)
+
+
+@router.patch("/accounts/{account_id}", dependencies=[Depends(require_admin)])
+async def update_account(account_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+
+    row = await db.get(TrackedAccount, account_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    for field in ("label", "category", "url"):
+        if field in body:
+            setattr(row, field, (body[field] or "").strip() or None)
+    if "active" in body:
+        row.active = bool(body["active"])
+    await db.commit()
+    await db.refresh(row)
+    return _account_out(row)
+
+
+@router.delete("/accounts/{account_id}", dependencies=[Depends(require_admin)])
+async def delete_account(account_id: int, db: AsyncSession = Depends(get_db)):
+    from app.models import TrackedAccount
+
+    row = await db.get(TrackedAccount, account_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    await db.delete(row)
+    await db.commit()
+    return {"deleted": account_id}
+
+
+# ── Single-post analysis ──────────────────────────────────
+
+def _post_reach(post, platform_stats: dict) -> dict:
+    """This post's pull, benchmarked against its own platform.
+
+    "Volume of mentions" is meaningless for one post — it is always one. What is
+    useful is how far THIS post travelled relative to others on the same
+    platform, so that is what the section reports.
+
+    X and LinkedIn arrive through search, which carries no engagement at all, so
+    their numbers are absent rather than zero. Rendering 0 there would read as
+    "nobody engaged" when the truth is "we cannot see engagement".
+    """
+    engagement = (post.likes or 0) + (post.comments or 0) + (post.views or 0)
+    available = post.platform in ("instagram", "facebook")
+    stats = platform_stats.get(post.platform) or {}
+    average = stats.get("avg") or 0
+    return {
+        "available": available,
+        "likes": post.likes or 0,
+        "comments": post.comments or 0,
+        "views": post.views or 0,
+        "engagement": engagement,
+        "platform_average": round(average, 1) if available else None,
+        "vs_average": (round(engagement / average, 1)
+                       if available and average else None),
+        "platform": post.platform,
+        "note": (None if available else
+                 f"{post.platform} posts are collected through search, which "
+                 "does not expose engagement figures."),
+    }
+
+
+@router.post("/post/{post_id}/analyse")
+async def analyse_post(post_id: int, refresh: bool = False,
+                       db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """Analyse one post on its own, in the report format used everywhere else."""
+    post = await db.get(SocialPost, post_id)
+    if not post or post.is_adverse_event is True:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    if post.analysis_sections and not refresh:
+        try:
+            return {"sections": json.loads(post.analysis_sections), "cached": True}
+        except Exception:                           # noqa: BLE001 - rewrite bad cache
+            pass
+
+    if not (post.text or "").strip():
+        raise HTTPException(422, "This post has no text to analyse")
+
+    rows = await db.execute(
+        select(SocialPost.platform,
+               func.avg(func.coalesce(SocialPost.likes, 0)
+                        + func.coalesce(SocialPost.comments, 0)
+                        + func.coalesce(SocialPost.views, 0)))
+        .group_by(SocialPost.platform)
+    )
+    platform_stats = {p: {"avg": float(a or 0)} for p, a in rows.all()}
+
+    # Who is speaking is a classification, not a distribution: one post has one
+    # author, so a percentage chart would be theatre.
+    from app.services.voice_profile import classify
+    bucket, confidence, evidence = classify(
+        post.author or "", url=post.post_url or "",
+        is_tracked_kol=False, target_type=None)
+
+    hashtags = json.loads(post.hashtags) if post.hashtags else []
+    reach = _post_reach(post, platform_stats)
+
+    prompt = (
+        "You are a pharma intelligence analyst monitoring the French market for "
+        "Roche. Analyse this SINGLE social media post.\n\n"
+        "Output EXACTLY these sections, each starting with its marker:\n\n"
+        "##EXEC_SUMMARY##\n2-3 sentences: what this post is, who published it "
+        "and the context.\n\n"
+        "##SO_WHAT##\n2-3 sentences on the strategic implication for a pharma "
+        "medical affairs team — the signal, opportunity or risk, and what to do "
+        "about it. Be specific.\n\n"
+        "##WHAT_IS_SAID##\n2-4 sentences on the substance: the actual claims, "
+        "products, studies or positions stated in the post.\n\n"
+        "##VOICE##\n1-2 sentences on who is speaking and what standing they "
+        f"have. Our classifier reads this author as: {bucket} ({confidence}). "
+        "Say whether the post supports that reading.\n\n"
+        "##REACH##\n1-2 sentences interpreting how far this post travelled, "
+        f"given: {json.dumps(reach)}. If engagement is unavailable on this "
+        "platform, say so plainly and do not guess.\n\n"
+        "##SUBTOPICS##\n3-5 lines starting '- ': the themes this post touches "
+        "that are worth tracking.\n\n"
+        "Base every statement on the post. Only the post text is available — "
+        "comment text is NOT collected, so never state what commenters said.\n\n"
+        f"Platform: {post.platform}\nAuthor: {post.author or 'unknown'}\n"
+        f"Posted: {post.posted_at.date().isoformat() if post.posted_at else 'undated'}\n"
+        f"Hashtags: {', '.join(hashtags) if hashtags else '-'}\n"
+        f"Engagement: {reach['likes']} likes, {reach['comments']} comments, "
+        f"{reach['views']} views\n\n"
+        f"Post text:\n{(post.text or '')[:4000]}"
+    )
+
+    from app.services.llm_router import call_llm_async
+    try:
+        # gemini-2.5-flash counts reasoning against this budget, so a small cap
+        # silently truncates the tail sections.
+        reply = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=6000)
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(502, f"LLM call failed: {str(exc)[:200]}") from exc
+
+    from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
+
+    raw = reply or ""
+    sections = {
+        "exec_summary": trim_incomplete(extract_section(raw, "EXEC_SUMMARY")),
+        "so_what": trim_incomplete(extract_section(raw, "SO_WHAT")),
+        "what_is_said": trim_incomplete(extract_section(raw, "WHAT_IS_SAID")),
+        "voice_note": trim_incomplete(extract_section(raw, "VOICE")),
+        "reach_note": trim_incomplete(extract_section(raw, "REACH")),
+        "subtopics": parse_bullets(extract_section(raw, "SUBTOPICS")),
+        # Computed, not written by the model.
+        "voice": {"bucket": bucket, "confidence": confidence, "evidence": evidence},
+        "reach": reach,
+    }
+    post.analysis_sections = json.dumps(sections)
+    post.analysed_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"sections": sections, "cached": False}
+
+
+@router.get("/post/{post_id}/analysis")
+async def get_post_analysis(post_id: int, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(get_current_user)):
+    """Whatever analysis is already stored. Never calls the LLM.
+
+    Opening a post must not spend money — generating is an explicit action.
+    """
+    post = await db.get(SocialPost, post_id)
+    if not post or post.is_adverse_event is True:
+        raise HTTPException(status_code=404, detail="Post not found")
+    if not post.analysis_sections:
+        return {"sections": None, "cached": False}
+    try:
+        return {"sections": json.loads(post.analysis_sections), "cached": True}
+    except Exception:                               # noqa: BLE001
+        return {"sections": None, "cached": False}

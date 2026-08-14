@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import AppSettings
 from app.models.app_settings import PROVIDERS
+from app.tasks.scheduler import VALID_FREQUENCIES, _normalise_frequency
 from app.auth import require_admin
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -43,8 +44,13 @@ class SettingsOut(BaseModel):
     cron_hour: int
     cron_minute: int
     cron_enabled: bool
+    auto_synthesis_enabled: bool
+    auto_synthesis_hour: int
+    auto_synthesis_after_run: bool
+    auto_synthesis_last_run: str | None = None
     cron_frequency: str
     cron_day_of_week: int
+    cron_day_of_month: int
     agent_budget_per_run: int
     llm_budget_hard_stop: int
     available_providers: dict[str, str]
@@ -71,8 +77,12 @@ class SettingsUpdate(BaseModel):
     cron_hour: int | None = None
     cron_minute: int | None = None
     cron_enabled: bool | None = None
+    auto_synthesis_enabled: bool | None = None
+    auto_synthesis_hour: int | None = None
+    auto_synthesis_after_run: bool | None = None
     cron_frequency: str | None = None
     cron_day_of_week: int | None = None
+    cron_day_of_month: int | None = None
     agent_budget_per_run: int | None = None
     llm_budget_hard_stop: int | None = None
     social_keywords: list[str] | None = None
@@ -114,8 +124,15 @@ def _to_out(s: AppSettings) -> SettingsOut:
         cron_hour=s.cron_hour,
         cron_minute=s.cron_minute,
         cron_enabled=s.cron_enabled,
-        cron_frequency=s.cron_frequency or "weekly",
+        auto_synthesis_enabled=getattr(s, 'auto_synthesis_enabled', False),
+        auto_synthesis_hour=getattr(s, 'auto_synthesis_hour', 7),
+        auto_synthesis_after_run=getattr(s, 'auto_synthesis_after_run', False),
+        auto_synthesis_last_run=(s.auto_synthesis_last_run.isoformat()
+                                 if getattr(s, 'auto_synthesis_last_run', None) else None),
+        # A row still holding the retired "daily" value reads back as weekly.
+        cron_frequency=_normalise_frequency(s.cron_frequency),
         cron_day_of_week=s.cron_day_of_week if s.cron_day_of_week is not None else 1,
+        cron_day_of_month=s.cron_day_of_month if getattr(s, "cron_day_of_month", None) is not None else 1,
         agent_budget_per_run=s.agent_budget_per_run,
         llm_budget_hard_stop=s.llm_budget_hard_stop,
         available_providers=PROVIDERS,
@@ -146,6 +163,18 @@ async def update_settings(body: SettingsUpdate, db: AsyncSession = Depends(get_d
     s = await _get_or_create(db)
     if body.llm_provider is not None and body.llm_provider not in PROVIDERS:
         raise HTTPException(status_code=422, detail=f"Unknown provider: {body.llm_provider}")
+    # Daily was retired on the client's request; reject it here so it cannot be
+    # reintroduced through the API after the UI stopped offering it.
+    if body.cron_frequency is not None and body.cron_frequency not in VALID_FREQUENCIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"cron_frequency must be one of {', '.join(VALID_FREQUENCIES)}",
+        )
+    if body.cron_day_of_month is not None and not 1 <= body.cron_day_of_month <= 28:
+        raise HTTPException(
+            status_code=422,
+            detail="cron_day_of_month must be between 1 and 28 so every month has that day",
+        )
     import json
     data = body.model_dump(exclude_none=True)
     # social_keywords / social_platforms are stored as JSON strings

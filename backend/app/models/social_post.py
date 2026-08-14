@@ -1,6 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, func
+from sqlalchemy import (Boolean, DateTime, ForeignKey, Integer, String, Text,
+                        func)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -30,12 +31,33 @@ class SocialPost(Base):
 
     hashtags: Mapped[str | None] = mapped_column(Text)              # JSON list
     query: Mapped[str | None] = mapped_column(String(255), index=True)  # hashtag/keyword/handle that found it
-    kind: Mapped[str] = mapped_column(String(16), default="field")  # kol | field
+    kind: Mapped[str] = mapped_column(String(16), default="field")  # kol | field | account | comment
     disease_area: Mapped[str | None] = mapped_column(String(64), index=True)
     topic: Mapped[str | None] = mapped_column(String(255))          # coarse topic (from query/hashtag)
 
     language: Mapped[str | None] = mapped_column(String(8))           # 'en' | 'fr' | etc.
+    # Set on comments: the post they were left under. Comments are stored as
+    # SocialPost rows on purpose — that way they inherit AE classification, the
+    # dedup hash, language detection and every read-time filter, instead of a
+    # parallel table that could quietly miss the pharmacovigilance guarantee.
+    parent_url: Mapped[str | None] = mapped_column(Text, index=True)
+    # Provenance — which source the post came from, recorded at ingest.
+    # Distinct from `language`, which is inferred from the text after the fact.
+    domain: Mapped[str | None] = mapped_column(String(255), index=True)
+    source_scope: Mapped[str | None] = mapped_column(String(8), index=True)   # 'fr' | 'global'
     llm_description: Mapped[str | None] = mapped_column(Text)        # filled on click
+
+    # The tracked account this post came from, when it came from one. Nullable
+    # because most posts arrive from keyword search and belong to no account.
+    # Attribution used to rely on the author string plus a query tag; a report
+    # per account has to be exact, so the link is a column now.
+    tracked_account_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("tracked_accounts.id", ondelete="SET NULL"), index=True)
+
+    # Cached six-section analysis of this single post. Distinct from
+    # `llm_description`, which is the older two-part describe.
+    analysis_sections: Mapped[str | None] = mapped_column(Text)
+    analysed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     content_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)

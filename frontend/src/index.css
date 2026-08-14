@@ -46,6 +46,14 @@ body {
   .glass-panel {
     @apply bg-slate-50/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800;
   }
+  /* Floating surfaces: drawers, slide-overs, modals.
+     `glass-panel` is 50% transparent, which is fine for a card sitting IN the
+     page but unreadable for anything floating ABOVE it — the page bleeds
+     straight through the panel and the two layers of text overlap. Overlays
+     must be opaque. */
+  .overlay-panel {
+    @apply bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-2xl;
+  }
 }
 
 /* Subtle film-grain / noise overlay for the app background */

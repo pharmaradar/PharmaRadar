@@ -4,6 +4,8 @@ import { Menu } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
 import Dashboard from "@/pages/Dashboard";
 import Targets from "@/pages/Targets";
+import KolModule from "@/pages/KolModule";
+import AccountTracking from "@/pages/AccountTracking";
 import Reports from "@/pages/Reports";
 import RunHistory from "@/pages/RunHistory";
 import SettingsPage from "@/pages/Settings";
@@ -32,6 +34,13 @@ function Padded({ children }: { children: React.ReactNode }) {
 function AdminRoute({ children }: { children: React.ReactNode }) {
   const role = useAuthStore((s) => s.user?.role);
   return role === "admin" ? <>{children}</> : <Navigate to="/dashboard" replace />;
+}
+
+/** Superadmin-only route. Hiding a nav link is not access control — without this
+ *  the page is still reachable by typing the URL. */
+function SuperadminRoute({ children }: { children: React.ReactNode }) {
+  const isSuperadmin = useAuthStore((s) => s.user?.is_superadmin);
+  return isSuperadmin ? <>{children}</> : <Navigate to="/dashboard" replace />;
 }
 
 function AuthedApp() {
@@ -76,10 +85,12 @@ function AuthedApp() {
           <Route path="/reports"   element={<Padded><Reports /></Padded>} />
           <Route path="/agent"     element={<Padded><Agent /></Padded>} />
           <Route path="/profile"   element={<Padded><Profile /></Padded>} />
+          <Route path="/kols"      element={<Padded><KolModule /></Padded>} />
+          <Route path="/accounts"  element={<Padded><AccountTracking /></Padded>} />
           <Route path="/targets"   element={<Padded><Targets /></Padded>} />
           <Route path="/competitors" element={<Padded><Competitors /></Padded>} />
           {/* Admin-only */}
-          <Route path="/history"   element={<AdminRoute><Padded><RunHistory /></Padded></AdminRoute>} />
+          <Route path="/history"   element={<SuperadminRoute><Padded><RunHistory /></Padded></SuperadminRoute>} />
           <Route path="/settings"  element={<AdminRoute><Padded><SettingsPage /></Padded></AdminRoute>} />
           <Route path="/users"     element={<AdminRoute><Padded><Users /></Padded></AdminRoute>} />
           <Route path="*"          element={<Navigate to="/dashboard" replace />} />

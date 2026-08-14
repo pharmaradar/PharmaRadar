@@ -18,6 +18,9 @@ import os
 from typing import Any
 
 import structlog
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 from litellm import completion, RateLimitError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -171,19 +174,46 @@ def call_llm(messages: list[dict], temperature: float = 0.2, max_tokens: int = 4
     return _dispatch(messages=messages, temperature=temperature, max_tokens=max_tokens)
 
 
+# LLM calls get their OWN thread pool, deliberately not the default one.
+#
+# `run_in_executor(None, …)` shares a single pool sized `min(32, cpu+4)` — 12
+# slots on an 8-core box, fewer on a small Railway container. Eight subsystems
+# share it: LLM calls, Apify fetches, TinyFish scraping, the literature APIs,
+# the agent. An LLM round-trip blocks a slot for 10-30s, so a handful of
+# simultaneous "Regenerate" clicks can occupy every slot and stall scraping and
+# account collection behind them — work that has nothing to do with the clicks.
+#
+# A separate bounded pool means heavy LLM use degrades LLM latency only.
+_LLM_POOL_SIZE = 6
+_llm_pool: "ThreadPoolExecutor | None" = None
+_llm_pool_lock = threading.Lock()
+
+
+def _get_llm_pool():
+    global _llm_pool
+    if _llm_pool is None:
+        with _llm_pool_lock:
+            if _llm_pool is None:
+                _llm_pool = ThreadPoolExecutor(
+                    max_workers=_LLM_POOL_SIZE, thread_name_prefix="llm")
+    return _llm_pool
+
+
 async def call_llm_async(messages: list[dict], temperature: float = 0.2,
                          max_tokens: int = 4096) -> str:
     """Awaitable wrapper for async FastAPI handlers.
 
     call_llm blocks for the full LLM round-trip (~10s on Gemini) — calling it
     directly inside an `async def` route freezes the whole event loop and every
-    concurrent request with it. This runs it in the default thread pool.
+    concurrent request with it. This runs it in a dedicated pool so it cannot
+    starve scraping and collection of their threads.
     """
     import asyncio
     from functools import partial
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, partial(call_llm, messages, temperature=temperature, max_tokens=max_tokens))
+        _get_llm_pool(),
+        partial(call_llm, messages, temperature=temperature, max_tokens=max_tokens))
 
 
 # Aliases kept for backward compat with existing task imports
@@ -264,9 +294,59 @@ def test_connection(provider: str, model: str, settings_row) -> dict:
             model_str=model_str,
             messages=[{"role": "user", "content": "Reply with the single word: pong"}],
             temperature=0,
-            max_tokens=8,
+            max_tokens=64,
             extra=extra,
         )
         return {"ok": True}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ── In-flight de-duplication ──────────────────────────────
+
+# Two clicks on the same Regenerate produce two identical LLM runs. Measured:
+# firing kol-brief twice concurrently generated it twice — same prompt, same
+# corpus, double the cost, and the loser's result is thrown away by
+# last-write-wins. This lets the second caller await the first instead.
+#
+# In-process only, which matches how these endpoints are used (one API process
+# per Railway service). A multi-replica deploy would need the flag in Redis;
+# the failure mode there is the current behaviour, not something worse.
+_inflight: dict[str, "asyncio.Future"] = {}
+_inflight_lock = threading.Lock()
+
+
+async def once_only(key: str, factory):
+    """Run `factory()` once for a given key; concurrent callers share the result.
+
+    `factory` is an async callable. Exceptions propagate to every waiter, and
+    the key is always released so a failure never wedges later attempts.
+    """
+    import asyncio
+
+    loop = asyncio.get_event_loop()
+    with _inflight_lock:
+        running = _inflight.get(key)
+        if running is not None and not running.done():
+            follow = running          # someone else is already doing this work
+        else:
+            follow = None
+            running = loop.create_future()
+            _inflight[key] = running
+
+    if follow is not None:
+        return await follow
+
+    try:
+        result = await factory()
+        if not running.done():
+            running.set_result(result)
+        return result
+    except Exception as exc:                        # noqa: BLE001 - shared with waiters
+        if not running.done():
+            running.set_exception(exc)
+        raise
+    finally:
+        with _inflight_lock:
+            if _inflight.get(key) is running:
+                _inflight.pop(key, None)

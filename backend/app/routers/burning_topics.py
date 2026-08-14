@@ -83,6 +83,15 @@ def _topic_out(t: BurningTopic, latest=None) -> dict:
     }
 
 
+def _loads_obj(raw: str | None) -> dict:
+    """JSON object loader — _loads coerces to a list, which volume is not."""
+    try:
+        value = json.loads(raw or "{}")
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
 def _report_out(r: BurningTopicReport) -> dict:
     return {
         "id": r.id,
@@ -95,6 +104,17 @@ def _report_out(r: BurningTopicReport) -> dict:
         "important_posts": _loads(r.important_posts),
         "main_authors": _loads(r.main_authors),
         "question_answers": _loads(r.question_answers),
+        # Market-research sections. Reports generated before these existed return
+        # empty values, and the UI renders a section only when it has content.
+        "what_is_said": r.what_is_said or "",
+        "voices_note": r.voices_note or "",
+        "volume_note": r.volume_note or "",
+        "subtopics": _loads(r.subtopics),
+        "voice_rows": _loads(r.voice_rows),
+        "volume": _loads_obj(r.volume),
+        "item_count": r.item_count or 0,
+        "voice_exact_share": r.voice_exact_share or 0,
+        "window_days": r.window_days or 0,
         "pdf_url": r.pdf_url,
         "created_at": r.created_at.isoformat() if r.created_at else None,
     }
@@ -193,8 +213,12 @@ async def delete_topic(topic_id: int, db: AsyncSession = Depends(get_db),
 # ── Report generation + retrieval ─────────────────────────
 
 @router.post("/{topic_id}/generate-report", status_code=status.HTTP_202_ACCEPTED)
-async def generate_report(topic_id: int, db: AsyncSession = Depends(get_db),
+async def generate_report(topic_id: int, period_days: int | None = None,
+                          db: AsyncSession = Depends(get_db),
                           user: User = Depends(get_current_user)):
+    """Queue a report. `period_days` overrides the topic's window for this run
+    only — the client asked for a date filter without having to edit the topic
+    every time. The chosen window is recorded on the report row."""
     topic = await _get_topic_or_404(topic_id, db)
     if not topic.is_active:
         raise HTTPException(status_code=422, detail="Topic is inactive — reactivate it first")
@@ -213,7 +237,13 @@ async def generate_report(topic_id: int, db: AsyncSession = Depends(get_db),
     # fresh generation per topic per day (existing reports stay readable).
     enforce_daily_generation(user, f"burning_topic:{topic_id}")
 
-    report = BurningTopicReport(topic_id=topic_id, status="pending")
+    window = topic.period_days or 30
+    if period_days is not None:
+        if not 1 <= period_days <= 365:
+            raise HTTPException(status_code=422, detail="period_days must be between 1 and 365")
+        window = period_days
+
+    report = BurningTopicReport(topic_id=topic_id, status="pending", window_days=window)
     db.add(report)
     await db.commit()
     await db.refresh(report)
@@ -314,7 +344,7 @@ async def followup(topic_id: int, report_id: int, body: FollowupRequest,
     # run in a thread pool, same as routers/agent.py
     loop = asyncio.get_event_loop()
     try:
-        answer = await loop.run_in_executor(None, partial(call_llm, messages, max_tokens=2048))
+        answer = await loop.run_in_executor(None, partial(call_llm, messages, max_tokens=8192))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(exc)[:200]}")
 

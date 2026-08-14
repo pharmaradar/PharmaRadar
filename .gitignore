@@ -67,3 +67,8 @@ Thumbs.db
 
 # ── Logs ───────────────────────────────────────────────────
 *.log
+
+# ── Config exports ─────────────────────────────────────────
+# scripts/seed_config.py output: no credentials, but it is the client's
+# target and account list.
+backend/config.json

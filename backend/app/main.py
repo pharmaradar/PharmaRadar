@@ -13,6 +13,7 @@ from sqlalchemy import text
 from app.config import get_settings
 from app.database import engine, Base
 from app.routers import targets, runs, reports, settings as settings_router, agent
+from app.routers import accounts as accounts_router
 from app.routers import discovery as discovery_router
 from app.routers import social as social_router
 from app.routers import auth as auth_router
@@ -69,6 +70,12 @@ if _settings.sentry_dsn:
 
 
 _DEFAULT_SECRET = "changeme-at-least-32-chars-long!!"
+
+# Standard reporting window for briefs, syntheses and dashboard stats (client
+# spec: reports and summaries default to the last 30 days). This is a *read*
+# window only — the scrape window (AppSettings.social_window_days) stays deeper
+# so widening a view costs nothing, the data is already there.
+BRIEF_WINDOW_DAYS = 30
 
 
 def _verify_secret_key() -> None:
@@ -201,17 +208,19 @@ async def _seed_defaults_locked(sess) -> None:
                 # French patient communities
                 "https://www.facebook.com/RespirEspoir",                    # Lung cancer France
                 "https://www.facebook.com/Cancer.Info.Service",
-                # Global pharma (for competitive intelligence)
-                "https://www.facebook.com/AstraZenecaGlobal",
-                "https://www.facebook.com/BristolMyersSquibb",
-                "https://www.facebook.com/merck",
-                "https://www.facebook.com/LillyOncology",
-                # Oncology congresses
+                # Oncology congresses — kept despite being international: a
+                # congress is definitionally global, and these pages are the
+                # source for the congress module.
                 "https://www.facebook.com/ASCO.org",
                 "https://www.facebook.com/esmo.oncology",
-                # WHO / global health
-                "https://www.facebook.com/WHO",
             ]
+            # Global pharma and WHO pages were removed from the seed on
+            # 2026-08-12: Facebook is the one platform where the source is
+            # chosen outright, so spending those slots on worldwide corporate
+            # feeds contradicted the France-first requirement. Competitors are
+            # tracked through their French affiliates instead (see
+            # services/fr_sources.FR_PHARMA). Add them back per-page in
+            # Settings if worldwide competitor coverage is wanted.
             s.facebook_page_urls = json.dumps(default_fb_pages)
             await sess.commit()
             logger.info("seeded_facebook_page_urls", count=len(default_fb_pages))
@@ -234,6 +243,11 @@ async def _seed_defaults_locked(sess) -> None:
                 "immunothérapie", "chimiothérapie", "essaiclinique",
                 "rechercheclinique", "rechercheencancérologie", "biomarqueurs",
                 "médecinepersonnalisée", "thérapieciblée", "oncologie",
+                # French clinical shorthand — CBNPC is what French oncologists
+                # write for NSCLC, so an English-only term list cannot reach them.
+                "CBNPC", "cancerbronchique", "oncologiethoracique",
+                "depistagepoumon", "therapieciblee", "soinsdesupport",
+                "survieglobale", "GustaveRoussy", "InstitutCurie", "IFCT",
                 # French patient communities
                 "luttecontrelecancer", "patientsexperts", "cancersurvivants",
                 "octobrerose", "marsbleu", "vaincrelecancer",
@@ -328,6 +342,7 @@ app.include_router(settings_router.router)
 app.include_router(agent.router)
 app.include_router(discovery_router.router)
 app.include_router(social_router.router)
+app.include_router(accounts_router.router)
 app.include_router(burning_topics_router.router)
 app.include_router(congress_router.router)
 
@@ -338,7 +353,7 @@ async def health():
 
 
 @app.get("/api/stats/topics")
-async def stats_topics(days: int = 7, disease_area: str | None = None):
+async def stats_topics(days: int = BRIEF_WINDOW_DAYS, disease_area: str | None = None):
     """Return top discussed topics and categories for the dashboard graphs."""
     import math
     from app.database import AsyncSessionLocal
@@ -487,11 +502,34 @@ def _extract_brief_strings(raw: str) -> list[str]:
         except Exception:
             pass
 
-    # 2) Fallback: pull quoted sentences (survives a truncated array).
+    # 2) Split on ITEM BOUNDARIES, not on quotes.
+    #
+    # The old fallback matched quoted runs, which shatters a string containing
+    # an unescaped inner quote — a model writing  Roche's "Alecensa" in NSCLC
+    # yielded the fragment ' in NSCLC...' as if it were a whole finding, and it
+    # rendered that way on the dashboard. A real item boundary is  ", "  so
+    # split on that instead and tolerate quotes inside an item.
+    if m:
+        body = m.group(0).strip()[1:-1].strip()          # drop the [ ]
+        parts = _re.split(r'"\s*,\s*"', body)
+        if parts:
+            out = []
+            for part in parts:
+                text = part.strip().strip('"').strip()
+                # Unescape what json.loads would have handled.
+                text = text.replace('\\"', '"').replace("\\n", " ").strip()
+                if len(text) >= 20:
+                    out.append(text)
+            if out:
+                return out
+
+    # 3) Last resort: quoted sentences. Fragments are dropped — a point that
+    #    starts mid-sentence is noise, and showing it as a finding is worse
+    #    than showing one point fewer.
     strings = _re.findall(r'"((?:[^"\\]|\\.)+[.!?])"', raw)
     if not strings:
         strings = [s for s in _re.findall(r'"((?:[^"\\]|\\.){20,})"', raw) if not s.startswith("http")]
-    return strings
+    return [s.strip() for s in strings if s.strip() and s.strip()[0].isupper()]
 
 
 def _brief_priority(s: str) -> str:
@@ -502,11 +540,11 @@ def _brief_priority(s: str) -> str:
 
 @app.get("/api/stats/daily-brief")
 async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily_brief"))):
-    """Combined KOL + Social brief — 6-month data window. Cached 6h."""
+    """Combined KOL + Social brief — 30-day data window. Cached 6h."""
     import json as _json, re as _re
     from datetime import datetime, timezone, timedelta
 
-    _KEY = "combined_brief:v3"
+    _KEY = "combined_brief:v4"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -529,13 +567,13 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
-            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(ExtractedInsight.extracted_at >= window_start)
             .where(insight_not_ae())
             .order_by(desc(ExtractedInsight.extracted_at))
             .limit(60)
@@ -544,7 +582,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
 
         social_rows = await sess.execute(
             select(SocialPost)
-            .where(SocialPost.scraped_at >= six_months)
+            .where(SocialPost.scraped_at >= window_start)
             .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2))
             .limit(20)
@@ -564,15 +602,16 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         for p in social_posts
     ) or "No social posts."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("combined_brief")
 
     prompt = (
         "You are a senior pharma intelligence analyst for Roche's oncology strategy team.\n\n"
-        "Below are real KOL statements and top social media posts from the last 6 months.\n"
+        "Below are real KOL statements and top social media posts from the last 30 days.\n"
         "Generate sharp, SPECIFIC intelligence points combining both KOL and social signals — "
-        "exactly 3 to 5 points (never fewer than 3), the MOST important ones only.\n\n"
+        "5 to 8 points (never fewer than 5), ordered most important first. Cover "
+        "DISTINCT angles — do not restate one finding several ways.\n\n"
         "Rules:\n"
         "- Every point must matter to Roche France specifically — its drugs, its competitors, "
         "or its oncology strategy in France\n"
@@ -581,7 +620,8 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         "- Flag competitive threats or unmet needs explicitly\n"
         "- Do NOT write generic statements — trace every point back to the data\n"
         "- Each point max 30 words\n"
-        "- You MUST return a minimum of 3 points even if signals are sparse\n\n"
+        "- You MUST return at least 5 points; if signals are genuinely sparse, "
+        "cover more of the material rather than repeating a point\n\n"
         f"KOL STATEMENTS ({len(insights)}):\n{insights_text}\n\n"
         f"TOP SOCIAL POSTS ({len(social_posts)}):\n{social_text}\n\n"
         "Return ONLY a JSON array of at least 3 (up to 5) strings. No markdown:\n"
@@ -591,10 +631,20 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:daily-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("combined_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
-        points = [{"text": s, "source": "both", "priority": _brief_priority(s)} for s in strings[:7]]
+        points = [{"text": s, "source": "both", "priority": _brief_priority(s)} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -694,7 +744,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
         for p in social_posts
     ) or "No matching social posts."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import re as _re2
 
     def _extract_sec(text: str, marker: str) -> str:
@@ -719,7 +769,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
 
     detail = {}
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         detail = {
             "summary": _extract_sec(raw, "SUMMARY") or point_text,
             "so_what": _extract_sec(raw, "SO_WHAT"),
@@ -747,12 +797,12 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
 
 @app.get("/api/stats/social-brief")
 async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("social_brief"))):
-    """Sector-grouped social trends brief — 200 posts, 6-month window."""
+    """Sector-grouped social trends brief — 200 posts, 30-day window."""
     import json as _json, re as _re
     from datetime import datetime, timezone, timedelta
     from collections import defaultdict
 
-    _KEY = "social_brief:v3"
+    _KEY = "social_brief:v4"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -772,12 +822,12 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         rows = await sess.execute(
             select(SocialPost)
-            .where(SocialPost.scraped_at >= six_months)
+            .where(SocialPost.scraped_at >= window_start)
             .where(social_not_ae())
             .order_by(desc(SocialPost.likes + SocialPost.comments * 2 + SocialPost.shares * 1.5))
             .limit(200)
@@ -809,13 +859,13 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
         for p in posts[:80] if (p.topic or p.query) in topic_set
     )
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("social_brief")
 
     prompt = (
         "You are a senior pharma social media intelligence analyst for Roche.\n\n"
-        f"Analyzed {len(posts)} posts from Instagram, X, LinkedIn, Facebook over 6 months.\n\n"
+        f"Analyzed {len(posts)} posts from Instagram, X, LinkedIn, Facebook over the last 30 days.\n\n"
         f"TOP TOPICS BY ENGAGEMENT:\n{topics_detail}\n\n"
         f"SAMPLE POSTS:\n{posts_sample}\n\n"
         "Generate a structured intelligence report organized into 4-5 SECTORS "
@@ -835,7 +885,17 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
     llm_error = None
     sections = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:social-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("social_brief.llm_raw", raw=raw[:500])
         raw_clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
         m = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
@@ -879,11 +939,11 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
 
 @app.get("/api/stats/kol-brief")
 async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_brief"))):
-    """KOL-only brief — 6-month insights window. Cached 6h."""
+    """KOL-only brief — 30-day insights window. Cached 6h."""
     import json as _json, re as _re
     from datetime import datetime, timezone, timedelta
 
-    _KEY = "kol_brief:v3"
+    _KEY = "kol_brief:v4"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -903,13 +963,13 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
-            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(ExtractedInsight.extracted_at >= window_start)
             .where(insight_not_ae())
             .where(Target.target_type == "kol")   # competitor content must NOT bleed into the KOL brief
             .order_by(desc(ExtractedInsight.extracted_at))
@@ -925,15 +985,16 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         for ins, name in insights
     )
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("kol_brief")
 
     prompt = (
         "You are a senior pharma intelligence analyst for Roche's oncology strategy team.\n\n"
-        f"Below are {len(insights)} real KOL statements from the last 6 months.\n"
+        f"Below are {len(insights)} real KOL statements from the last 30 days.\n"
         "Generate sharp, SPECIFIC intelligence points based ONLY on what these KOLs said — "
-        "exactly 3 to 5 points (never fewer than 3), the MOST important ones only.\n\n"
+        "5 to 8 points (never fewer than 5), ordered most important first. Cover "
+        "DISTINCT angles — do not restate one finding several ways.\n\n"
         "Rules:\n"
         "- Every point must matter to Roche France specifically — its drugs, its competitors, "
         "or its oncology strategy in France\n"
@@ -942,7 +1003,8 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         "- Flag competitive threats, unmet needs, or sentiment shifts explicitly\n"
         "- Do NOT write generic statements — trace every point back to a specific KOL\n"
         "- Each point max 30 words\n"
-        "- You MUST return a minimum of 3 points even if signals are sparse\n\n"
+        "- You MUST return at least 5 points; if signals are genuinely sparse, "
+        "cover more of the material rather than repeating a point\n\n"
         f"KOL STATEMENTS:\n{insights_text}\n\n"
         "Return ONLY a JSON array of at least 3 (up to 5) strings. No markdown:\n"
         '["point 1", "point 2", "point 3"]'
@@ -951,10 +1013,20 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:kol-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("kol_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
-        points = [{"text": s, "source": "kol", "priority": _brief_priority(s)} for s in strings[:7]]
+        points = [{"text": s, "source": "kol", "priority": _brief_priority(s)} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -984,7 +1056,7 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     import json as _json
     from datetime import datetime, timezone, timedelta
 
-    _KEY = "competitor_brief:v1"
+    _KEY = "competitor_brief:v2"
     _UKEY = f"{_KEY}:u{user.id}"
     r = None
     try:
@@ -1006,13 +1078,13 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     from sqlalchemy import select, desc
 
     now = datetime.now(timezone.utc)
-    six_months = now - timedelta(days=180)
+    window_start = now - timedelta(days=BRIEF_WINDOW_DAYS)
 
     async with AsyncSessionLocal() as sess:
         ins_rows = await sess.execute(
             select(ExtractedInsight, Target.name)
             .join(Target, ExtractedInsight.target_id == Target.id)
-            .where(ExtractedInsight.extracted_at >= six_months)
+            .where(ExtractedInsight.extracted_at >= window_start)
             .where(insight_not_ae())
             .where(Target.target_type == "competitor")
             .order_by(desc(ExtractedInsight.extracted_at))
@@ -1031,15 +1103,16 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         for ins, name in insights
     )
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("competitor_brief")
 
     prompt = (
         "You are a senior competitive-intelligence analyst for Roche's oncology strategy team.\n\n"
         f"Below are {len(insights)} statements/publications from monitored COMPETITOR accounts "
-        "(rival pharma companies) over the last 6 months.\n"
-        "Generate sharp, SPECIFIC competitive-intelligence points — exactly 3 to 5 points "
+        "(rival pharma companies) over the last 30 days.\n"
+        "Generate sharp, SPECIFIC competitive-intelligence points — 5 to 8 points, "
+        "ordered most important first, each on a DISTINCT angle "
         "(never fewer than 3), the MOST important ones only.\n\n"
         "Rules:\n"
         "- Focus on what competitors are launching, claiming, trialing, or signalling\n"
@@ -1055,10 +1128,20 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:competitor-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("competitor_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
-        points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:7]]
+        points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -1211,7 +1294,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
         for p in social_posts
     ) or "(no social posts)"
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
     import structlog as _sl
     _log = _sl.get_logger("combined_synth")
@@ -1239,7 +1322,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
     takeaway = so_what = conclusion = ""
     focus: list[str] = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=4000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("combined_synth.llm_raw", raw=raw[:400])
         takeaway = trim_incomplete(extract_section(raw, "TAKEAWAY"))
         so_what = trim_incomplete(extract_section(raw, "SO_WHAT"))
@@ -1272,7 +1355,12 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
 
 _GEN_FEATURES = ["daily_brief", "kol_brief", "social_brief", "synthesis",
                  "comparison_brief", "social_synthesis", "discovery_synthesis",
-                 "competitor_brief", "global_synthesis"]
+                 "competitor_brief", "global_synthesis",
+                 # The three downloadable dashboard syntheses. Quota keys must
+                 # match the f"synthesis_{scope}" used in routers/reports.py.
+                 "synthesis_kol", "synthesis_competitor", "synthesis_comprehensive",
+                 # Ad-hoc Topic Explorer market-research report.
+                 "market_report"]
 
 
 @app.get("/api/me/gen-quota")
@@ -1350,7 +1438,7 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         for p in social_posts
     ) or "No social data."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("comparison_brief")
 
@@ -1374,12 +1462,22 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:comparison-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("comparison_brief.llm_raw", raw=raw[:400])
         strings = _re.findall(r'"((?:[^"\\]|\\.)+[.!?])"', raw)
         if not strings:
             strings = [s for s in _re.findall(r'"((?:[^"\\]|\\.){20,})"', raw) if not s.startswith("http")]
-        points = [{"text": s, "source": "both", "priority": "high"} for s in strings[:7]]
+        points = [{"text": s, "source": "both", "priority": "high"} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -1446,7 +1544,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
         for p in posts[:12]
     ) or "No matching posts found."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
 
     def _extract_section(text: str, marker: str) -> str:
         """Extract content between ##MARKER## and next ## or end."""
@@ -1472,7 +1570,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
 
     detail: dict = {}
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         detail = {
             "summary":  _extract_section(raw, "SUMMARY") or point_text,
             "so_what":  _extract_section(raw, "SO_WHAT"),
@@ -1503,6 +1601,78 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
 
 
 # ── SPA fallback ──────────────────────────────────────────
+
+@app.get("/api/stats/share-of-voice")
+async def share_of_voice(days: int = BRIEF_WINDOW_DAYS, source: str = "all",
+                         user=Depends(get_current_user)):
+    """Share of voice by product — Roche assets versus the competition.
+
+    A brand lead thinks in assets, not topics: is the conversation about
+    Tecentriq or Keytruda, and are we gaining or losing ground? Everything here
+    is counted from text already stored — no extra scraping, no LLM call — so it
+    is free to compute and refreshes as soon as a run lands.
+
+    `source`: all | kol | social.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    from sqlalchemy import select, desc
+
+    from app.database import AsyncSessionLocal
+    from app.models import ExtractedInsight, ScrapedPost, SocialPost, Target
+    from app.services.ae_filter import post_not_ae, social_not_ae
+    from app.services.brands import BRANDS, tally
+
+    window = max(1, min(days, 365))
+    since = datetime.now(timezone.utc) - timedelta(days=window)
+    items: list[dict] = []
+
+    async with AsyncSessionLocal() as sess:
+        if source in ("all", "kol"):
+            rows = await sess.execute(
+                select(ExtractedInsight, Target.name, ScrapedPost.domain)
+                .join(Target, ExtractedInsight.target_id == Target.id)
+                .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
+                .where(ExtractedInsight.extracted_at >= since)
+                .where(post_not_ae())
+                .order_by(desc(ExtractedInsight.extracted_at))
+                .limit(1000)
+            )
+            for insight, name, domain in rows.all():
+                items.append({
+                    # Topic carries the drug name as often as the quote does.
+                    "text": f"{insight.topic or ''} {insight.what_they_said or ''}",
+                    "sentiment": insight.sentiment,
+                    "engagement": 0,
+                    "source": name or domain or "",
+                })
+
+        if source in ("all", "social"):
+            rows = await sess.execute(
+                select(SocialPost)
+                .where(SocialPost.scraped_at >= since)
+                .where(social_not_ae())
+                .order_by(desc(SocialPost.scraped_at))
+                .limit(1000)
+            )
+            for post in rows.scalars().all():
+                items.append({
+                    "text": f"{post.topic or ''} {post.text or ''}",
+                    "sentiment": None,     # social posts carry no rated sentiment
+                    "engagement": (post.likes or 0) + 2 * (post.comments or 0),
+                    "source": post.author or post.domain or post.platform or "",
+                })
+
+    result = tally(items)
+    result.update({
+        "window_days": window,
+        "source": source,
+        "items_scanned": len(items),
+        "tracked_brands": len(BRANDS),
+    })
+    return result
+
+
 _spa_dir = Path(__file__).parent.parent.parent / "frontend" / "dist"
 if _spa_dir.exists():
     app.mount("/assets", StaticFiles(directory=str(_spa_dir / "assets")), name="assets")

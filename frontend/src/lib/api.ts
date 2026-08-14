@@ -70,12 +70,62 @@ export interface EmergingVoice {
   }[];
 }
 
+export type SynthesisScope = "kol" | "competitor" | "comprehensive";
+
+export interface SynthesisSource {
+  n: number;
+  target: string;
+  topic: string;
+  url: string;
+  source_name: string;
+  date: string;
+  quote: string;
+}
+
+export interface SynthesisKeyPost {
+  target: string;
+  topic: string;
+  said: string;
+  url: string;
+  source_name: string;
+  date: string;
+  why: string;
+}
+
+/** One downloadable dashboard synthesis: Main information / So what /
+ *  Recommendations / What to watch / Key articles & posts, plus the resolved
+ *  sources every claim cites. */
+export interface SynthesisReport {
+  scope: SynthesisScope;
+  title: string;
+  generated_at: string;
+  insight_count: number;
+  pdf_url: string | null;
+  error?: string | null;
+  main: string[];
+  so_what: string;
+  recommendations: string[];
+  watch: string[];
+  key_posts: SynthesisKeyPost[];
+  sources: SynthesisSource[];
+}
+
+export interface SynthesisState {
+  scope: SynthesisScope;
+  status: "idle" | "running" | "done" | "error";
+  error?: string | null;
+  result: SynthesisReport | null;
+}
+
 export interface GlobalSynthesis {
   exec_summary: string;
   kol_takeaways: string[];
   population_takeaways: string[];
   topic_takeaways: string[];
   so_what: string;
+  /** Actionable next steps. Optional: reports generated before this field
+   *  existed are still stored and rendered. */
+  recommendations?: string[];
   important_posts: (BurningTopicImportantPost & { why?: string })[];
   sections_present: { kol: boolean; population: boolean; burning_topics: number };
   generated_at: string;
@@ -128,8 +178,17 @@ export interface AppSettings {
   cron_hour: number;
   cron_minute: number;
   cron_enabled: boolean;
+  /** Regenerate the dashboard syntheses on a schedule / after a pipeline run,
+   *  instead of requiring a click per artefact. */
+  auto_synthesis_enabled?: boolean;
+  auto_synthesis_hour?: number;
+  auto_synthesis_after_run?: boolean;
+  auto_synthesis_last_run?: string | null;
+  /** "weekly" | "monthly" — daily was retired on the client's request. */
   cron_frequency: string;
   cron_day_of_week: number;
+  /** 1-28 for monthly mode, capped so no month skips the run. */
+  cron_day_of_month: number;
   agent_budget_per_run: number;
   llm_budget_hard_stop: number;
   available_providers: Record<string, string>;
@@ -144,6 +203,103 @@ export interface AppSettings {
   facebook_page_urls: string[];
   apify_configured: boolean;
   social_lang_filter: string;
+}
+
+export interface KolCandidate {
+  openalex_id: string;
+  name: string;
+  papers_on_topic: number;
+  tracked: boolean;
+  institution?: string | null;
+  institution_country?: string | null;
+  france_based?: boolean;
+  works_count?: number;
+  cited_by_count?: number;
+  topics?: string[];
+}
+
+export interface KolProfileCard {
+  id: number;
+  name: string;
+  target_type: "kol" | "competitor";
+  active: boolean;
+  disease_area: string | null;
+  twitter_handle: string | null;
+  linkedin_url: string | null;
+  insight_count: number;
+  last_activity: string | null;
+  summary_bullets: string[];
+  so_what: string | null;
+  summary_generated_at: string | null;
+}
+
+export interface KolStatement {
+  id: number; topic: string; what_they_said: string; sentiment: string;
+  category: string; url: string; source_name: string; source_scope: string; date: string;
+}
+
+/** A KOL's publication and trial record, computed from registry metadata
+ *  rather than read out of abstracts — journals, citations and co-authors are
+ *  facts, and inferring them would put invented numbers in front of a reader. */
+export interface KolResearch {
+  publication_count: number;
+  trial_count: number;
+  total_citations: number;
+  open_access_count: number;
+  top_journals: { journal: string; count: number }[];
+  /** Who they publish with. `tracked: false` is the actionable half — an
+   *  influential voice outside the current audience. */
+  collaborators: { name: string; papers: number; tracked: boolean }[];
+  publications: {
+    title: string; url: string; journal: string | null; date: string;
+    cited_by: number; open_access: boolean;
+  }[];
+  trials: {
+    title: string; url: string; nct_id: string | null;
+    phase: string | null; status: string | null; date: string;
+  }[];
+}
+
+export interface KolProfile extends KolProfileCard {
+  known_urls: string[];
+  window_days: number;
+  research?: KolResearch;
+  sentiment: Record<string, number>;
+  top_topics: { topic: string; count: number }[];
+  per_week: Record<string, number>;
+  statements: KolStatement[];
+}
+
+/** Share of voice by product — a brand lead thinks in assets, not topics. */
+export interface BrandRow {
+  brand: string; owner: string; is_ours: boolean; indication: string;
+  mentions: number; share: number;
+  sentiment: Record<string, number>;
+  /** Net sentiment across rated mentions only; null when nothing carried an opinion. */
+  net_sentiment: number | null;
+  rated_mentions: number; engagement: number; sources: number;
+}
+
+export interface ShareOfVoice {
+  window_days: number; source: string; items_scanned: number; tracked_brands: number;
+  total_mentions: number; roche_mentions: number; competitor_mentions: number;
+  roche_share: number;
+  brands: BrandRow[];
+  by_owner: { owner: string; is_ours: boolean; mentions: number; share: number; brands: string[] }[];
+}
+
+export interface TrackedAccount {
+  id: number;
+  platform: "twitter" | "linkedin" | "instagram" | "facebook";
+  handle: string;
+  url: string | null;
+  label: string | null;
+  category: string | null;
+  active: boolean;
+  /** Posts attributed to this account so far. 0 means the handle has never
+   *  yielded anything — usually a wrong slug, which fails silently otherwise. */
+  post_count?: number;
+  last_seen?: string | null;
 }
 
 export interface SocialPost {
@@ -196,6 +352,71 @@ export interface SocialScanStatus {
   finished_at?: string;
 }
 
+/** Ad-hoc market-research report produced by Topic Explorer. Voice distribution
+ *  and volume are computed from rows, not written by the model. */
+export interface MarketReportVoiceRow {
+  bucket: string; label: string; mentions: number; percent: number;
+}
+
+export interface MarketReportVolume {
+  total: number;
+  by_kind: Record<string, number>;
+  dated: number;
+  /** % of mentions carrying a usable date — the weekly trend covers only these. */
+  date_coverage: number;
+  per_week: Record<string, number>;
+  total_engagement: number;
+  window_days: number;
+}
+
+export interface MarketReportSource {
+  n: number; kind: string; author: string; url: string;
+  source_name: string; date: string; quote: string;
+}
+
+export interface MarketReportKeyPost {
+  kind: string; author: string; url: string; source_name: string;
+  date: string; text: string; engagement: number;
+  /** Combined line, kept for reports generated before the split below. */
+  why: string;
+  /** What this specific item claims or reports. */
+  says?: string;
+  /** How Roche can use it — the action, opening or risk it creates. */
+  benefit?: string;
+}
+
+export interface MarketReport {
+  id: number;
+  question: string;
+  status: "pending" | "running" | "done" | "failed";
+  error?: string | null;
+  window_days: number;
+  language: string | null;
+  exec_summary: string;
+  so_what: string;
+  what_is_said: string;
+  voices_note: string;
+  volume_note: string;
+  subtopics: string[];
+  voice_rows: MarketReportVoiceRow[];
+  /** Main speakers on this question. `tracked: false` marks a voice outside the
+   *  current audience — a candidate KOL. Replaces the old side panel. */
+  main_authors: MarketReportAuthor[];
+  volume: MarketReportVolume;
+  key_posts: MarketReportKeyPost[];
+  sources: MarketReportSource[];
+  item_count: number;
+  /** % of voices identified from tracked records rather than inferred. */
+  voice_exact_share: number;
+  pdf_url: string | null;
+  created_at: string;
+}
+
+export interface MarketReportSummary {
+  id: number; question: string; status: string;
+  item_count: number; pdf_url: string | null; created_at: string;
+}
+
 export interface DiscoveryResult {
   id: number;
   query: string;
@@ -210,6 +431,8 @@ export interface DiscoveryResult {
   media_type: "article" | "video" | "pdf" | "linkedin" | "twitter" | "social" | "research";
   thumbnail_url: string | null;
   language: string;
+  /** Provenance recorded at ingest: "fr" when the domain is a French source. */
+  source_scope: "fr" | "global";
   llm_description: string | null;
 }
 
@@ -318,7 +541,20 @@ export interface BurningTopicImportantPost {
   engagement: number;
   platform?: string;
   kind?: string;
+  /** Combined line, kept for reports stored before the split below. */
   why?: string;
+  /** What this item actually claims or reports. */
+  says?: string;
+  /** How Roche can use it — the action, opening or risk it creates. */
+  benefit?: string;
+}
+
+export interface MarketReportAuthor {
+  author: string;
+  mentions: number;
+  engagement: number;
+  platforms: string[];
+  tracked: boolean;
 }
 
 export interface BurningTopicAuthor {
@@ -346,6 +582,17 @@ export interface BurningTopicReport {
   important_posts: BurningTopicImportantPost[];
   main_authors: BurningTopicAuthor[];
   question_answers: ReportQuestionAnswer[];
+  /** Market-research sections. Empty on reports generated before they existed —
+   *  the UI renders each section only when it has content. */
+  what_is_said: string;
+  voices_note: string;
+  volume_note: string;
+  subtopics: string[];
+  voice_rows: MarketReportVoiceRow[];
+  volume: Partial<MarketReportVolume>;
+  item_count: number;
+  voice_exact_share: number;
+  window_days: number;
   pdf_url: string | null;
   created_at: string;
 }
@@ -380,6 +627,114 @@ export interface TopicsData {
 }
 
 // ── API calls ─────────────────────────────────────────────
+
+/** A social account the platform collects directly, rather than by keyword luck. */
+export interface TrackedAccountFull {
+  id: number;
+  platform: "twitter" | "linkedin" | "instagram" | "facebook";
+  handle: string;
+  url: string | null;
+  label: string | null;
+  full_name: string | null;
+  role: string | null;
+  category: string | null;
+  notes: string | null;
+  active: boolean;
+  post_count: number;
+  analysis?: AccountAnalysis;
+  last_scanned_at: string | null;
+  /** ok | empty | error — "empty" means the scan ran and found nothing, which
+   *  is what a mistyped handle looks like from the outside. */
+  last_scan_status: "ok" | "empty" | "error" | null;
+}
+
+/** Cached AI read of what a tracked account talks about. `stale` means posts
+ *  arrived after it was written, so it covers only `post_count` of them. */
+export interface AccountAnalysis {
+  summary: string | null;
+  so_what: string | null;
+  themes: string[];
+  generated_at: string | null;
+  stale: boolean;
+  post_count: number;
+  /** Full market-research analysis. Voice distribution and volume are computed
+   *  from the rows, not written by the model. */
+  /** Blob/local URL of the last exported PDF, if one was generated. */
+  pdf_url?: string | null;
+  sections?: {
+    exec_summary?: string;
+    so_what?: string;
+    what_is_said?: string;
+    voices_note?: string;
+    volume_note?: string;
+    subtopics?: string[];
+    /** Per-post reading: what a specific post says and how we can use it. */
+    key_posts?: {
+      url: string; author: string; platform: string; date: string;
+      engagement: number; comments: number;
+      says: string; benefit: string; text: string;
+    }[];
+    voice_rows?: MarketReportVoiceRow[];
+    voice_exact_share?: number;
+    volume?: MarketReportVolume;
+    item_count?: number;
+  };
+}
+
+/** Six-section analysis of one post. `voice` and `reach` are computed from the
+ *  row, not written by the model. */
+export interface PostAnalysis {
+  exec_summary: string;
+  so_what: string;
+  what_is_said: string;
+  voice_note: string;
+  reach_note: string;
+  subtopics: string[];
+  voice: { bucket: string; confidence: string; evidence: string };
+  reach: {
+    available: boolean; likes: number; comments: number; views: number;
+    engagement: number; platform_average: number | null;
+    vs_average: number | null; platform: string; note: string | null;
+  };
+}
+
+export interface AccountPost {
+  id: number;
+  url: string;
+  text: string | null;
+  /** Only Instagram and Facebook carry images — TinyFish search results (X,
+   *  LinkedIn) have none, so cards must render without one. */
+  thumbnail_url: string | null;
+  platform: string;
+  author: string | null;
+  likes: number;
+  comments: number;
+  views: number;
+  language: string | null;
+  kind: string;
+  /** When they published. Null on LinkedIn and X, whose search results carry no
+   *  publication date — so the UI shows collected_at and labels it honestly. */
+  posted_at: string | null;
+  collected_at: string | null;
+}
+
+export interface AccountDetail {
+  account: TrackedAccountFull;
+  window_days: number;
+  posts: AccountPost[];
+  stats: { posts_in_window: number; total_engagement: number; dated_posts: number };
+}
+
+export interface AccountScanStatus {
+  running: boolean;
+  total?: number;
+  done?: number;
+  saved?: number;
+  current?: string;
+  error?: string | null;
+  finished_at?: string;
+}
+
 export const api = {
   stats: () => req<Stats>("/stats"),
   combinedSynthesis: (refresh = false) =>
@@ -453,13 +808,28 @@ export const api = {
     stop: () => req<{ stopped: boolean }>("/runs/stop", { method: "POST" }),
     generatePdfs: () => req<{ status: string; run_id: number }>("/runs/generate-pdfs", { method: "POST" }),
     resetAll: () => req<{ db_cleared: boolean; blobs_deleted: number; chroma_reset: boolean }>("/runs/reset-all", { method: "POST" }),
+    // Super admin only — backend 403s for everyone else.
+    remove: (id: number) =>
+      req<{ deleted: number; summaries_detached: number }>(`/runs/${id}`, { method: "DELETE" }),
   },
 
   reports: {
     latest: (limit = 20) => req<Insight[]>(`/reports/latest?limit=${limit}`),
+    /** Cached analysis of one insight — never triggers an LLM call. */
+    insightAnalysis: (id: number) =>
+      req<{ sections: PostAnalysis | null; cached: boolean }>(
+        `/reports/insight/${id}/analysis`),
+    analyseInsight: (id: number, refresh = false) =>
+      req<{ sections: PostAnalysis; cached: boolean }>(
+        `/reports/insight/${id}/analyse?refresh=${refresh}`, { method: "POST" }),
     list: () => req<{ path: string; name: string; size: number; url: string; uploadedAt?: string }[]>("/reports/"),
     triggerGlobalSynthesis: () =>
       req<{ status: string }>("/reports/global-synthesis", { method: "POST" }),
+    // The three downloadable dashboard syntheses.
+    triggerSynthesis: (scope: SynthesisScope) =>
+      req<{ status: string; scope: SynthesisScope }>(`/reports/synthesis/${scope}`, { method: "POST" }),
+    synthesis: (scope: SynthesisScope) =>
+      req<SynthesisState>(`/reports/synthesis/${scope}`),
     globalSynthesis: () =>
       req<{ status: "idle" | "running" | "done" | "failed"; error?: string | null; result: GlobalSynthesis | null }>(
         "/reports/global-synthesis"
@@ -475,6 +845,28 @@ export const api = {
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
     },
   },
+
+  // KOL module — surfaces the per-target summaries the pipeline already writes.
+  kolProfiles: (q?: string, targetType = "kol") =>
+    req<{ profiles: KolProfileCard[] }>(
+      `/targets/profiles?target_type=${targetType}` + (q ? `&q=${encodeURIComponent(q)}` : "")),
+  kolProfile: (id: number, days = 30) =>
+    req<KolProfile>(`/targets/${id}/profile?days=${days}`),
+  /** Write this person's synthesis now, without waiting for a pipeline run. */
+  regenerateKolSummary: (id: number) =>
+    req<{ queued: boolean; insights: number }>(
+      `/targets/${id}/summary`, { method: "POST" }),
+  /** Who leads a topic in France, ranked by publication volume, flagged
+   *  tracked or not. Free (OpenAlex) — the spec's stakeholder identification. */
+  discoverKols: (topic = "lung cancer", limit = 25) =>
+    req<{
+      topic: string; tracked_count: number;
+      candidates: KolCandidate[]; authors: KolCandidate[];
+    }>(`/targets/discover?topic=${encodeURIComponent(topic)}&limit=${limit}`),
+  refreshAllSyntheses: () =>
+    req<{ queued: boolean }>("/reports/syntheses/refresh", { method: "POST" }),
+  shareOfVoice: (days = 30, source = "all") =>
+    req<ShareOfVoice>(`/stats/share-of-voice?days=${days}&source=${source}`),
 
   settings: {
     get: () => req<AppSettings>("/settings/"),
@@ -529,32 +921,108 @@ export const api = {
         `/discovery/emerging-voices?${qs.toString()}`
       );
     },
-    synthesis: (query: string, lang = "all", refresh = false) =>
+    // Market-research report: queue, poll, list.
+    createReport: (question: string, windowDays = 30, lang = "fr") =>
+      req<{ id: number; status: string }>("/discovery/report", {
+        method: "POST",
+        body: JSON.stringify({ question, window_days: windowDays, lang }),
+      }),
+    report: (id: number) => req<MarketReport>(`/discovery/report/${id}`),
+    /** The newest finished report for this exact question, or null. Free —
+     *  reuse costs nothing, generation draws on the small daily quota. */
+    findReport: (question: string, windowDays = 30, lang = "fr") =>
+      req<{ report: MarketReport | null }>(
+        `/discovery/report/by-question?q=${encodeURIComponent(question)}` +
+        `&window_days=${windowDays}&language=${lang}`),
+    reports: (limit = 20) =>
+      req<{ reports: MarketReportSummary[] }>(`/discovery/reports?limit=${limit}`),
+    synthesis: (query: string, lang = "fr", refresh = false) =>
       req<DiscoverySynthesis>("/discovery/synthesis", {
         method: "POST",
         body: JSON.stringify({ query, lang, refresh }),
       }),
   },
 
+  accounts: {
+    list: () => req<{
+      accounts: TrackedAccountFull[]; platforms: string[]; roles: string[];
+      totals: { accounts: number; active: number; producing: number; posts: number };
+    }>("/accounts"),
+    detail: (id: number, days = 90) =>
+      req<AccountDetail>(`/accounts/${id}?days=${days}`),
+    create: (body: Partial<TrackedAccountFull>) =>
+      req<TrackedAccountFull>("/accounts", { method: "POST", body: JSON.stringify(body) }),
+    update: (id: number, body: Partial<TrackedAccountFull>) =>
+      req<TrackedAccountFull>(`/accounts/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    remove: (id: number) =>
+      req<{ deleted: number }>(`/accounts/${id}`, { method: "DELETE" }),
+    refresh: (id: number) =>
+      req<{ queued: boolean }>(`/accounts/${id}/refresh`, { method: "POST" }),
+    // Bulk pause/resume. Sends the ids on screen rather than "all", so the
+    // button means what the current filter shows.
+    setActive: (ids: number[], active: boolean) =>
+      req<{ updated: number; active: boolean }>("/accounts/active", {
+        method: "POST", body: JSON.stringify({ ids, active }),
+      }),
+    scanAll: () => req<{ queued: boolean }>("/accounts/scan", { method: "POST" }),
+    reportPdf: (id: number) =>
+      req<{ pdf_url: string }>(`/accounts/${id}/report/pdf`, { method: "POST" }),
+    analyse: (id: number, refresh = false) =>
+      req<TrackedAccountFull & { cached: boolean; posts_analysed?: number }>(
+        `/accounts/${id}/analyse?refresh=${refresh}`, { method: "POST" }),
+    status: () => req<AccountScanStatus>("/accounts/status"),
+  },
+
   social: {
-    trends: (days = 180, platform = "all", kind = "all", limit = 60) =>
+    // `language` must be sent explicitly: the API defaults to "fr" (France-first),
+    // so omitting it silently narrows the pool and breaks the Global toggle.
+    trends: (days = 30, platform = "all", kind = "all", limit = 60, language = "fr") =>
       req<SocialTrends>(
-        `/social/trends?days=${days}&platform=${platform}&kind=${kind}&limit=${limit}`
+        `/social/trends?days=${days}&platform=${platform}&kind=${kind}&limit=${limit}` +
+        `&language=${language}`
       ),
+    // Tracked accounts registry — the client's "define and track specific accounts".
+    accounts: () => req<{ accounts: TrackedAccount[] }>("/social/accounts"),
+    createAccount: (body: Partial<TrackedAccount>) =>
+      req<TrackedAccount>("/social/accounts", { method: "POST", body: JSON.stringify(body) }),
+    updateAccount: (id: number, body: Partial<TrackedAccount>) =>
+      req<TrackedAccount>(`/social/accounts/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+    deleteAccount: (id: number) =>
+      req<{ deleted: number }>(`/social/accounts/${id}`, { method: "DELETE" }),
     scan: (lang?: string) => req<{ started: boolean; task_id: string; lang: string | null }>(
       `/social/scan${lang ? `?lang=${lang}` : ""}`, { method: "POST" }),
     clearPosts: () => req<{ deleted: number }>("/social/posts", { method: "DELETE" }),
     status: () => req<SocialScanStatus>("/social/status"),
-    timeseries: (days = 180, top = 6) =>
+    timeseries: (days = 30, top = 6) =>
       req<SocialTimeseries>(`/social/timeseries?days=${days}&top=${top}`),
+    /** Cached analysis only — never triggers an LLM call. */
+    postAnalysis: (id: number) =>
+      req<{ sections: PostAnalysis | null; cached: boolean }>(
+        `/social/post/${id}/analysis`),
+    analysePost: (id: number, refresh = false) =>
+      req<{ sections: PostAnalysis; cached: boolean }>(
+        `/social/post/${id}/analyse?refresh=${refresh}`, { method: "POST" }),
     describe: (id: number) =>
       req<{ description: string; so_what: string | null; cached: boolean }>("/social/describe", {
         method: "POST",
         body: JSON.stringify({ id }),
       }),
-    discover: (q: string, fresh = true, lang: string = "fr") =>
-      req<{ query: string; results: SocialPost[]; fetching: boolean }>(
-        `/social/discover?q=${encodeURIComponent(q)}&fresh=${fresh}&lang=${lang}`
+    /** Ad-hoc social search. A multi-word query is treated as a question and
+     *  expanded into bilingual terms server-side, so `terms` reports what was
+     *  actually matched and `total_matched` the pool before the display cap. */
+    /** Ad-hoc social search. A multi-word query is treated as a question and
+     *  expanded into bilingual terms server-side, so `terms` reports what was
+     *  actually matched and `total_matched` the pool before the display cap.
+     *  `cached: true` means this phrase was already collected recently and no
+     *  paid fetch was issued — pass `force` to collect again anyway. */
+    discover: (q: string, fresh = true, lang: string = "fr", limit = 120,
+               force = false) =>
+      req<{
+        query: string; results: SocialPost[]; fetching: boolean; cached?: boolean;
+        terms?: string[]; total_matched?: number;
+      }>(
+        `/social/discover?q=${encodeURIComponent(q)}&fresh=${fresh}&lang=${lang}` +
+        `&limit=${limit}&force=${force}`
       ),
     discoverStatus: (q: string) =>
       req<{ running: boolean; inserted?: number; error?: string; terms?: string[] }>(
@@ -579,8 +1047,13 @@ export const api = {
       period_days: number; exclusion_words: string[]; restriction_terms: string[]; is_active: boolean;
     }>) => req<BurningTopic>(`/burning-topics/${id}`, { method: "PUT", body: JSON.stringify(body) }),
     remove: (id: number) => req<void>(`/burning-topics/${id}`, { method: "DELETE" }),
-    generate: (id: number) =>
-      req<{ report_id: number; status: string }>(`/burning-topics/${id}/generate-report`, { method: "POST" }),
+    // periodDays overrides the topic's window for this run only.
+    generate: (id: number, periodDays?: number) =>
+      req<{ report_id: number; status: string }>(
+        `/burning-topics/${id}/generate-report` +
+        (periodDays ? `?period_days=${periodDays}` : ""),
+        { method: "POST" },
+      ),
     reports: (id: number) => req<BurningTopicReport[]>(`/burning-topics/${id}/reports`),
     followup: (topicId: number, reportId: number, question: string, history: { role: string; content: string }[]) =>
       req<{ answer: string }>(`/burning-topics/${topicId}/reports/${reportId}/followup`, {

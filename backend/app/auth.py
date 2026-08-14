@@ -139,6 +139,14 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+async def require_superadmin(user: User = Depends(get_current_user)) -> User:
+    """Owner-only. Stricter than require_admin — for destructive, unauditable
+    actions (e.g. erasing run history) that even a regular admin shouldn't do."""
+    if not getattr(user, "is_superadmin", False):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Super admin access required")
+    return user
+
+
 async def get_optional_user(
     token: str | None = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),

@@ -4,6 +4,8 @@ import {
   Flame, Heart, MessageCircle, Eye, Share2, ExternalLink, X,
   Sparkles, Loader2, Search, RefreshCw, SlidersHorizontal, Clock,
 } from "lucide-react";
+import MarketResearchReport from "@/components/MarketResearchReport";
+import PostAnalysisPanel from "@/components/PostAnalysisPanel";
 import { api, type SocialPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
@@ -41,9 +43,14 @@ const DATE_RANGES = [
 ];
 
 const KIND_OPTIONS = [
-  { value: "all",   label: "All posts" },
-  { value: "field", label: "Medical field" },
-  { value: "kol",   label: "KOLs" },
+  { value: "all",     label: "All posts" },
+  { value: "field",   label: "Medical field" },
+  { value: "kol",     label: "KOLs" },
+  // The account lanes tag their rows kind="account" and the API already filters
+  // on it, but there was no way to ask for them — so posts collected from the
+  // accounts the client chose to track were indistinguishable from keyword luck.
+  { value: "account", label: "Tracked accounts" },
+  { value: "comment", label: "Comments" },
 ];
 
 const MIN_LIKES_OPTIONS = [
@@ -54,13 +61,17 @@ const MIN_LIKES_OPTIONS = [
 ];
 
 // Defaults — used for "reset" detection and actual reset
-const LANGUAGE_OPTIONS = [
-  { value: "all", label: "Global (all)" },
-  { value: "fr",  label: "France only" },
-  { value: "en",  label: "English only" },
+// Region, not language. The server selects on `source_scope` — WHERE a post
+// came from — because a French institution writing in English is French-market
+// content, and a Quebec account writing in French is not. Labelling this
+// "Language" described the wrong thing and invited the client-side re-filter
+// removed below.
+const REGION_OPTIONS = [
+  { value: "fr",  label: "France" },
+  { value: "all", label: "Worldwide" },
 ];
 
-const DEFAULTS = { sortBy: "trending", platform: "all", days: 30, kind: "all", minLikes: 0, language: "all", fromDate: "", toDate: "" };
+const DEFAULTS = { sortBy: "trending", platform: "all", days: 30, kind: "all", minLikes: 0, language: "fr", fromDate: "", toDate: "" };
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -131,10 +142,13 @@ export default function SocialTrends() {
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings.get });
   const apifyOn = !!settings?.apify_configured;
 
-  // Single generous fetch — all filtering/sorting done client-side for instant UX
+  // One generous fetch per language scope — days/platform/kind filtering stays
+  // client-side for instant UX. Language is server-side because the API is
+  // France-first by default; it is in the query key so switching to Global
+  // refetches the wider pool instead of filtering an already-French one.
   const { data: allData } = useQuery({
-    queryKey: ["social-trends-all"],
-    queryFn: () => api.social.trends(180, "all", "all", 500),
+    queryKey: ["social-trends-all", language],
+    queryFn: () => api.social.trends(180, "all", "all", 500, language),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -168,6 +182,18 @@ export default function SocialTrends() {
     queryFn: () => api.social.discover(submitted, false, language),
     enabled: submitted.length > 1,
   });
+  // Explicit re-collection, bypassing the "already fetched" cache.
+  const forceMut = useMutation({
+    mutationFn: () => api.social.discover(submitted, true, language, 120, true),
+    onMutate: () => {
+      setPolls(0);
+      setSearching(true);
+      searchStartedAt.current = Date.now();
+      seenRunning.current = false;
+    },
+    onError: () => setSearching(false),
+  });
+
   const searchMut = useMutation({
     mutationFn: () => api.social.discover(submitted, true, language),
     // onMutate (not onSuccess): setSubmitted() enables the searchData query
@@ -192,7 +218,12 @@ export default function SocialTrends() {
     enabled: searching && submitted.length > 1,
     refetchInterval: searching ? 3000 : false,
   });
-  const expandedTerms = discoverStatus?.terms ?? [];
+  // Terms the search actually matched on. The read path expands the question
+  // itself now, so this no longer waits for a live scrape to report back —
+  // which never happened at all when Apify was out of quota.
+  const expandedTerms = searchData?.terms?.length
+    ? searchData.terms
+    : (discoverStatus?.terms ?? []);
 
   // Drive searching state from discoverStatus.running, not a fixed poll count.
   // "Done" only when we've confirmed the task started (seenRunning OR >15s elapsed)
@@ -231,7 +262,7 @@ export default function SocialTrends() {
     if (apifyOn) searchMut.mutate();
   }
   function clearSearch() { setSubmitted(""); setQuery(""); setSearching(false); setPolls(0); }
-  function resetFilters() { setSortBy(DEFAULTS.sortBy); setPlatform(DEFAULTS.platform); setDays(DEFAULTS.days); setKind(DEFAULTS.kind); setMinLikes(DEFAULTS.minLikes); setLanguage("all"); setFromDate(DEFAULTS.fromDate); setToDate(DEFAULTS.toDate); setTopicFilter(null); }
+  function resetFilters() { setSortBy(DEFAULTS.sortBy); setPlatform(DEFAULTS.platform); setDays(DEFAULTS.days); setKind(DEFAULTS.kind); setMinLikes(DEFAULTS.minLikes); setLanguage(DEFAULTS.language); setFromDate(DEFAULTS.fromDate); setToDate(DEFAULTS.toDate); setTopicFilter(null); }
 
   const allPosts = allData?.top_posts ?? [];
 
@@ -249,7 +280,9 @@ export default function SocialTrends() {
     if (kind !== "all")      posts = posts.filter(p => p.kind === kind);
     if (minLikes > 0)        posts = posts.filter(p => (p.likes ?? 0) >= minLikes);
     if (topicFilter)         posts = posts.filter(p => p.topic === topicFilter);
-    if (language !== "all")  posts = posts.filter(p => p.language === language);
+    // No client-side region filter: the API already selected by source_scope.
+    // Re-filtering on the DETECTED language here silently dropped French
+    // institutions that post in English — 21 posts on the current corpus.
     if (fromDate)            posts = posts.filter(p => p.posted_at && p.posted_at >= fromDate);
     if (toDate)              posts = posts.filter(p => p.posted_at && p.posted_at <= toDate + "T23:59:59Z");
     // Date filter on posted_at; skip posts with no date
@@ -268,7 +301,6 @@ export default function SocialTrends() {
     let base = [...allPosts];
     if (kind !== "all")      base = base.filter(p => p.kind === kind);
     if (minLikes > 0)        base = base.filter(p => (p.likes ?? 0) >= minLikes);
-    if (language !== "all")  base = base.filter(p => p.language === language);
     if (fromDate)            base = base.filter(p => p.posted_at && p.posted_at >= fromDate);
     if (toDate)              base = base.filter(p => p.posted_at && p.posted_at <= toDate + "T23:59:59Z");
     base = base.filter(p => !p.posted_at || p.posted_at >= cutoff);
@@ -294,7 +326,7 @@ export default function SocialTrends() {
   const searchPosts = searchData?.results ?? [];
   const isDefault = sortBy === DEFAULTS.sortBy && platform === DEFAULTS.platform &&
     days === DEFAULTS.days && kind === DEFAULTS.kind && minLikes === DEFAULTS.minLikes &&
-    language === "all" && !fromDate && !toDate && !topicFilter;
+    language === DEFAULTS.language && !fromDate && !toDate && !topicFilter;
 
   return (
     <div className="glass rounded-xl flex flex-col h-full overflow-hidden">
@@ -395,8 +427,8 @@ export default function SocialTrends() {
               </div>
             </FilterSection>
 
-            <FilterSection title="Language">
-              {LANGUAGE_OPTIONS.map(o => (
+            <FilterSection title="Region">
+              {REGION_OPTIONS.map(o => (
                 <FilterBtn key={o.value} active={language === o.value} onClick={() => setLanguage(o.value)}>
                   {o.label}
                 </FilterBtn>
@@ -459,6 +491,21 @@ export default function SocialTrends() {
                     <RefreshCw size={11} className="animate-spin" /> Searching…
                   </span>
                 )}
+                {/* Say when a search was answered from what we already hold. A
+                    repeat search costs nothing, and the user should know that
+                    rather than wonder why nothing was collected. */}
+                {!searching && searchData?.cached && (
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-white/5 text-gray-500">
+                      from posts already collected
+                    </span>
+                    <button onClick={() => forceMut.mutate()}
+                      title="Collect this phrase again from the platforms (uses Apify credit)"
+                      className="text-[10px] text-pharma-blue hover:underline">
+                      collect again
+                    </button>
+                  </span>
+                )}
                 {/* Show LLM-expanded terms once available */}
                 {expandedTerms.length > 0 && (
                   <span className="flex items-center gap-1 flex-wrap">
@@ -478,6 +525,21 @@ export default function SocialTrends() {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
                   {searchPosts.map(p => <PostCard key={p.id} post={p} onClick={() => setSelected(p)} />)}
+                </div>
+              )}
+
+              {/* A question deserves an answer, not just a list of posts. Same
+                  component as Topic Explorer, so the format is identical: it
+                  reuses an existing report for this question and only writes a
+                  new one when there is none. Skipped for one-word lookups,
+                  which are a filter rather than a question. */}
+              {submitted.trim().split(/\s+/).length >= 3 && (
+                <div className="mt-5">
+                  <MarketResearchReport
+                    question={submitted}
+                    windowDays={30}
+                    lang={language === "fr" ? "fr" : language}
+                  />
                 </div>
               )}
             </div>
@@ -581,7 +643,12 @@ export default function SocialTrends() {
         </div>
       </div>
 
-      {selected && <DescribeModal post={selected} onClose={() => setSelected(null)} />}
+      {selected && (
+        <PostAnalysisPanel postId={selected.id} onClose={() => setSelected(null)}
+          withDescribe
+          post={{ text: selected.text, author: selected.author,
+                  platform: selected.platform, url: selected.post_url }} />
+      )}
     </div>
   );
 }

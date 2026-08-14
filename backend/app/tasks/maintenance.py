@@ -148,8 +148,21 @@ async def _reap_reports() -> dict:
 # per-post LLM call at ingest) and any scraped post whose extraction predates
 # the AE feature or whose classification block failed to parse.
 
-_AE_BATCH_TOTAL = 30       # max posts classified per sweep (beat fires every 4h)
+# Unclassified posts are VISIBLE (`IS NOT TRUE` semantics in ae_filter), so the
+# backlog is a regulatory exposure window, not just a queue: until a post is
+# screened it can appear in a client-facing report. At 30 posts per 4h sweep
+# that window was ~2.3 days for a 410-post backlog, and it GREW faster than it
+# drained whenever collection ran — a sweep collecting 500 posts outpaces
+# 180/day permanently.
+#
+# So the sweep now drains rather than nibbles: it keeps classifying until the
+# backlog is empty or the per-sweep cap is hit, and beat fires hourly. Capacity
+# goes from ~180/day to ~4,800/day, which stays ahead of any realistic scrape.
 _AE_BATCH_PER_CALL = 15    # posts per LLM call — compact prompt, cheap model
+_AE_BATCH_TOTAL = 30       # posts fetched per drain iteration
+_AE_SWEEP_CAP = 200        # hard stop per sweep, so one run cannot loop forever
+# Leaves headroom under the 600s soft limit for the final commit.
+_AE_SWEEP_SECONDS = 420
 
 _AE_CLASSIFY_PROMPT = (
     "You are a pharmacovigilance classifier for a pharma intelligence system.\n"
@@ -166,10 +179,56 @@ _AE_CLASSIFY_PROMPT = (
 @celery_app.task(name="app.tasks.maintenance.classify_ae_backfill", queue="llm",
                  soft_time_limit=600, time_limit=720)
 def classify_ae_backfill() -> dict:
-    """Beat-fired. Classifies a small batch of unclassified posts per sweep —
-    rate-limit pacing comes from the batch cap + llm_router's built-in
-    exponential backoff on 429s."""
-    return asyncio.run(_classify_ae())
+    """Beat-fired. Drains the unclassified backlog, bounded by cap and clock.
+
+    Rate-limit pacing comes from the batch size + llm_router's built-in
+    exponential backoff on 429s.
+    """
+    return asyncio.run(_drain_ae())
+
+
+async def _drain_ae() -> dict:
+    """Classify until the backlog is empty, the cap is reached, or time runs out."""
+    import time
+
+    started = time.monotonic()
+    totals = {"classified": 0, "flagged": 0, "iterations": 0}
+    while totals["classified"] < _AE_SWEEP_CAP:
+        if time.monotonic() - started > _AE_SWEEP_SECONDS:
+            logger.info("ae_backfill.time_capped", **totals)
+            break
+        result = await _classify_ae()
+        totals["iterations"] += 1
+        totals["classified"] += result["classified"]
+        totals["flagged"] += result["flagged"]
+        # Nothing classified means the backlog is empty, or every remaining post
+        # failed even as a single — either way, looping again achieves nothing.
+        if result["classified"] == 0:
+            break
+
+    remaining = await _ae_backlog()
+    totals["remaining"] = remaining
+    if totals["classified"] or remaining:
+        logger.info("ae_backfill.sweep", **totals)
+    return totals
+
+
+async def _ae_backlog() -> int:
+    """How many posts are still unscreened — the exposure window, measured."""
+    from sqlalchemy import func, select
+
+    from app.database import CelerySessionLocal
+    from app.models import ScrapedPost, SocialPost
+
+    async with CelerySessionLocal() as sess:
+        social = await sess.execute(
+            select(func.count()).select_from(SocialPost)
+            .where(SocialPost.is_adverse_event.is_(None), SocialPost.text.is_not(None)))
+        scraped = await sess.execute(
+            select(func.count()).select_from(ScrapedPost)
+            .where(ScrapedPost.is_adverse_event.is_(None),
+                   ScrapedPost.raw_content.is_not(None)))
+        return (social.scalar() or 0) + (scraped.scalar() or 0)
 
 
 def _classify_llm_batch(items: list[tuple[int, str]]) -> dict[int, tuple[bool, str | None]]:
@@ -183,7 +242,7 @@ def _classify_llm_batch(items: list[tuple[int, str]]) -> dict[int, tuple[bool, s
     try:
         raw = call_llm(
             [{"role": "user", "content": _AE_CLASSIFY_PROMPT.replace("{posts_block}", block)}],
-            temperature=0.0, max_tokens=1500,
+            temperature=0.0, max_tokens=4096,
         )
         cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
         m = re.search(r"\[.*\]", cleaned, re.DOTALL)

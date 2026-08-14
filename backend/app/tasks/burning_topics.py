@@ -85,9 +85,16 @@ async def _load_congress_questions(congress_id: int) -> list:
 
 
 def _topic_terms(topic) -> tuple[list[str], list[str]]:
+    from app.services.term_expansion import expand_terms
+
     terms = [topic.name.strip()]
     terms.extend(item.strip() for item in _loads(topic.restriction_terms)
                  if isinstance(item, str) and item.strip())
+    # Topic names are written in English against a deliberately French corpus,
+    # so the literal name matches almost nothing — "subcutaneous administration"
+    # scored 0 rows while the French wording was present. Expansion only ever
+    # adds spellings, so a topic keeps everything it matched before.
+    terms = expand_terms(terms)
     exclusions = [item.strip() for item in _loads(topic.exclusion_words)
                   if isinstance(item, str) and item.strip()]
     return list(dict.fromkeys(terms)), list(dict.fromkeys(exclusions))
@@ -111,14 +118,17 @@ def _scope_terms(topic=None, congress=None) -> tuple[list[str], list[str]]:
     return _topic_terms(topic)
 
 
-def _scope_window(topic=None, congress=None) -> tuple[datetime, datetime]:
+def _scope_window(topic=None, congress=None, window_days: int | None = None) -> tuple[datetime, datetime]:
+    """Report window. A congress has fixed dates; a topic uses `window_days` when
+    the caller chose one for this run, otherwise the topic's own setting."""
     if congress is not None:
         start = datetime.combine(congress.start_date, datetime.min.time(), tzinfo=timezone.utc)
         end_date = congress.end_date + timedelta(days=1)
         end = datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc)
         return start, end
     end = datetime.now(timezone.utc)
-    return end - timedelta(days=topic.period_days or 30), end
+    days = window_days or (topic.period_days if topic is not None else None) or 30
+    return end - timedelta(days=days), end
 
 
 def _match_any(terms: list[str], *columns):
@@ -168,18 +178,19 @@ def _scraped_window_condition(congress, start: datetime, end: datetime):
     )
 
 
-async def _gather_db_posts(topic=None, congress=None) -> list[dict]:
+async def _gather_db_posts(topic=None, congress=None, window_days: int | None = None) -> list[dict]:
     """Gather matching KOL and social rows for the selected report scope."""
     from sqlalchemy import desc, func, select
     from app.database import CelerySessionLocal
     from app.models import ScrapedPost, SocialPost, Target
 
     terms, exclusions = _scope_terms(topic, congress)
-    start, end = _scope_window(topic, congress)
+    start, end = _scope_window(topic, congress, window_days)
     candidates: list[dict] = []
 
     async with CelerySessionLocal() as sess:
         from app.services.ae_filter import post_not_ae, social_not_ae
+        from app.services.fr_sources import Scope
         kol_query = (
             select(ScrapedPost, Target.name)
             .join(Target, ScrapedPost.target_id == Target.id)
@@ -216,8 +227,24 @@ async def _gather_db_posts(topic=None, congress=None) -> list[dict]:
             .where(_match_any(terms, SocialPost.text, SocialPost.topic, SocialPost.hashtags))
             .where(social_not_ae())
         )
-        if topic is not None and topic.language_filter:
-            social_query = social_query.where(SocialPost.language == topic.language_filter)
+        if topic is not None:
+            # France is a SOURCE property, not a language one. Filtering by
+            # detected language both over- and under-selects: it admits
+            # francophone Quebec/Belgian accounts and hides French institutions
+            # that publish in English. Measured on this corpus: 21 French-source
+            # posts wrongly excluded, 75 non-French-source posts wrongly let in.
+            #
+            # French is also the DEFAULT, not an opt-in. The client's brief is
+            # that all content be limited to French sources; a topic saved
+            # without a language set previously got no restriction at all, and
+            # 8 global posts reached a report that way. `all` is the explicit
+            # escape hatch for the rare topic that genuinely needs worldwide
+            # coverage.
+            wanted = (topic.language_filter or "fr").lower()
+            if wanted == "fr":
+                social_query = social_query.where(SocialPost.source_scope == Scope.FR.value)
+            elif wanted != "all":
+                social_query = social_query.where(SocialPost.language == wanted)
         social_query = _exclude(
             social_query, exclusions, SocialPost.text, SocialPost.topic, SocialPost.hashtags
         )
@@ -249,10 +276,19 @@ def _scope_search_query(topic=None, congress=None) -> str:
 
 
 def _web_context(topic=None, exclusions: list[str] | None = None, congress=None) -> list[dict]:
-    """Run one best-effort TinyFish discovery search for the report scope."""
+    """Run one best-effort TinyFish discovery search for the report scope.
+
+    Burning topics are the client's own French-market topics, so their web
+    context is searched at the French locale. Congresses are the deliberate
+    exception: ASCO/ESMO/AACR are international events, and pinning them to
+    French sources returns nothing — the report would still be written and
+    marked done, just empty. See services/fr_sources.Scope.
+    """
     try:
+        from app.services.fr_sources import Scope
         from app.services.scraper import _tf_search_discovery
-        hits = _tf_search_discovery(_scope_search_query(topic, congress)) or []
+        scope = Scope.GLOBAL.value if congress is not None else Scope.FR.value
+        hits = _tf_search_discovery(_scope_search_query(topic, congress), scope=scope) or []
     except Exception as exc:
         logger.warning("report.tinyfish_failed", error=str(exc)[:200])
         return []
@@ -308,6 +344,25 @@ def _compute_main_authors(candidates: list[dict]) -> list[dict]:
 _PICK_ANY_RE = re.compile(r"\[(\d+)\]\s*(.+)")
 
 
+def _split_says_benefit(body: str) -> dict:
+    """Split "SAYS: … | BENEFIT: …" into its two halves.
+
+    Forgiving about the separator: models alternate between '|', an em dash and
+    a newline, and losing the whole line to punctuation is worse than an
+    imperfect split. Anything unparseable stays as `says` so no content is lost.
+    """
+    text = (body or "").strip()
+    says, benefit = text, ""
+    lowered = text.lower()
+    if "benefit:" in lowered:
+        cut = lowered.index("benefit:")
+        says, benefit = text[:cut], text[cut + len("benefit:"):]
+    says = says.strip().strip("|—-").strip()
+    if says.lower().startswith("says:"):
+        says = says[5:].strip()
+    return {"says": says, "benefit": benefit.strip().strip("|").strip(), "why": text}
+
+
 def _parse_picks_loose(text: str) -> list[dict]:
     picks = []
     for line in (text or "").splitlines():
@@ -327,9 +382,63 @@ def _extract_numbered_section(raw: str, name: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _synthesize(topic, candidates: list[dict], congress=None) -> dict:
+def _voice_and_volume(candidates: list[dict]) -> tuple[dict, dict]:
+    """Count who is speaking and how much, from the rows themselves.
+
+    Asking the model for these numbers produces confident figures with nothing
+    behind them, so they are computed and handed to it instead. `kind == "kol"`
+    is exact: those rows come from a ScrapedPost joined to a tracked Target.
+    See services/voice_profile for what the other buckets can and cannot know.
+    """
+    from app.services.market_report import compute_volume
+    from app.services.voice_profile import build_breakdown
+
+    voices = build_breakdown([
+        {
+            "author": item.get("author"),
+            "url": item.get("url") or "",
+            "is_tracked_kol": item.get("kind") == "kol",
+            "target_type": "kol" if item.get("kind") == "kol" else None,
+        }
+        for item in candidates
+    ])
+    dated = []
+    for item in candidates:
+        stamp = None
+        raw = (item.get("date") or "").strip()
+        if raw:
+            try:
+                stamp = datetime.fromisoformat(raw[:10]).replace(tzinfo=timezone.utc)
+            except ValueError:
+                stamp = None
+        dated.append({
+            "kind": item.get("kind") or "item",
+            "at": stamp,
+            "engagement": item.get("engagement") or 0,
+        })
+    return voices, compute_volume(dated, 0)
+
+
+def _synthesize(topic, candidates: list[dict], congress=None,
+                window_days: int | None = None) -> dict:
     from app.services.llm_router import call_llm
     from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
+
+    voices, volume = _voice_and_volume(candidates)
+    voice_line = ", ".join(
+        f"{row['label']}: {row['mentions']} ({row['percent']}%)" for row in voices.as_rows()
+    ) or "no attributable voices"
+    volume_line = (
+        f"{volume['total']} mentions ("
+        + ", ".join(f"{k}: {v}" for k, v in volume["by_kind"].items())
+        + f"); {volume['dated']} carry a usable date ({volume['date_coverage']}% coverage)"
+    )
+    computed = (
+        "\n\nTwo sections are already COMPUTED from the underlying rows — interpret "
+        "them, do not recount or contradict them:\n"
+        f"  VOICE DISTRIBUTION: {voice_line}\n"
+        f"  VOLUME: {volume_line}\n"
+    )
 
     lines = []
     for index, item in enumerate(candidates, 1):
@@ -349,17 +458,28 @@ def _synthesize(topic, candidates: list[dict], congress=None) -> dict:
         system = (
             "You are a pharma intelligence analyst for Roche France writing a burning-topic "
             "report. Base everything strictly on the numbered posts provided; never invent "
-            f"posts, authors or numbers.{lang_note} Output EXACTLY these five sections with "
+            f"posts, authors or numbers.{lang_note} Output EXACTLY these sections with "
             "these markers and nothing else:\n"
             "##SUMMARY##\n2-3 short paragraphs on what is happening around this topic.\n"
             "##KEY_FINDINGS##\n5-8 lines, one specific finding per line, starting with '- '.\n"
             "##SO_WHAT##\nOne paragraph: implications and recommended focus for pharma/Roche.\n"
-            "##IMPORTANT_POSTS##\n5-8 lines like '[12] one line on why this post matters'.\n"
+            "##WHAT_IS_SAID##\n4-6 paragraphs on the substance of the conversation: the "
+            "positions taken, where they agree and diverge, the arguments used, the tone.\n"
+            "##VOICES##\n2-3 paragraphs interpreting the voice distribution given above: "
+            "who drives this conversation, who is absent, and what that imbalance means.\n"
+            "##VOLUME##\n1-2 paragraphs interpreting the volume figures given above, "
+            "including the direction of travel and any caveat about date coverage.\n"
+            "##SUBTOPICS##\n4-6 lines starting '- ': sub-topics worth tracking next, with why.\n"
+            "##IMPORTANT_POSTS##\n5-8 lines, each EXACTLY in this form:\n"
+            "[12] SAYS: what that specific item actually claims or reports, in one "
+            "sentence. | BENEFIT: how Roche can use it — the concrete action, "
+            "opening or risk it creates, in one sentence.\n"
             "##MAIN_AUTHORS##\nOne line per notable author: '- Author Name - their role in this conversation'."
         )
         user = (
             f"TOPIC: {topic.name}\nDESCRIPTION: {topic.description or '-'}\n"
-            f"PERIOD: last {topic.period_days} days\n\nPOSTS/ARTICLES ({len(candidates)}):\n"
+            f"PERIOD: last {window_days or topic.period_days} days\n\nPOSTS/ARTICLES ({len(candidates)}):\n"
+            + computed
             + "\n".join(lines)
         )
         questions = []
@@ -382,7 +502,17 @@ def _synthesize(topic, candidates: list[dict], congress=None) -> dict:
             "##SUMMARY##\n2-3 short paragraphs of the main learnings.\n"
             "##KEY_FINDINGS##\n5-8 specific learnings, one per line starting '- '.\n"
             "##SO_WHAT##\nOne paragraph explaining implications for pharma/Roche.\n"
-            "##IMPORTANT_POSTS##\n5-8 lines like '[12] why this post or article matters'.\n"
+            "##WHAT_IS_SAID##\n4-6 paragraphs on the substance of the conversation: the "
+            "positions taken, where they agree and diverge, the arguments used, the tone.\n"
+            "##VOICES##\n2-3 paragraphs interpreting the voice distribution given above: "
+            "who drives this conversation, who is absent, and what that imbalance means.\n"
+            "##VOLUME##\n1-2 paragraphs interpreting the volume figures given above, "
+            "including the direction of travel and any caveat about date coverage.\n"
+            "##SUBTOPICS##\n4-6 lines starting '- ': sub-topics worth tracking next, with why.\n"
+            "##IMPORTANT_POSTS##\n5-8 lines, each EXACTLY in this form:\n"
+            "[12] SAYS: what that specific item actually claims or reports, in one "
+            "sentence. | BENEFIT: how Roche can use it — the concrete action, "
+            "opening or risk it creates, in one sentence.\n"
             "##MAIN_AUTHORS##\nOne line per notable author: '- Author Name - their role in this conversation'."
         )
         question_text = "\n".join(
@@ -392,14 +522,17 @@ def _synthesize(topic, candidates: list[dict], congress=None) -> dict:
             f"CONGRESS: {congress.name}\n"
             f"DATE WINDOW: {congress.start_date.isoformat()} to {congress.end_date.isoformat()}\n"
             f"DISEASE AREA: {congress.disease_area or '-'}\n\n"
-            f"CONFIGURED QUESTIONS:\n{question_text}\n\n"
-            f"POSTS/ARTICLES ({len(candidates)}):\n" + "\n".join(lines)
+            f"CONFIGURED QUESTIONS:\n{question_text}\n"
+            + computed
+            + f"\nPOSTS/ARTICLES ({len(candidates)}):\n" + "\n".join(lines)
         )
 
     raw = call_llm(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.3,
-        max_tokens=4096,
+        # More sections now, and gemini-2.5-flash spends this same budget on
+        # reasoning — 4096 truncated the tail sections.
+        max_tokens=8192,
     )
 
     key_findings = parse_bullets(extract_section(raw, "KEY_FINDINGS"))
@@ -415,7 +548,10 @@ def _synthesize(topic, candidates: list[dict], congress=None) -> dict:
                 "engagement": item["engagement"],
                 "platform": item["platform"],
                 "kind": item["kind"],
-                "why": pick["why"],
+                # Split the reading from the use, matching the market report and
+                # account analyses. `why` stays populated for reports stored
+                # before the split and for the PDF renderer.
+                **_split_says_benefit(pick["why"]),
             })
 
     main_authors = _compute_main_authors(candidates)
@@ -451,6 +587,16 @@ def _synthesize(topic, candidates: list[dict], congress=None) -> dict:
         "important_posts": important_posts,
         "main_authors": main_authors,
         "question_answers": question_answers,
+        # Market-research sections. The prose comes from the model; the voice and
+        # volume figures are the ones computed above and merely interpreted by it.
+        "what_is_said": trim_incomplete(extract_section(raw, "WHAT_IS_SAID")),
+        "voices_note": trim_incomplete(extract_section(raw, "VOICES")),
+        "volume_note": trim_incomplete(extract_section(raw, "VOLUME")),
+        "subtopics": parse_bullets(extract_section(raw, "SUBTOPICS")),
+        "voice_rows": voices.as_rows(),
+        "voice_exact_share": round(voices.exact_share * 100),
+        "volume": volume,
+        "item_count": len(candidates),
     }
 
 
@@ -542,6 +688,60 @@ def _render_pdf(topic, report_id: int, fields: dict, congress=None) -> str | Non
         f"<div class='section-title'>Congress questions</div>{question_html}"
         if congress is not None else ""
     )
+
+    def _prose(text: str) -> str:
+        blocks = [b.strip() for b in (text or "").split("\n") if b.strip()]
+        return "".join(
+            f"<div class='body' style='margin-bottom:8px'>{html_module.escape(b)}</div>"
+            for b in blocks
+        ) or "<div class='empty-card'>Not enough material for this section.</div>"
+
+    voice_rows = fields.get("voice_rows") or []
+    if voice_rows:
+        bars = "".join(
+            f"<tr><td style='font-size:11px;padding:3px 6px;width:34%'>"
+            f"{html_module.escape(row['label'])}</td>"
+            f"<td style='width:46%;padding:3px 6px'><div style='background:#1f4eaa;height:12px;"
+            f"border-radius:2px;width:{max(row['percent'], 2)}%'></div></td>"
+            f"<td style='font-size:11px;padding:3px 6px'><b>{row['mentions']}</b> "
+            f"({row['percent']}%)</td></tr>"
+            for row in voice_rows
+        )
+        voices_html = (
+            f"<table style='border-collapse:collapse;width:100%'>{bars}</table>"
+            f"<div class='empty-card' style='border-left-color:#e0a800'>"
+            f"{fields.get('voice_exact_share', 0)}% of these voices are identified from "
+            "tracked records (KOL targets, curated sources). The rest is inferred from the "
+            "author name and should be read as indicative.</div>"
+        )
+    else:
+        voices_html = "<div class='empty-card'>No attributable voices in this material.</div>"
+
+    volume = fields.get("volume") or {}
+    if volume.get("total"):
+        kinds = "".join(
+            f"<tr><td style='font-size:11px;padding:3px 6px;width:60%'>"
+            f"{html_module.escape(str(k))}</td><td style='font-size:11px'><b>{v}</b></td></tr>"
+            for k, v in (volume.get("by_kind") or {}).items()
+        )
+        coverage = volume.get("date_coverage", 0)
+        note = (
+            f"<div class='empty-card' style='border-left-color:#e0a800'>"
+            f"{volume.get('dated', 0)} of {volume.get('total', 0)} mentions carry a usable "
+            f"date ({coverage}%). Any trend covers only that subset.</div>"
+            if coverage < 100 else ""
+        )
+        volume_html = f"<table style='border-collapse:collapse;width:100%'>{kinds}</table>{note}"
+    else:
+        volume_html = "<div class='empty-card'>No mentions in this window.</div>"
+
+    subtopics = fields.get("subtopics") or []
+    subtopics_html = (
+        "<ul class='sum-list'>"
+        + "".join(f"<li>{html_module.escape(item)}</li>" for item in subtopics)
+        + "</ul>"
+        if subtopics else "<div class='empty-card'>None identified.</div>"
+    )
     html_doc = f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>{_BASE_CSS}</style></head><body>
 <div class="header">
@@ -557,6 +757,12 @@ def _render_pdf(topic, report_id: int, fields: dict, congress=None) -> str | Non
 <div class="section-title">Key findings</div>{findings_html}
 <div class="section-title">So what for pharma</div>
 <div class="sowhat-card"><div class="body">{so_what or '<em>No analyst note.</em>'}</div></div>
+<div class="section-title">What is being said</div>{_prose(fields.get('what_is_said'))}
+<div class="section-title">Voice distribution</div>{voices_html}
+{_prose(fields.get('voices_note')) if fields.get('voices_note') else ''}
+<div class="section-title">Volume of mentions</div>{volume_html}
+{_prose(fields.get('volume_note')) if fields.get('volume_note') else ''}
+<div class="section-title">Key sub-topics to consider</div>{subtopics_html}
 <div class="section-title">Posts and articles</div>{posts_html}
 <div class="section-title">Main authors</div>{authors_html}
 <div class="footer">Generated by PharmaRadar - {today} - Confidential</div>
@@ -613,7 +819,8 @@ def generate_topic_report(self, report_id: int) -> dict:
 
     try:
         _, exclusions = _scope_terms(topic, congress)
-        candidates = asyncio.run(_gather_db_posts(topic, congress))
+        window_days = getattr(report, "window_days", None) or None
+        candidates = asyncio.run(_gather_db_posts(topic, congress, window_days))
         log.info("report.db_posts", count=len(candidates), congress=bool(congress))
         if _aborted(report_id):
             return {"aborted": "after_db_query"}
@@ -648,10 +855,18 @@ def generate_topic_report(self, report_id: int) -> dict:
                 important_posts="[]",
                 main_authors="[]",
                 question_answers=json.dumps(question_answers),
+                what_is_said=None,
+                voices_note=None,
+                volume_note=None,
+                subtopics="[]",
+                voice_rows="[]",
+                volume="{}",
+                item_count=0,
+                voice_exact_share=0,
             ))
             return {"status": "done", "candidates": 0}
 
-        fields = _synthesize(topic, candidates, congress)
+        fields = _synthesize(topic, candidates, congress, window_days)
         if _aborted(report_id):
             return {"aborted": "after_synthesis"}
 
@@ -665,6 +880,15 @@ def generate_topic_report(self, report_id: int) -> dict:
             important_posts=json.dumps(fields["important_posts"]),
             main_authors=json.dumps(fields["main_authors"]),
             question_answers=json.dumps(fields["question_answers"]),
+            what_is_said=fields["what_is_said"],
+            voices_note=fields["voices_note"],
+            volume_note=fields["volume_note"],
+            subtopics=json.dumps(fields["subtopics"]),
+            voice_rows=json.dumps(fields["voice_rows"]),
+            volume=json.dumps(fields["volume"]),
+            item_count=fields["item_count"],
+            voice_exact_share=fields["voice_exact_share"],
+            window_days=(window_days or (topic.period_days if topic is not None else 0)),
             pdf_url=pdf_url,
         ))
         log.info("report.done", candidates=len(candidates), pdf=bool(pdf_url), congress=bool(congress))

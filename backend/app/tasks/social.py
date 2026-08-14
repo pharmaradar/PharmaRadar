@@ -9,24 +9,30 @@ clicks a trend (see routers/social.py).
 import asyncio
 import json
 
-
-def _detect_lang(text: str) -> str:
-    """Lightweight FR/EN detector based on French function-word frequency."""
-    if not text or len(text) < 20:
-        return "en"
-    lower = text.lower()[:1000]
-    fr_signals = [" de ", " du ", " le ", " la ", " les ", " des ", " et ",
-                  " en ", " une ", " pour ", " avec ", " dans ", " sur ",
-                  " est ", " sont ", " nous ", " vous ", " ils ", " au ",
-                  "qu'", " l'", " d'", " n'"]
-    return "fr" if sum(1 for w in fr_signals if w in lower) >= 4 else "en"
-
 import structlog
+
+from app.services.lang import detect_lang as _detect_lang
+from app.services.tinyfish_social import looks_like_post
+from app.services.fr_sources import (Scope, french_voice, is_french_source,
+                                     normalize_host)
+
+FR_SCOPE = Scope.FR.value
 
 # ── Pharma relevance gate ─────────────────────────────────
 # Posts are only stored if they contain at least one of these signals in
 # their text, hashtags, or topic. This filters out off-topic results that
 # happen to mention a vague keyword (e.g. "drug" = illegal drugs, slang).
+#
+# This gate runs at INGEST, before insert — anything it rejects is a post we
+# already paid Apify for and then threw away. It used to be English-only, so
+# French posts ("essai clinique", "immunothérapie", "dépistage") were dropped
+# on arrival. That was half of the client's "not enough French posts".
+#
+# Matching is substring-based on lowercased text, so terms must be long enough
+# to be unambiguous: "has" (HAS, the French health authority) would match every
+# English sentence, and "arc" would match "search". Use a longer phrase instead.
+# Accented terms are listed with their unaccented spelling too, because people
+# type "immunotherapie" on mobile.
 _PHARMA_SIGNALS = frozenset({
     # Disease / therapeutic area
     "cancer", "tumor", "tumour", "oncology", "leukemia", "leukaemia",
@@ -54,11 +60,51 @@ _PHARMA_SIGNALS = frozenset({
     "asco", "esmo", "aacr", "sitc",
     # Healthcare context
     "oncologist", "hematologist", "patient outcomes", "health outcomes",
+
+    # ── FRENCH ─────────────────────────────────────────────
+    # Disease / therapeutic area
+    "cancer du poumon", "cancer bronchique", "cancer du sein",
+    "cancer colorectal", "cancer de la prostate", "cancer de l'ovaire",
+    "leucémie", "leucemie", "lymphome", "myélome", "myelome",
+    "mélanome", "melanome", "tumeur", "métastase", "metastase",
+    "métastatique", "metastatique", "carcinome", "sarcome",
+    # CBNPC / CPNPC are what French clinicians write for NSCLC; CPC for SCLC.
+    "cbnpc", "cpnpc", "oncologie", "cancérologie", "cancerologie",
+    "pneumologie", "hématologie", "hematologie",
+    "sclérose en plaques", "sclerose en plaques", "maladie rare", "hémophilie",
+    "hemophilie", "diabète", "diabete",
+    # Treatment / clinical
+    "immunothérapie", "immunotherapie", "chimiothérapie", "chimiotherapie",
+    "radiothérapie", "radiotherapie", "thérapie ciblée", "therapie ciblee",
+    "essai clinique", "essai de phase", "recherche clinique", "biomarqueur",
+    "dépistage", "depistage", "survie globale", "survie sans progression",
+    "effets secondaires", "effets indésirables", "effets indesirables",
+    "soins de support", "prise en charge", "médicament", "medicament",
+    "anticorps monoclonal", "biosimilaire", "médecine personnalisée",
+    "medecine personnalisee", "traitement du cancer", "essais cliniques",
+    # Regulatory / industry / institutions (long forms only — see note above)
+    "institut national du cancer", "ligue contre le cancer", "fondation arc",
+    "gustave roussy", "institut curie", "unicancer", "inserm",
+    "haute autorité de santé", "haute autorite de sante",
+    "agence du médicament", "agence du medicament", "affaires médicales",
+    # Healthcare roles
+    "oncologue", "pneumologue", "hématologue", "hematologue",
+    "médecin", "medecin", "soignant", "cancérologue", "cancerologue",
 })
 
 
 def _is_pharma_relevant(post: dict) -> bool:
-    """Return True if the post has any pharma/medical signal in text, hashtags, or topic."""
+    """Return True if the post should be stored.
+
+    Posts from a curated French source bypass the keyword gate. The gate exists
+    to reject off-topic results from a broad keyword search, but a post from a
+    source we deliberately chose — Gustave Roussy, INCa, Le Quotidien du Médecin —
+    is on-topic by construction. Without this bypass, source pinning makes the
+    yield *worse*: an institution's congress-programme announcement carries no
+    pharma keyword, so it is paid for and then discarded.
+    """
+    if is_french_source(post.get("post_url") or ""):
+        return True
     text = " ".join(filter(None, [
         post.get("text") or "",
         " ".join(post.get("hashtags") or []),
@@ -72,6 +118,32 @@ from app.tasks.celery_app import celery_app
 logger = structlog.get_logger(__name__)
 
 _STATUS_KEY = "social_scan:status"
+
+# Comments are billed per post, so only the most-discussed posts are worth
+# scraping — the long tail has none.
+_COMMENT_POST_LIMIT = 10
+# Patient comments are the most sensitive material the platform touches.
+# They are stored through the same AE classification as every other post.
+_COMMENTS_ENABLED = True
+# Free, but each term is still a search against the shared rate limiter.
+_IG_FREE_TERM_LIMIT = 12
+# Free-lane terms per ad-hoc search. Each term costs one unmetered search per
+# platform; three or four French terms already saturate the first page.
+_FREE_SEARCH_TERM_LIMIT = 4
+
+
+def _scope_of(url: str, author: str | None, language: str | None,
+              tracked: tuple[str, ...] = ()) -> str:
+    """Provenance for one social post: 'fr' when it comes from a French voice.
+
+    Kept in one place because the three ingest paths (keyword scan, account
+    scan, ad-hoc search) all used `is_french_source(url)` — a domain test that
+    can only ever answer "fr" for fr.linkedin.com, since every other social post
+    lives on a global platform domain.
+    """
+    return (Scope.FR.value
+            if french_voice(url, author or "", language, tracked)
+            else Scope.GLOBAL.value)
 
 
 def _set_status(**fields) -> None:
@@ -110,6 +182,296 @@ def social_scan(self, lang_override: str | None = None) -> dict:
     return asyncio.run(_run_scan(lang_override))
 
 
+async def _tracked_handles(session, platform: str) -> list[str]:
+    """Active handles for one platform, newest first. [] means 'none configured',
+    which the search builder treats as 'do not account-pin', while None means
+    'caller supplied nothing' and falls back to the curated constant."""
+    from sqlalchemy import select
+
+    from app.models import TrackedAccount
+
+    rows = await session.execute(
+        select(TrackedAccount.handle)
+        .where(TrackedAccount.platform == platform, TrackedAccount.active.is_(True))
+        .order_by(TrackedAccount.id)
+    )
+    return [h for h in rows.scalars().all() if h]
+
+
+async def _tracked_page_urls(session, platform: str) -> list[str]:
+    """Active page URLs for a platform whose scraper addresses pages by URL.
+
+    Facebook's Apify actor takes `startUrls`, not handles, so it needs the URL
+    column rather than the handle one. Rows seeded before `url` was populated
+    fall back to the canonical page URL built from the handle.
+    """
+    from sqlalchemy import select
+
+    from app.models import TrackedAccount
+
+    rows = await session.execute(
+        select(TrackedAccount.url, TrackedAccount.handle)
+        .where(TrackedAccount.platform == platform, TrackedAccount.active.is_(True))
+        .order_by(TrackedAccount.id)
+    )
+    urls = []
+    for url, handle in rows.all():
+        resolved = (url or "").strip() or (
+            f"https://www.{platform}.com/{handle}" if handle else "")
+        if resolved:
+            urls.append(resolved)
+    return urls
+
+
+async def _ingest_posts(session, posts: list[dict], *, kind: str, topic: str,
+                        query: str, tracked: tuple[str, ...] = ()) -> int:
+    """Insert normalised posts, sharing one code path with the keyword scan.
+
+    Comments come through here too, so they get the same dedup hash, language
+    detection, provenance and — critically — the same adverse-event handling as
+    any other post.
+    """
+    from app.models import SocialPost
+    from app.services.deduplicator import sha256_hash
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    inserted = 0
+    for post in posts:
+        url = post.get("post_url")
+        if not url:
+            continue
+        if not _is_pharma_relevant({**post, "topic": topic}):
+            continue
+        if not looks_like_post(post.get("platform", ""), url, post.get("text")):
+            logger.debug("social.skipped_landing_page", url=url[:100])
+            continue
+        stmt = pg_insert(SocialPost).values(
+            platform=post["platform"], post_url=url,
+            parent_url=post.get("parent_url"),
+            author=post.get("author"), text=post.get("text"),
+            thumbnail_url=post.get("thumbnail_url"),
+            likes=post.get("likes", 0), comments=post.get("comments", 0),
+            views=post.get("views", 0), shares=post.get("shares", 0),
+            hashtags=json.dumps(post.get("hashtags", [])),
+            query=query, kind=kind, topic=topic,
+            language=(_lang := _detect_lang(post.get("text", ""))),
+            domain=normalize_host(url),
+            source_scope=_scope_of(url, post.get("author"), _lang, tracked),
+            posted_at=post.get("posted_at"),
+            content_hash=sha256_hash(url),
+        ).on_conflict_do_nothing(index_elements=["content_hash"])
+        try:
+            result = await session.execute(stmt)
+            await session.commit()
+            if result.rowcount:
+                inserted += 1
+        except Exception as exc:
+            await session.rollback()
+            logger.debug("social_scan.insert_failed", exc=str(exc)[:120])
+    return inserted
+
+
+async def _scan_instagram_free(terms: list[str], lang_filter: str | None,
+                               max_per_term: int = 10,
+                               tracked: tuple[str, ...] = ()) -> int:
+    """Instagram discovery through TinyFish search — no Apify credits.
+
+    The web index knows Instagram posts, returns the French caption in the
+    snippet, and honours --location France, which the hashtag actor cannot do at
+    all. It costs nothing, so it runs *alongside* the Apify hashtag lane rather
+    than replacing it: Apify still supplies the engagement counts and timestamps
+    that search results lack, and the client's "top 10 posts by views/comments"
+    depends on those.
+
+    Overlap between the two lanes is harmless — both dedup on the URL hash.
+    """
+    from app.database import CelerySessionLocal
+    from app.services.tinyfish_social import fetch_via_tinyfish
+
+    if not terms:
+        return 0
+    loop = asyncio.get_running_loop()
+    saved = 0
+    for term in terms:
+        posts = await loop.run_in_executor(
+            None, lambda t=term: fetch_via_tinyfish(
+                "instagram", [t], max_results=max_per_term, lang_filter=lang_filter))
+        if not posts:
+            continue
+        async with CelerySessionLocal() as sess:
+            saved += await _ingest_posts(sess, posts, kind="field", topic=term,
+                                         query=term, tracked=tracked)
+    logger.info("social_scan.instagram_free", terms=len(terms), posts=saved)
+    return saved
+
+
+async def _search_free(terms: list[str], lang_filter: str | None,
+                       query: str, max_per_term: int = 10,
+                       tracked: tuple[str, ...] = (),
+                       pin: dict[str, list[str]] | None = None) -> int:
+    """The free French lane for an ad-hoc *search*, across every platform.
+
+    Ad-hoc search used to be Apify-only, so a user typing into Topic Explorer or
+    Social Trends got nothing fresh at all when Apify was unconfigured, and
+    never got this lane's results when it was. That matters because of what was
+    measured on 2026-08-12: issuing the same search in French rather than
+    English moves Instagram from 4/10 to 10/10 French results, and Facebook from
+    3/10 to 10/10. The French terms already exist — `_expand_query` produces
+    them for Apify — they simply were not being searched with.
+
+    TinyFish search is unmetered, so this costs nothing and runs regardless of
+    whether Apify is configured. Both lanes dedup on the URL hash.
+    """
+    from app.database import CelerySessionLocal
+    from app.services.tinyfish_social import fetch_via_tinyfish
+
+    if not terms:
+        return 0
+    loop = asyncio.get_running_loop()
+    saved = 0
+    # LinkedIn and X carry the clinical conversation; Instagram carries the
+    # patient voice. All three are indexed by term, which is what this lane needs.
+    for platform in ("twitter", "linkedin", "instagram"):
+        for term in terms:
+            try:
+                posts = await loop.run_in_executor(
+                    None, lambda p=platform, t=term: fetch_via_tinyfish(
+                        p, [t], max_results=max_per_term, lang_filter=lang_filter,
+                        # Pinning is per-platform: `site:x.com/<handle>` built
+                        # from a LinkedIn slug pins nothing that exists. A list
+                        # (even empty) means "use the registry"; None would
+                        # silently fall back to the frozen curated constant.
+                        accounts=(pin or {}).get(p, [])))
+            except Exception as exc:            # noqa: BLE001 - a free lane must never fail the search
+                logger.warning("discover.free_lane_failed", platform=platform,
+                               term=term, error=str(exc)[:140])
+                continue
+            if not posts:
+                continue
+            async with CelerySessionLocal() as sess:
+                saved += await _ingest_posts(sess, posts, kind="field", topic=term,
+                                             query=query, tracked=tracked)
+    logger.info("discover.free_lane", terms=len(terms), posts=saved)
+    return saved
+
+
+async def _scan_linkedin_accounts(handles: list[str], lang_filter: str | None,
+                                  max_per_account: int = 10,
+                                  tracked: tuple[str, ...] = ()) -> int:
+    """Collect posts from the LinkedIn accounts the team tracks.
+
+    LinkedIn was the one platform where the registry did nothing: handles could
+    be added in the UI, were loaded at scan time, and were then dropped on the
+    floor — `_account_groups` returns [] for anything but Twitter, so a tracked
+    LinkedIn account was never actually searched for. The client's ask was
+    "define and track specific social media accounts"; for LinkedIn that was
+    only ever true of the stored row, never of the scrape.
+
+    Every result is filtered by EXACT author slug. That is not belt-and-braces:
+    `site:` matches on prefix, so pinning to `ifct` also returns
+    `ifct-institut-de-formation-continue-des-therapeutes` — a different
+    organisation. See `linkedin_account_queries` for the measurements.
+
+    Runs on TinyFish search, which is unmetered, so this lane is free.
+    """
+    from app.database import CelerySessionLocal
+    from app.services.tinyfish_social import (by_exact_author, fetch_via_tinyfish,
+                                              linkedin_account_queries)
+
+    if not handles:
+        return 0
+    loop = asyncio.get_running_loop()
+    saved = 0
+    for handle, query in zip(handles, linkedin_account_queries(handles)):
+        try:
+            posts = await loop.run_in_executor(
+                None, lambda q=query: fetch_via_tinyfish(
+                    "linkedin", [q], max_results=max_per_account,
+                    lang_filter=lang_filter))
+        except Exception as exc:            # noqa: BLE001 - one bad handle must not end the lane
+            logger.warning("social_scan.linkedin_account_failed",
+                           handle=handle, error=str(exc)[:140])
+            continue
+        exact = by_exact_author(posts or [], [handle])
+        if not exact:
+            logger.info("social_scan.linkedin_account_empty", handle=handle,
+                        returned=len(posts or []))
+            continue
+        async with CelerySessionLocal() as sess:
+            saved += await _ingest_posts(sess, exact, kind="account",
+                                         topic=f"account:{handle}",
+                                         query=f"tracked:linkedin:{handle}",
+                                         tracked=tracked or (handle,))
+    logger.info("social_scan.linkedin_accounts", handles=len(handles), posts=saved)
+    return saved
+
+
+async def _scan_instagram_accounts(handles: list[str], window: int,
+                                   max_per_account: int, with_comments: bool,
+                                   tracked: tuple[str, ...] = ()) -> tuple[int, int]:
+    """Scrape tracked Instagram accounts, then the comments under what they posted.
+
+    Account posts are on-topic by construction, so this is the highest-yield
+    Instagram lane — the hashtag actor can never reach a named account.
+    """
+    from app.database import CelerySessionLocal
+    from app.services import apify_client
+
+    if not handles:
+        return 0, 0
+
+    loop = asyncio.get_running_loop()
+    posts = await loop.run_in_executor(
+        None, lambda: apify_client.fetch_instagram_accounts(
+            handles, max_per_account=max_per_account, window_days=window))
+    if not posts:
+        return 0, 0
+
+    # Tag each post with the account it came from, not the batch. A shared
+    # "tracked:instagram" stamp cannot say WHICH account produced a post, so a
+    # per-account yield count — the only way a wrong handle ever becomes visible
+    # — could not be computed from it.
+    saved = 0
+    async with CelerySessionLocal() as sess:
+        for handle in handles:
+            key = handle.strip().lstrip("@").lower()
+            mine = [post for post in posts
+                    if (post.get("author") or "").strip().lstrip("@").lower() == key]
+            if mine:
+                saved += await _ingest_posts(sess, mine, kind="account",
+                                             topic=f"account:{handle}",
+                                             query=f"tracked:instagram:{key}",
+                                             tracked=tracked or tuple(handles))
+        # Anything the actor returned without a recognisable author still gets
+        # stored — losing posts would be worse than losing their attribution.
+        keys = {h.strip().lstrip("@").lower() for h in handles}
+        rest = [post for post in posts
+                if (post.get("author") or "").strip().lstrip("@").lower() not in keys]
+        if rest:
+            saved += await _ingest_posts(sess, rest, kind="account",
+                                         topic="tracked account",
+                                         query="tracked:instagram",
+                                         tracked=tracked or tuple(handles))
+
+    comments_saved = 0
+    if with_comments and posts:
+        # Comment-scrape the most engaged posts only: comments are billed per
+        # post and the long tail carries almost no discussion.
+        top = sorted(posts, key=lambda p: (p.get("comments") or 0), reverse=True)
+        urls = [p["post_url"] for p in top[:_COMMENT_POST_LIMIT] if (p.get("comments") or 0) > 0]
+        if urls:
+            comments = await loop.run_in_executor(
+                None, lambda: apify_client.fetch_instagram_comments(urls))
+            async with CelerySessionLocal() as sess:
+                comments_saved = await _ingest_posts(
+                    sess, comments, kind="comment", topic="comment",
+                    query="tracked:instagram:comments",
+                    tracked=tracked or tuple(handles))
+    logger.info("social_scan.instagram_accounts", accounts=len(handles),
+                posts=saved, comments=comments_saved)
+    return saved, comments_saved
+
+
 async def _run_scan(lang_override: str | None = None) -> dict:
     from datetime import datetime, timezone
     from app.database import CelerySessionLocal
@@ -133,8 +495,28 @@ async def _run_scan(lang_override: str | None = None) -> dict:
         window = s.social_window_days if s else 180
         max_per_query = s.social_max_per_query if s else 30
         include_kols = s.social_include_kols if s else True
-        fb_page_urls = json.loads(s.facebook_page_urls) if s and s.facebook_page_urls else []
         lang_filter = lang_override or getattr(s, "social_lang_filter", "fr") or "fr"
+
+        # Accounts the team chose to monitor. Loaded once per scan and threaded
+        # down, rather than queried deep inside the search builder where there is
+        # no session. Facebook pages still come from AppSettings for now; the
+        # registry holds them too, so that is the next thing to converge.
+        tracked_x = await _tracked_handles(sess, "twitter")
+        tracked_ig = await _tracked_handles(sess, "instagram")
+        tracked_li = await _tracked_handles(sess, "linkedin")
+        tracked_fb = await _tracked_handles(sess, "facebook")
+        # Facebook pages now come from the registry, not AppSettings. Both stores
+        # held them (migration 028 seeded the registry FROM AppSettings), and
+        # while the scan read the AppSettings copy, adding or removing a page in
+        # the tracked-accounts UI changed nothing at all — the one thing the
+        # client asked this feature to do. No fallback to the old field: an empty
+        # registry has to mean "nothing tracked", or deleting the last page would
+        # silently resurrect all nineteen.
+        fb_page_urls = await _tracked_page_urls(sess, "facebook")
+        # Provenance is per-account, not per-platform: a handle the team tracks
+        # is a French voice whichever platform the post arrived on.
+        tracked_all = tuple(dict.fromkeys(
+            tracked_x + tracked_ig + tracked_li + tracked_fb))
 
         # List of (search_term, platform_hint) for KOL scanning.
         # Prefer twitter_handle over name for Twitter (more precise); name is used as fallback.
@@ -198,15 +580,17 @@ async def _run_scan(lang_override: str | None = None) -> dict:
         # Fetch AND insert stay inside the semaphore so concurrent DB
         # connections are bounded to 4 alongside the Apify runs.
         async with sem:
-            # Always scrape worldwide — language is detected per post and
-            # stored. The UI's FR/EN/Global filter is display-only, so the
-            # same scrape serves all modes (no double Apify cost).
+            # Target the search at the configured market instead of scraping
+            # worldwide and filtering afterwards. Display-side filtering can
+            # only subtract: if 5% of a worldwide haul is French, the French
+            # view is 5%. Searching in French fills the same result slots with
+            # French posts at identical cost.
             posts = await loop.run_in_executor(
                 None,
-                lambda p=platform, t=term: apify_client.fetch_platform(
+                lambda p=platform, t=term, lf=lang_filter: apify_client.fetch_platform(
                     p, t, max_results=max_per_query, window_days=window,
                     page_urls=fb_page_urls if p == "facebook" else None,
-                    lang_filter=None,
+                    lang_filter=lf, accounts=tracked_x,
                 ),
             )
             # ONE session (= one engine + one connection) for the whole batch —
@@ -237,7 +621,10 @@ async def _run_scan(lang_override: str | None = None) -> dict:
                         query=term,
                         kind=kind,
                         topic=term,
-                        language=_detect_lang(post.get("text", "")),
+                        language=(_lang := _detect_lang(post.get("text", ""))),
+                        domain=normalize_host(post["post_url"]),
+                        source_scope=_scope_of(post["post_url"], post.get("author"),
+                                               _lang, tracked_all),
                         posted_at=post.get("posted_at"),
                         content_hash=ch,
                     ).on_conflict_do_nothing(index_elements=["content_hash"])
@@ -261,6 +648,19 @@ async def _run_scan(lang_override: str | None = None) -> dict:
     ]
     if fb_job:
         jobs.append(_run_one("", "field", "facebook"))
+    # Tracked Instagram accounts use a different actor from the hashtag scan, so
+    # they run as their own job rather than through _run_one.
+    if "instagram" in platforms:
+        # Free French discovery, run in addition to the paid hashtag lane.
+        jobs.append(_scan_instagram_free(keywords[:_IG_FREE_TERM_LIMIT], lang_filter,
+                                         tracked=tracked_all))
+        if tracked_ig:
+            jobs.append(_scan_instagram_accounts(
+                tracked_ig, window, max_per_query, _COMMENTS_ENABLED,
+                tracked=tracked_all))
+    if "linkedin" in platforms and tracked_li:
+        jobs.append(_scan_linkedin_accounts(tracked_li, lang_filter,
+                                            tracked=tracked_all))
     await asyncio.gather(*jobs, return_exceptions=True)
 
     _set_status(running=False, done=done_count, inserted=inserted_count,
@@ -282,37 +682,49 @@ def _expand_query(query: str) -> dict[str, list[str]]:
     from app.services.llm_router import call_llm
 
     prompt = (
-        "You are a pharma social media intelligence expert focused on the FRENCH market.\n"
+        "You are a pharma social media intelligence expert working the FRENCH market.\n"
         "Given a user's search query, generate search terms for social media scrapers.\n"
-        "Bias the expansion towards France: include the French translation of the topic, "
-        "French medical hashtags, and a couple of global English terms so worldwide posts are still captured.\n\n"
+        "This platform monitors France only — French KOLs, French institutions, French "
+        "patients. Write the terms the way a French oncologist or a French patient would "
+        "actually type them, NOT an English term translated word for word.\n\n"
         "Return ONLY a JSON object with two keys:\n"
         '- "hashtags": exactly 5 terms for Instagram (no spaces, no # prefix). '
-        "Mix: 3-4 French/France-related + 1-2 English/global. Use real French medical hashtags. "
+        "All must be French or France-specific, except drug brand names and congress names, "
+        "which are identical in every language. Use real French medical hashtags. "
         "Keep this list short — each hashtag costs Apify credits.\n"
-        '- "keywords": 6-8 terms for Twitter/LinkedIn/Facebook (can include spaces and phrases). '
-        "Mix: 4-5 in French + 2-3 in English. These are free via TinyFish.\n\n"
-        "Focus on: drug names (universal), French disease names, French treatment terms, "
-        "French institutions (INCa, Ligue contre le cancer, ARC, Unicancer, Inserm), "
-        "patient communities (octobrerose, marsbleu), congresses (also in French).\n\n"
+        '- "keywords": 6-8 terms for Twitter/LinkedIn/Facebook (spaces and phrases allowed). '
+        "At least 6 must be in French. These are free via TinyFish, so favour recall.\n\n"
+        "Use the abbreviations French clinicians actually use: CBNPC (never NSCLC), "
+        "CPC (never SCLC), SG for survie globale, SSP for survie sans progression.\n"
+        "Draw on: French disease names, French treatment terms, French institutions "
+        "(INCa, Unicancer, Inserm, Gustave Roussy, Institut Curie, IFCT, SPLF, "
+        "Ligue contre le cancer, Fondation ARC), French patient communities "
+        "(octobrerose, marsbleu), and congresses named in French.\n\n"
         "Examples:\n"
-        '- "lung cancer" → {"hashtags": ["cancerdupoumon", "poumon", "oncologiefrance", '
-        '"octobrerose", "cancersurvivants", "lungcancer", "NSCLC"], '
-        '"keywords": ["cancer du poumon", "cancer poumon France", "oncologie pulmonaire", '
-        '"essai clinique poumon", "Ligue contre le cancer poumon", "lung cancer", "NSCLC research"]}\n'
+        '- "lung cancer" → {"hashtags": ["cancerdupoumon", "CBNPC", "oncologiefrance", '
+        '"pneumologie", "cancersurvivants"], '
+        '"keywords": ["cancer du poumon", "cancer bronchique", "CBNPC", '
+        '"oncologie pulmonaire France", "essai clinique poumon", '
+        '"Ligue contre le cancer poumon", "dépistage cancer du poumon"]}\n'
         '- "Tecentriq" → {"hashtags": ["Tecentriq", "atezolizumab", "immunothérapie", '
-        '"oncologiefrance", "essaiclinique", "immunotherapy", "pdl1"], '
+        '"oncologiefrance", "essaiclinique"], '
         '"keywords": ["Tecentriq", "atezolizumab", "immunothérapie Roche", '
-        '"Tecentriq France", "essai clinique atezolizumab", "atezolizumab clinical trial"]}\n'
-        '- "ASCO 2026" → {"hashtags": ["ASCO2026", "ASCO", "oncologiefrance", '
-        '"congresoncologie", "rechercheclinique", "oncology2026"], '
+        '"Tecentriq France", "essai clinique atezolizumab", "immunothérapie CBNPC", '
+        '"atezolizumab survie globale"]}\n'
+        '- "ASCO 2026" → {"hashtags": ["ASCO2026", "oncologiefrance", '
+        '"congresoncologie", "rechercheclinique", "cancerologie"], '
         '"keywords": ["ASCO 2026", "ASCO 2026 France", "congrès oncologie ASCO", '
-        '"actualité oncologie", "ASCO annual meeting"]}\n\n'
+        '"actualité oncologie France", "résultats ASCO 2026", "étude présentée ASCO"]}\n\n'
         f'Query: "{query}"'
     )
     fallback = {"hashtags": [query], "keywords": [query]}
     try:
-        reply = call_llm([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=400)
+        # 2048, not 400: gemini-2.5-flash is a *thinking* model and its reasoning
+        # tokens come out of the same budget, so 400 returned ~30 characters —
+        # the JSON was always truncated, this function always fell back to the raw
+        # query, and the French term expansion never actually ran. Same root cause
+        # as the extractor truncation fixed on 2026-08-08.
+        reply = call_llm([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=2048)
         reply = reply.strip()
         if "```" in reply:
             reply = reply.split("```")[1].lstrip("json").strip()
@@ -330,6 +742,40 @@ def _expand_query(query: str) -> dict[str, list[str]]:
 
 
 _DISCOVER_STATUS_KEY = "social_discover:status:{q}"
+# Marks a phrase as already collected. A live fetch spends Apify credit, and the
+# same phrase typed twice in a week returns the same posts the second time — so
+# the second search reads the corpus instead of paying for it again.
+_DISCOVER_FETCHED_KEY = "social_discover:fetched:{q}"
+_DISCOVER_FETCHED_TTL = 86_400  # 24h
+
+
+def mark_query_fetched(query: str) -> None:
+    try:
+        import redis as _redis
+
+        from app.config import get_settings
+        client = _redis.Redis.from_url(get_settings().redis_url, socket_timeout=2)
+        client.setex(_DISCOVER_FETCHED_KEY.format(q=query.lower().strip()),
+                     _DISCOVER_FETCHED_TTL, "1")
+    except Exception:                               # noqa: BLE001 - cache is optional
+        pass
+
+
+def query_recently_fetched(query: str) -> bool:
+    """True when this phrase was scraped inside the TTL.
+
+    Redis being unavailable returns False, which re-fetches. That errs towards
+    spending money rather than showing stale data, and matches how the rest of
+    the status plumbing degrades.
+    """
+    try:
+        import redis as _redis
+
+        from app.config import get_settings
+        client = _redis.Redis.from_url(get_settings().redis_url, socket_timeout=2)
+        return bool(client.get(_DISCOVER_FETCHED_KEY.format(q=query.lower().strip())))
+    except Exception:                               # noqa: BLE001
+        return False
 
 
 def _set_discover_status(query: str, **fields) -> None:
@@ -368,16 +814,30 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
     from app.services.deduplicator import sha256_hash
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    if not apify_client.is_configured():
-        _set_discover_status(query, running=False, error="apify_not_configured")
-        return {"error": "apify_not_configured"}
+    # Apify gates only the paid lane. The free TinyFish lane below needs no
+    # token, and returning early here used to mean an unconfigured Apify made
+    # ad-hoc search silently fetch nothing at all.
+    apify_on = apify_client.is_configured()
 
     async with CelerySessionLocal() as sess:
         s = await sess.get(AppSettings, 1)
         platforms = json.loads(s.social_platforms) if s and s.social_platforms else \
             ["instagram", "twitter", "linkedin", "facebook"]
         window = s.social_window_days if s else 180
-        fb_page_urls = json.loads(s.facebook_page_urls) if s and s.facebook_page_urls else []
+        fb_page_urls = await _tracked_page_urls(sess, "facebook")   # registry, see _run_scan
+        # Ad-hoc search read no handles at all, so both of its lanes reached
+        # _account_groups with accounts=None — which means "caller has no
+        # session" and falls back to the frozen 14-handle constant in
+        # fr_sources. The effect was that deleting an account in the UI did not
+        # stop search scraping it, and adding one was never searched: the
+        # registry was write-only for every ad-hoc query. Scan honoured it; only
+        # search did not.
+        tracked_x = await _tracked_handles(sess, "twitter")
+        tracked_all = tuple(dict.fromkeys(
+            tracked_x
+            + await _tracked_handles(sess, "linkedin")
+            + await _tracked_handles(sess, "instagram")
+            + await _tracked_handles(sess, "facebook")))
         lang_filter = lang_override or getattr(s, "social_lang_filter", "fr") or "fr"
 
     loop = asyncio.get_running_loop()
@@ -392,29 +852,36 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
 
     # One actor call per platform with all terms batched — same cost as a single-term search
     async def _fetch_platform(p: str) -> list[dict]:
-        # Worldwide scrape — UI's language filter is display-only,
-        # so one Apify call serves all language modes.
+        # Market-targeted, not worldwide — see the note in _run_scan. The terms
+        # themselves are already French-biased by _expand_query; lang_filter
+        # adds the platform-native targeting on top.
         return await loop.run_in_executor(
             None,
-            lambda: apify_client.fetch_platform_expanded(
+            lambda p=p, lf=lang_filter: apify_client.fetch_platform_expanded(
                 p, hashtags, keywords,
                 max_results=30, window_days=window,
                 page_urls=fb_page_urls if p == "facebook" else None,
-                lang_filter=None,
+                lang_filter=lf, accounts=tracked_x,
             ),
         )
+
+    # The free French lane runs first and always: it is unmetered, and its terms
+    # are the French ones, which is what keeps a search French-sourced.
+    free_saved = await _search_free(keywords[:_FREE_SEARCH_TERM_LIMIT],
+                                    lang_filter, query, tracked=tracked_all,
+                                    pin={"twitter": tracked_x})
 
     fetch_results = await asyncio.gather(
         *[_fetch_platform(p) for p in platforms],
         return_exceptions=True,
-    )
+    ) if apify_on else []
 
     # LLM-generated hashtags ARE the relevance gate — no additional pharma filter needed.
     # We still deduplicate on content_hash via ON CONFLICT DO NOTHING.
     # ONE session for the whole ingest — the old code created a fresh engine +
     # TCP connection per post. Per-post commit on the open connection keeps
     # one bad row from discarding the rest.
-    inserted = 0
+    inserted = free_saved
     async with CelerySessionLocal() as wsess:
         for posts in fetch_results:
             if isinstance(posts, Exception) or not posts:
@@ -432,7 +899,9 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
                     views=post.get("views", 0), shares=post.get("shares", 0),
                     hashtags=json.dumps(post.get("hashtags", [])),
                     query=query, kind="field", topic=post["topic"],
-                    language=_detect_lang(post.get("text", "")),
+                    language=(_lang := _detect_lang(post.get("text", ""))),
+                    domain=normalize_host(post["post_url"]),
+                    source_scope=_scope_of(post["post_url"], post.get("author"), _lang),
                     posted_at=post.get("posted_at"), content_hash=ch,
                 ).on_conflict_do_nothing(index_elements=["content_hash"])
                 try:
@@ -445,5 +914,6 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
 
     all_terms = list(dict.fromkeys(hashtags + keywords))
     _set_discover_status(query, running=False, inserted=inserted, terms=all_terms)
+    mark_query_fetched(query)
     logger.info("discover_fetch.done", query=query, inserted=inserted, terms=all_terms)
     return {"inserted": inserted, "terms": all_terms}

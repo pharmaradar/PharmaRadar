@@ -14,7 +14,7 @@ import { DescribeModal as SocialDescribeModal } from "./SocialTrends";
 import { SynthesisPanel } from "@/components/SynthesisPanel";
 import { useGenQuota } from "@/hooks/useGenQuota";
 import { Flame, Heart } from "lucide-react";
-import EmergingVoices from "@/components/EmergingVoices";
+import MarketResearchReport from "@/components/MarketResearchReport";
 
 /* ─── constants ──────────────────────────────────────────── */
 
@@ -74,7 +74,7 @@ export default function TopicExplorer() {
   const [active, setActive]           = useState<DiscoveryResult | null>(null);
   const [describeResult, setDescribe] = useState<DiscoveryResult | null>(null);
   const [deepOpen, setDeepOpen]       = useState(false);
-  const [langFilter, setLangFilter]   = useState("all");
+  const [langFilter, setLangFilter]   = useState("fr");
   const [fromDate, setFromDate]       = useState("");
   const [toDate, setToDate]           = useState("");
 
@@ -148,7 +148,12 @@ export default function TopicExplorer() {
   const webRaw      = searchMut.data?.results ?? [];
   const fromCache   = searchMut.data?.from_cache ?? false;
   const webAll      = webRaw
-    .filter(r => langFilter === "all" || r.language === langFilter)
+    // France filters on the SOURCE, not the detected language of the snippet:
+    // the backend already stores only French domains under the "fr" scope, so
+    // re-testing the text here could only ever hide French sources that happen
+    // to publish in English.
+    .filter(r => langFilter === "all"
+      || (langFilter === "fr" ? r.source_scope === "fr" : r.language === langFilter))
     .filter(r => !fromDate || !r.published_date || r.published_date >= fromDate)
     .filter(r => !toDate   || !r.published_date || r.published_date <= toDate);
   const webArticles = webAll.filter(r => r.media_type === "article" || r.media_type === "pdf" || r.media_type === "research");
@@ -192,7 +197,7 @@ export default function TopicExplorer() {
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input value={query} onChange={e => setQuery(e.target.value)}
               onKeyDown={e => e.key === "Enter" && run()}
-              placeholder="Drug, congress, KOL, trial…"
+              placeholder="Ask a question — e.g. What do doctors think about subcutaneous therapies in lung cancer?"
               className="w-full h-9 pl-8 pr-3 rounded-lg border border-gray-200 dark:border-[#1e3a5f] bg-gray-50 dark:bg-[#111827] text-sm text-gray-900 dark:text-[#e2e8f0] focus:outline-none focus:ring-2 focus:ring-pharma-blue/20 focus:border-pharma-blue transition-all" />
           </div>
           <button onClick={() => run()} disabled={isLoading || !query.trim()}
@@ -270,8 +275,11 @@ export default function TopicExplorer() {
                   </button>
                 ))}
                 <div className="my-2 h-px bg-gray-100 dark:bg-[#1e3a5f]/40" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-gray-300 dark:text-[#334155] px-2 pt-1 pb-1">Language</p>
-                {[{v:"fr",l:"France only"},{v:"en",l:"English only"},{v:"all",l:"Global (all)"}].map(o => (
+                {/* Region, not language: the server selects on source_scope —
+                    where the content came from — so a French institution
+                    writing in English still counts as French-market. */}
+                <p className="text-[10px] font-black uppercase tracking-widest text-gray-300 dark:text-[#334155] px-2 pt-1 pb-1">Region</p>
+                {[{v:"fr",l:"France"},{v:"all",l:"Worldwide"}].map(o => (
                   <button key={o.v} onClick={() => setLangFilter(o.v)}
                     className={cn("w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all",
                       langFilter === o.v ? "bg-pharma-blue text-white" : "text-gray-500 dark:text-[#64748b] hover:bg-gray-50 dark:hover:bg-[#111827] hover:text-gray-800 dark:hover:text-[#94a3b8]")}>
@@ -362,6 +370,12 @@ export default function TopicExplorer() {
             <div className="p-4 space-y-6">
 
               {/* ── AI synthesis / takeaway ── */}
+              <MarketResearchReport
+                question={submitted}
+                windowDays={30}
+                lang={langFilter}
+              />
+
               <SynthesisPanel
                 takeaway={synth?.takeaway}
                 takeawayLabel="What's happening"
@@ -530,8 +544,6 @@ export default function TopicExplorer() {
                 </div>
               )}
 
-              {/* Emerging voices — authors on this topic who aren't tracked targets */}
-              <EmergingVoices query={submitted} />
             </div>
           )}
         </div>

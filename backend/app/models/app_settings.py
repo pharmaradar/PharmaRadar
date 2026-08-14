@@ -34,12 +34,24 @@ class AppSettings(Base):
     nvidia_base_url: Mapped[str] = mapped_column(String(256), default="https://integrate.api.nvidia.com/v1")
     custom_base_url: Mapped[str | None] = mapped_column(String(256))
 
-    # Cron — schedule (weekly or daily)
+    # Cron — schedule (weekly or monthly)
     cron_hour: Mapped[int] = mapped_column(Integer, default=8)
     cron_minute: Mapped[int] = mapped_column(Integer, default=0)
     cron_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    cron_frequency: Mapped[str] = mapped_column(String(16), default="weekly")   # "daily" | "weekly"
+    # "weekly" | "monthly". Daily was removed on the client's request — a report
+    # covering a 30-day window has nothing new to say every 24 hours, and each
+    # run costs real scraping credit.
+    cron_frequency: Mapped[str] = mapped_column(String(16), default="weekly")
     cron_day_of_week: Mapped[int] = mapped_column(Integer, default=1)           # 0=Mon … 6=Sun
+    cron_day_of_month: Mapped[int] = mapped_column(Integer, default=1)          # 1-28, monthly mode
+
+    # Dashboard syntheses: refresh on a schedule and/or after a pipeline run,
+    # instead of requiring a click per artefact. Off by default — each refresh
+    # costs several LLM calls.
+    auto_synthesis_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_synthesis_hour: Mapped[int] = mapped_column(Integer, default=7)
+    auto_synthesis_after_run: Mapped[bool] = mapped_column(Boolean, default=False)
+    auto_synthesis_last_run: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Budget limits
     agent_budget_per_run: Mapped[int] = mapped_column(Integer, default=250)

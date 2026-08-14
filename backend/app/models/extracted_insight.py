@@ -31,6 +31,11 @@ class ExtractedInsight(Base):
     window_tag: Mapped[str] = mapped_column(String(32), default="primary")  # primary | extended
 
     extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # Cached six-section analysis of this single insight, mirroring the per-post
+    # cache on social_posts.
+    analysis_sections: Mapped[str | None] = mapped_column(Text)
+    analysed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     embedding = Column(Vector(512), nullable=True)
 
     post: Mapped["ScrapedPost"] = relationship(back_populates="insights")  # noqa: F821
