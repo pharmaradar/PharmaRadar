@@ -128,6 +128,14 @@ def resolve_author(name: str, disease_terms: str) -> str | None:
     return resolved
 
 
+def _journal_of(item: dict) -> str:
+    """Journal title, preferring the short form a reader recognises."""
+    journal = ((item.get("journalInfo") or {}).get("journal") or {})
+    return (journal.get("medlineAbbreviation")
+            or journal.get("title")
+            or item.get("journalTitle") or "").strip()
+
+
 def search_publications(author_name: str, *, since_days: int = 365,
                         disease_terms: str = "lung OR NSCLC OR thoracic OR poumon",
                         limit: int = 25) -> list[dict]:
@@ -169,7 +177,10 @@ def search_publications(author_name: str, *, since_days: int = 365,
             "title": title,
             "text": abstract or title,
             "url": url_out,
-            "source_name": item.get("journalTitle") or "Europe PMC",
+            # `journalTitle` is empty in the core response; the real title sits
+            # under journalInfo.journal. Falling back to "Europe PMC" made every
+            # paper look like it came from the same publication.
+            "source_name": (_journal_of(item) or "Europe PMC"),
             "published_date": (item.get("firstPublicationDate")
                                or item.get("pubYear") or ""),
             "authors": item.get("authorString") or "",

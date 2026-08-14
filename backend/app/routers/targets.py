@@ -2,7 +2,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -234,6 +234,105 @@ async def list_profiles(q: str | None = None, target_type: str = "kol",
     return {"profiles": profiles}
 
 
+
+def _fold_name(value: str) -> str:
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFD", value or "")
+    return "".join(c for c in decomposed
+                   if unicodedata.category(c) != "Mn").lower().replace("-", " ").strip()
+
+
+def _research_profile(documents: list, target_name: str,
+                      tracked_names: set[str]) -> dict:
+    """What a KOL's publication record actually shows.
+
+    Built from the structured metadata the registries returned, not from LLM
+    reading: journals, citation counts and co-authors are facts, and inferring
+    them from an abstract would invent numbers a reader would then act on.
+
+    Collaborators answer the spec's stakeholder question directly — the people a
+    KOL publishes with, split by whether we already track them. The untracked
+    ones are the actionable half: influential voices outside the current
+    audience.
+    """
+    from collections import Counter
+
+    wanted = _fold_name(target_name)
+    surname = wanted.split()[0] if wanted else ""
+
+    journals, collaborators = Counter(), Counter()
+    citations = 0
+    open_access = 0
+    publications, trials = [], []
+
+    for post in documents:
+        try:
+            meta = json.loads(post.source_meta) if post.source_meta else {}
+        except Exception:                           # noqa: BLE001
+            meta = {}
+
+        if post.source_type == "trial":
+            trials.append({
+                "title": post.title or "",
+                "url": post.source_url,
+                "nct_id": meta.get("nct_id"),
+                "phase": meta.get("phase"),
+                "status": meta.get("status"),
+                "date": post.published_date or "",
+            })
+            continue
+        if post.source_type != "publication":
+            continue
+
+        journal = meta.get("journal")
+        if journal and journal != "Europe PMC":
+            journals[journal] += 1
+        cited = int(meta.get("cited_by") or 0)
+        citations += cited
+        if meta.get("open_access"):
+            open_access += 1
+
+        for author in (meta.get("authors") or "").split(","):
+            name = author.strip()
+            if not name:
+                continue
+            # Drop the KOL themselves: they are on every one of their own papers.
+            if surname and _fold_name(name).startswith(surname):
+                continue
+            collaborators[name] += 1
+
+        publications.append({
+            "title": post.title or "",
+            "url": post.source_url,
+            "journal": journal,
+            "date": post.published_date or "",
+            "cited_by": cited,
+            "open_access": bool(meta.get("open_access")),
+        })
+
+    publications.sort(key=lambda p: (p["date"] or ""), reverse=True)
+    top_collaborators = [
+        {
+            "name": name,
+            "papers": count,
+            "tracked": any(_fold_name(name).split()[0] == t.split()[0]
+                           for t in tracked_names if t),
+        }
+        for name, count in collaborators.most_common(12)
+    ]
+    return {
+        "publication_count": len(publications),
+        "trial_count": len(trials),
+        "total_citations": citations,
+        "open_access_count": open_access,
+        "top_journals": [{"journal": j, "count": c} for j, c in journals.most_common(8)],
+        "collaborators": top_collaborators,
+        "publications": publications[:25],
+        "trials": trials[:15],
+    }
+
+
 @router.get("/{target_id}/profile")
 async def get_profile(target_id: int, days: int = 30, db: AsyncSession = Depends(get_db)):
     """Everything known about one person: summary, sentiment split, top topics,
@@ -295,6 +394,22 @@ async def get_profile(target_id: int, days: int = 30, db: AsyncSession = Depends
                     insight.extracted_at.date().isoformat() if insight.extracted_at else ""),
             })
 
+    # The publication/trial record, independent of the insight window: a KOL's
+    # standing is not a 30-day fact, and truncating it to the report window
+    # would make a prolific researcher look inactive.
+    documents = (await db.execute(
+        select(ScrapedPost)
+        .where(ScrapedPost.target_id == target_id)
+        .where(ScrapedPost.source_type.in_(("publication", "trial")))
+        .where(post_not_ae())
+        .order_by(desc(ScrapedPost.published_date))
+        .limit(300)
+    )).scalars().all()
+    tracked_names = {
+        _fold_name(n) for (n,) in (await db.execute(select(Target.name))).all() if n
+    }
+    research = _research_profile(documents, target.name, tracked_names)
+
     bullets = _bullets(summary.summary_bullets) if summary else []
     if not bullets and summary:
         bullets = _bullets(summary.summary_bullets_extended)
@@ -317,4 +432,38 @@ async def get_profile(target_id: int, days: int = 30, db: AsyncSession = Depends
         "top_topics": [{"topic": t, "count": c} for t, c in topics.most_common(12)],
         "per_week": dict(sorted(per_week.items())),
         "statements": statements,
+        "research": research,
     }
+
+
+@router.post("/{target_id}/summary", dependencies=[Depends(require_admin)])
+async def regenerate_summary(target_id: int, db: AsyncSession = Depends(get_db)):
+    """Write this person's summary now, without waiting for a pipeline run.
+
+    The summary was only ever produced as a step inside a scrape run, so a KOL
+    whose insights arrived another way — publications and trials now do — showed
+    "No summary yet" indefinitely while sitting on dozens of statements. The
+    spec asks for a synthesis button; this is it.
+    """
+    from app.models import ExtractedInsight
+
+    target = await db.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    count = (await db.execute(
+        select(func.count()).select_from(ExtractedInsight)
+        .where(ExtractedInsight.target_id == target_id)
+    )).scalar() or 0
+    if not count:
+        raise HTTPException(
+            422, "Nothing to summarise yet — no insights have been extracted for this target")
+
+    from app.tasks.llm import generate_summary
+    try:
+        # run_id 0: this belongs to no scrape run, and patch_run no-ops on a
+        # missing run, so the progress counters simply have nowhere to write.
+        task = generate_summary.delay(target_id, 0)
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(503, f"queue unavailable: {str(exc)[:120]}") from exc
+    return {"queued": True, "task_id": task.id, "insights": count}

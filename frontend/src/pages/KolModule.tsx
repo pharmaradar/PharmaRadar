@@ -1,9 +1,9 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ExternalLink, Linkedin, Loader2, Search, TrendingUp, Twitter, Users, X,
+  ExternalLink, Linkedin, Loader2, Search, Sparkles, TrendingUp, Twitter, Users, X,
 } from "lucide-react";
-import { api, type KolProfileCard } from "@/lib/api";
+import { api, type KolProfileCard, type KolResearch } from "@/lib/api";
 import ShareOfVoice from "@/components/ShareOfVoice";
 import { cn } from "@/lib/utils";
 
@@ -24,6 +24,188 @@ const SENTIMENT_STYLE: Record<string, string> = {
 };
 
 const PERIODS = [30, 90, 365];
+
+/** The publication and trial record.
+ *
+ *  Every figure here is computed from registry metadata, so it can be shown as
+ *  a number rather than hedged prose. The collaborator list is the part with
+ *  the most leverage: it answers "who speaks on this topic that we do not
+ *  already follow" directly, from who the KOL actually publishes with.
+ */
+/** Writes a KOL's synthesis on demand.
+ *
+ *  Summaries used to be produced only as a step inside a scrape run, so a KOL
+ *  whose insights arrived from publications showed "No summary yet" while
+ *  sitting on dozens of statements. Generation runs in a worker, so the panel
+ *  polls the profile until the summary lands rather than guessing a delay. */
+function SynthesisButton({ profileId, hasSummary }: {
+  profileId: number; hasSummary: boolean;
+}) {
+  const qc = useQueryClient();
+  const [waiting, setWaiting] = useState(false);
+
+  useQuery({
+    queryKey: ["kol-summary-watch", profileId, waiting],
+    queryFn: async () => {
+      await qc.invalidateQueries({ queryKey: ["kol-profile", profileId] });
+      return true;
+    },
+    enabled: waiting,
+    refetchInterval: 3000,
+  });
+
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setTimeout(() => setWaiting(false), 120_000);
+    return () => clearTimeout(timer);
+  }, [waiting]);
+
+  const mut = useMutation({
+    mutationFn: () => api.regenerateKolSummary(profileId),
+    onMutate: () => setWaiting(true),
+    onError: () => setWaiting(false),
+  });
+
+  return (
+    <div className="flex items-center gap-2">
+      {mut.isError && (
+        <span className="text-[11px] text-red-400">
+          {(mut.error as Error)?.message?.slice(0, 80)}
+        </span>
+      )}
+      <button onClick={() => mut.mutate()} disabled={mut.isPending || waiting}
+        className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">
+        {mut.isPending || waiting
+          ? <Loader2 size={11} className="animate-spin" />
+          : <Sparkles size={11} />}
+        {waiting ? "Writing…" : hasSummary ? "Regenerate" : "Generate"}
+      </button>
+    </div>
+  );
+}
+
+
+function ResearchRecord({ research }: { research: KolResearch }) {
+  const hasRecord = research.publication_count > 0 || research.trial_count > 0;
+  if (!hasRecord) {
+    return (
+      <p className="text-sm text-gray-400">
+        No publications or trials collected yet — these arrive from Europe PMC and
+        ClinicalTrials.gov on the nightly sync.
+      </p>
+    );
+  }
+
+  const stats = [
+    { label: "Publications", value: research.publication_count },
+    { label: "Citations", value: research.total_citations },
+    { label: "Open access", value: research.open_access_count },
+    { label: "Trials", value: research.trial_count },
+  ];
+  const untracked = research.collaborators.filter((c) => !c.tracked);
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        {stats.map((s) => (
+          <div key={s.label} className="p-2.5 rounded-lg bg-slate-50/60 dark:bg-white/5">
+            <p className="text-lg font-bold text-gray-800 dark:text-white tabular-nums">{s.value}</p>
+            <p className="text-[10px] text-gray-400">{s.label}</p>
+          </div>
+        ))}
+      </div>
+
+      {research.top_journals.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+            Where they publish
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {research.top_journals.map((j) => (
+              <span key={j.journal}
+                className="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-gray-600 dark:text-[#94a3b8]">
+                {j.journal} <span className="tabular-nums text-gray-400">×{j.count}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {research.collaborators.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-baseline justify-between gap-2">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Who they publish with
+            </div>
+            {untracked.length > 0 && (
+              <span className="text-[10px] text-amber-600 dark:text-amber-400">
+                {untracked.length} outside the tracked list
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {research.collaborators.map((c) => (
+              <span key={c.name}
+                title={c.tracked ? "Already tracked" : "Not tracked — a candidate to add"}
+                className={cn("text-[11px] px-2 py-0.5 rounded-full",
+                  c.tracked
+                    ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                    : "bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300")}>
+                {c.name} <span className="tabular-nums opacity-70">×{c.papers}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {research.publications.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+            Recent publications
+          </div>
+          <div className="space-y-1.5">
+            {research.publications.slice(0, 8).map((pub) => (
+              <a key={pub.url} href={pub.url} target="_blank" rel="noreferrer"
+                className="block p-2.5 rounded-lg border border-slate-200/60 dark:border-white/5 hover:border-pharma-blue/40 transition-colors">
+                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-snug">{pub.title}</p>
+                <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-400 flex-wrap">
+                  {pub.journal && <span className="font-medium">{pub.journal}</span>}
+                  {pub.date && <span>· {pub.date.slice(0, 10)}</span>}
+                  {pub.cited_by > 0 && <span>· cited {pub.cited_by}×</span>}
+                  {pub.open_access && (
+                    <span className="text-emerald-600 dark:text-emerald-400">· open access</span>
+                  )}
+                </div>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {research.trials.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+            Registered trials
+          </div>
+          <div className="space-y-1.5">
+            {research.trials.slice(0, 6).map((t) => (
+              <a key={t.url} href={t.url} target="_blank" rel="noreferrer"
+                className="block p-2.5 rounded-lg border border-slate-200/60 dark:border-white/5 hover:border-pharma-blue/40 transition-colors">
+                <p className="text-sm text-gray-700 dark:text-[#e2e8f0] leading-snug">{t.title}</p>
+                <div className="flex items-center gap-2 mt-1 text-[10px] text-gray-400 flex-wrap">
+                  {t.nct_id && <span className="font-medium">{t.nct_id}</span>}
+                  {t.phase && <span>· {t.phase}</span>}
+                  {t.status && <span>· {t.status.replace(/_/g, " ").toLowerCase()}</span>}
+                </div>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 function SentimentBar({ sentiment }: { sentiment: Record<string, number> }) {
   const total = Object.values(sentiment).reduce((a, b) => a + b, 0);
@@ -113,8 +295,11 @@ function ProfileDetail({ id, onClose }: { id: number; onClose: () => void }) {
           <>
             {profile.summary_bullets.length > 0 ? (
               <div className="space-y-2">
-                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                  Summary of what they said
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                    Summary of what they said
+                  </div>
+                  <SynthesisButton profileId={profile.id} hasSummary />
                 </div>
                 <ul className="space-y-1.5">
                   {profile.summary_bullets.map((bullet, i) => (
@@ -131,9 +316,13 @@ function ProfileDetail({ id, onClose }: { id: number; onClose: () => void }) {
                 )}
               </div>
             ) : (
-              <p className="text-sm text-gray-400">
-                No summary yet — one is written for each KOL on every pipeline run.
-              </p>
+              <div className="space-y-2">
+                <p className="text-sm text-gray-400">
+                  No synthesis yet — press Generate to write one from the
+                  {" "}{profile.insight_count} statements collected.
+                </p>
+                <SynthesisButton profileId={profile.id} hasSummary={false} />
+              </div>
             )}
 
             {profile.so_what && (
@@ -142,6 +331,15 @@ function ProfileDetail({ id, onClose }: { id: number; onClose: () => void }) {
                   So what for pharma
                 </div>
                 <p className="text-sm text-gray-700 dark:text-[#e2e8f0] whitespace-pre-wrap">{profile.so_what}</p>
+              </div>
+            )}
+
+            {profile.research && (
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  Research record
+                </div>
+                <ResearchRecord research={profile.research} />
               </div>
             )}
 

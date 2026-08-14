@@ -219,9 +219,32 @@ export interface KolStatement {
   category: string; url: string; source_name: string; source_scope: string; date: string;
 }
 
+/** A KOL's publication and trial record, computed from registry metadata
+ *  rather than read out of abstracts — journals, citations and co-authors are
+ *  facts, and inferring them would put invented numbers in front of a reader. */
+export interface KolResearch {
+  publication_count: number;
+  trial_count: number;
+  total_citations: number;
+  open_access_count: number;
+  top_journals: { journal: string; count: number }[];
+  /** Who they publish with. `tracked: false` is the actionable half — an
+   *  influential voice outside the current audience. */
+  collaborators: { name: string; papers: number; tracked: boolean }[];
+  publications: {
+    title: string; url: string; journal: string | null; date: string;
+    cited_by: number; open_access: boolean;
+  }[];
+  trials: {
+    title: string; url: string; nct_id: string | null;
+    phase: string | null; status: string | null; date: string;
+  }[];
+}
+
 export interface KolProfile extends KolProfileCard {
   known_urls: string[];
   window_days: number;
+  research?: KolResearch;
   sentiment: Record<string, number>;
   top_topics: { topic: string; count: number }[];
   per_week: Record<string, number>;
@@ -805,6 +828,10 @@ export const api = {
       `/targets/profiles?target_type=${targetType}` + (q ? `&q=${encodeURIComponent(q)}` : "")),
   kolProfile: (id: number, days = 30) =>
     req<KolProfile>(`/targets/${id}/profile?days=${days}`),
+  /** Write this person's synthesis now, without waiting for a pipeline run. */
+  regenerateKolSummary: (id: number) =>
+    req<{ queued: boolean; insights: number }>(
+      `/targets/${id}/summary`, { method: "POST" }),
   shareOfVoice: (days = 30, source = "all") =>
     req<ShareOfVoice>(`/stats/share-of-voice?days=${days}&source=${source}`),
 

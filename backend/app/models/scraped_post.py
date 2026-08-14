@@ -25,6 +25,10 @@ class ScrapedPost(Base):
     title: Mapped[str | None] = mapped_column(Text)
     raw_content: Mapped[str | None] = mapped_column(Text)
     published_date: Mapped[str | None] = mapped_column(String(32))  # ISO date string
+    # JSON: structured facts that came with the document — co-authors, citation
+    # count, journal, trial phase/NCT. Shape differs by lane, so it is not split
+    # into columns.
+    source_meta: Mapped[str | None] = mapped_column(Text)
 
     # SHA256 of normalised content — primary dedup key
     content_hash: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)

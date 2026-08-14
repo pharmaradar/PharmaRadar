@@ -13,6 +13,7 @@ official, so this is the cheapest content in the platform by a wide margin.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import structlog
 from sqlalchemy import select
@@ -41,6 +42,7 @@ async def _save_documents(target_id: int, documents: list[dict], lane: str) -> i
     from app.services.fr_sources import Scope
 
     saved = 0
+    saved_meta = 0
     async with CelerySessionLocal() as sess:
         for doc in documents:
             body = (doc.get("text") or "").strip()
@@ -50,9 +52,38 @@ async def _save_documents(target_id: int, documents: list[dict], lane: str) -> i
             content = f"{title}\n\n{body}".strip()
             digest = sha256_hash(content)
 
-            exists = await sess.execute(
-                select(ScrapedPost.id).where(ScrapedPost.content_hash == digest))
-            if exists.scalars().first():
+            meta = json.dumps({
+                k: v for k, v in {
+                    "authors": doc.get("authors"),
+                    "cited_by": doc.get("cited_by"),
+                    "open_access": doc.get("is_open_access"),
+                    "journal": doc.get("source_name"),
+                    "nct_id": doc.get("nct_id"),
+                    "phase": doc.get("phase"),
+                    "status": doc.get("status"),
+                }.items() if v not in (None, "")
+            })
+
+            existing = (await sess.execute(
+                select(ScrapedPost).where(ScrapedPost.content_hash == digest)
+            )).scalars().first()
+            if existing:
+                # Already held. Refresh metadata rather than deleting and
+                # re-inserting — the insights extracted from this row point at
+                # its id. Rows written before the journal field was read
+                # correctly carry the "Europe PMC" placeholder, so a stale
+                # journal is refreshed too, not just a missing one.
+                stale_journal = False
+                if existing.source_meta:
+                    try:
+                        stale_journal = (json.loads(existing.source_meta).get("journal")
+                                         == "Europe PMC")
+                    except Exception:               # noqa: BLE001
+                        stale_journal = True
+                if not existing.source_meta or stale_journal:
+                    existing.source_meta = meta
+                    existing.source_name = doc.get("source_name") or existing.source_name
+                    saved_meta += 1
                 continue
 
             sess.add(ScrapedPost(
@@ -72,10 +103,13 @@ async def _save_documents(target_id: int, documents: list[dict], lane: str) -> i
                 # French KOL, which the target link already records.
                 source_scope=Scope.GLOBAL.value,
                 source_category="publication" if lane == "publication" else "trial",
+                source_meta=meta,
             ))
             saved += 1
-        if saved:
+        if saved or saved_meta:
             await sess.commit()
+    if saved_meta:
+        logger.info("literature.meta_backfilled", target_id=target_id, rows=saved_meta)
     return saved
 
 
