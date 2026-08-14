@@ -166,6 +166,40 @@ export default function ReportView({ scope, scopeId, report }: ReportViewProps) 
         </div>
       )}
 
+      {/* The evidence base, stated up front.
+          A report written from 8 documents reads very differently from one
+          written from 50 — measured on this data, the thin one had the model
+          writing "extreme scarcity" while the reader saw only confident prose.
+          Showing the count lets the client weigh the conclusions themselves. */}
+      {(report.item_count > 0 || report.window_days > 0) && (
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          {report.item_count > 0 && (
+            <span className={cn("px-2 py-0.5 rounded-full font-medium",
+              report.item_count < 15
+                ? "bg-amber-50 dark:bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                : "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300")}>
+              {report.item_count} sources analysed
+            </span>
+          )}
+          {report.window_days > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300">
+              last {report.window_days} days
+            </span>
+          )}
+          {report.voice_exact_share > 0 && (
+            <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-300"
+              title="Share of speakers identified from tracked records rather than inferred from the text">
+              {report.voice_exact_share}% speakers identified
+            </span>
+          )}
+          {report.item_count > 0 && report.item_count < 15 && (
+            <span className="text-amber-600 dark:text-amber-400">
+              Thin evidence — widen the period or add sources before acting on this.
+            </span>
+          )}
+        </div>
+      )}
+
       {report.summary_md && (
         <div>
           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">
@@ -247,7 +281,21 @@ export default function ReportView({ scope, scopeId, report }: ReportViewProps) 
                     <div className="text-xs text-slate-400 mt-0.5">
                       {post.author || "?"} - {post.platform || "web"} - {post.engagement.toLocaleString()} engagement
                     </div>
-                    {post.why && <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">{post.why}</div>}
+                    {/* `says`/`benefit` split on newer reports; older ones only
+                        carry the combined `why`. */}
+                    {(post.says || post.why) && (
+                      <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                        {post.says || post.why}
+                      </div>
+                    )}
+                    {post.benefit && (
+                      <div className="text-xs text-emerald-700 dark:text-emerald-300 mt-1">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider mr-1.5">
+                          How we can use it
+                        </span>
+                        {post.benefit}
+                      </div>
+                    )}
                   </div>
                   <ExternalLink size={14} className="text-slate-300 group-hover:text-pharma-blue shrink-0 mt-1" />
                 </div>

@@ -227,17 +227,24 @@ async def _gather_db_posts(topic=None, congress=None, window_days: int | None = 
             .where(_match_any(terms, SocialPost.text, SocialPost.topic, SocialPost.hashtags))
             .where(social_not_ae())
         )
-        if topic is not None and topic.language_filter:
+        if topic is not None:
             # France is a SOURCE property, not a language one. Filtering by
             # detected language both over- and under-selects: it admits
             # francophone Quebec/Belgian accounts and hides French institutions
             # that publish in English. Measured on this corpus: 21 French-source
             # posts wrongly excluded, 75 non-French-source posts wrongly let in.
-            # Social Trends already filters on source_scope; this now matches.
-            if topic.language_filter == "fr":
+            #
+            # French is also the DEFAULT, not an opt-in. The client's brief is
+            # that all content be limited to French sources; a topic saved
+            # without a language set previously got no restriction at all, and
+            # 8 global posts reached a report that way. `all` is the explicit
+            # escape hatch for the rare topic that genuinely needs worldwide
+            # coverage.
+            wanted = (topic.language_filter or "fr").lower()
+            if wanted == "fr":
                 social_query = social_query.where(SocialPost.source_scope == Scope.FR.value)
-            else:
-                social_query = social_query.where(SocialPost.language == topic.language_filter)
+            elif wanted != "all":
+                social_query = social_query.where(SocialPost.language == wanted)
         social_query = _exclude(
             social_query, exclusions, SocialPost.text, SocialPost.topic, SocialPost.hashtags
         )
@@ -335,6 +342,25 @@ def _compute_main_authors(candidates: list[dict]) -> list[dict]:
 
 
 _PICK_ANY_RE = re.compile(r"\[(\d+)\]\s*(.+)")
+
+
+def _split_says_benefit(body: str) -> dict:
+    """Split "SAYS: … | BENEFIT: …" into its two halves.
+
+    Forgiving about the separator: models alternate between '|', an em dash and
+    a newline, and losing the whole line to punctuation is worse than an
+    imperfect split. Anything unparseable stays as `says` so no content is lost.
+    """
+    text = (body or "").strip()
+    says, benefit = text, ""
+    lowered = text.lower()
+    if "benefit:" in lowered:
+        cut = lowered.index("benefit:")
+        says, benefit = text[:cut], text[cut + len("benefit:"):]
+    says = says.strip().strip("|—-").strip()
+    if says.lower().startswith("says:"):
+        says = says[5:].strip()
+    return {"says": says, "benefit": benefit.strip().strip("|").strip(), "why": text}
 
 
 def _parse_picks_loose(text: str) -> list[dict]:
@@ -444,7 +470,10 @@ def _synthesize(topic, candidates: list[dict], congress=None,
             "##VOLUME##\n1-2 paragraphs interpreting the volume figures given above, "
             "including the direction of travel and any caveat about date coverage.\n"
             "##SUBTOPICS##\n4-6 lines starting '- ': sub-topics worth tracking next, with why.\n"
-            "##IMPORTANT_POSTS##\n5-8 lines like '[12] one line on why this post matters'.\n"
+            "##IMPORTANT_POSTS##\n5-8 lines, each EXACTLY in this form:\n"
+            "[12] SAYS: what that specific item actually claims or reports, in one "
+            "sentence. | BENEFIT: how Roche can use it — the concrete action, "
+            "opening or risk it creates, in one sentence.\n"
             "##MAIN_AUTHORS##\nOne line per notable author: '- Author Name - their role in this conversation'."
         )
         user = (
@@ -480,7 +509,10 @@ def _synthesize(topic, candidates: list[dict], congress=None,
             "##VOLUME##\n1-2 paragraphs interpreting the volume figures given above, "
             "including the direction of travel and any caveat about date coverage.\n"
             "##SUBTOPICS##\n4-6 lines starting '- ': sub-topics worth tracking next, with why.\n"
-            "##IMPORTANT_POSTS##\n5-8 lines like '[12] why this post or article matters'.\n"
+            "##IMPORTANT_POSTS##\n5-8 lines, each EXACTLY in this form:\n"
+            "[12] SAYS: what that specific item actually claims or reports, in one "
+            "sentence. | BENEFIT: how Roche can use it — the concrete action, "
+            "opening or risk it creates, in one sentence.\n"
             "##MAIN_AUTHORS##\nOne line per notable author: '- Author Name - their role in this conversation'."
         )
         question_text = "\n".join(
@@ -516,7 +548,10 @@ def _synthesize(topic, candidates: list[dict], congress=None,
                 "engagement": item["engagement"],
                 "platform": item["platform"],
                 "kind": item["kind"],
-                "why": pick["why"],
+                # Split the reading from the use, matching the market report and
+                # account analyses. `why` stays populated for reports stored
+                # before the split and for the PDF renderer.
+                **_split_says_benefit(pick["why"]),
             })
 
     main_authors = _compute_main_authors(candidates)

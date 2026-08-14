@@ -541,7 +541,12 @@ export interface BurningTopicImportantPost {
   engagement: number;
   platform?: string;
   kind?: string;
+  /** Combined line, kept for reports stored before the split below. */
   why?: string;
+  /** What this item actually claims or reports. */
+  says?: string;
+  /** How Roche can use it — the action, opening or risk it creates. */
+  benefit?: string;
 }
 
 export interface MarketReportAuthor {
