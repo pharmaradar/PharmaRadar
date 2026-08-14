@@ -502,11 +502,34 @@ def _extract_brief_strings(raw: str) -> list[str]:
         except Exception:
             pass
 
-    # 2) Fallback: pull quoted sentences (survives a truncated array).
+    # 2) Split on ITEM BOUNDARIES, not on quotes.
+    #
+    # The old fallback matched quoted runs, which shatters a string containing
+    # an unescaped inner quote — a model writing  Roche's "Alecensa" in NSCLC
+    # yielded the fragment ' in NSCLC...' as if it were a whole finding, and it
+    # rendered that way on the dashboard. A real item boundary is  ", "  so
+    # split on that instead and tolerate quotes inside an item.
+    if m:
+        body = m.group(0).strip()[1:-1].strip()          # drop the [ ]
+        parts = _re.split(r'"\s*,\s*"', body)
+        if parts:
+            out = []
+            for part in parts:
+                text = part.strip().strip('"').strip()
+                # Unescape what json.loads would have handled.
+                text = text.replace('\\"', '"').replace("\\n", " ").strip()
+                if len(text) >= 20:
+                    out.append(text)
+            if out:
+                return out
+
+    # 3) Last resort: quoted sentences. Fragments are dropped — a point that
+    #    starts mid-sentence is noise, and showing it as a finding is worse
+    #    than showing one point fewer.
     strings = _re.findall(r'"((?:[^"\\]|\\.)+[.!?])"', raw)
     if not strings:
         strings = [s for s in _re.findall(r'"((?:[^"\\]|\\.){20,})"', raw) if not s.startswith("http")]
-    return strings
+    return [s.strip() for s in strings if s.strip() and s.strip()[0].isupper()]
 
 
 def _brief_priority(s: str) -> str:
@@ -587,7 +610,8 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         "You are a senior pharma intelligence analyst for Roche's oncology strategy team.\n\n"
         "Below are real KOL statements and top social media posts from the last 30 days.\n"
         "Generate sharp, SPECIFIC intelligence points combining both KOL and social signals — "
-        "exactly 3 to 5 points (never fewer than 3), the MOST important ones only.\n\n"
+        "5 to 8 points (never fewer than 5), ordered most important first. Cover "
+        "DISTINCT angles — do not restate one finding several ways.\n\n"
         "Rules:\n"
         "- Every point must matter to Roche France specifically — its drugs, its competitors, "
         "or its oncology strategy in France\n"
@@ -596,7 +620,8 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         "- Flag competitive threats or unmet needs explicitly\n"
         "- Do NOT write generic statements — trace every point back to the data\n"
         "- Each point max 30 words\n"
-        "- You MUST return a minimum of 3 points even if signals are sparse\n\n"
+        "- You MUST return at least 5 points; if signals are genuinely sparse, "
+        "cover more of the material rather than repeating a point\n\n"
         f"KOL STATEMENTS ({len(insights)}):\n{insights_text}\n\n"
         f"TOP SOCIAL POSTS ({len(social_posts)}):\n{social_text}\n\n"
         "Return ONLY a JSON array of at least 3 (up to 5) strings. No markdown:\n"
@@ -606,10 +631,15 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("combined_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
-        points = [{"text": s, "source": "both", "priority": _brief_priority(s)} for s in strings[:7]]
+        points = [{"text": s, "source": "both", "priority": _brief_priority(s)} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -850,7 +880,12 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
     llm_error = None
     sections = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("social_brief.llm_raw", raw=raw[:500])
         raw_clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
         m = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
@@ -948,7 +983,8 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         "You are a senior pharma intelligence analyst for Roche's oncology strategy team.\n\n"
         f"Below are {len(insights)} real KOL statements from the last 30 days.\n"
         "Generate sharp, SPECIFIC intelligence points based ONLY on what these KOLs said — "
-        "exactly 3 to 5 points (never fewer than 3), the MOST important ones only.\n\n"
+        "5 to 8 points (never fewer than 5), ordered most important first. Cover "
+        "DISTINCT angles — do not restate one finding several ways.\n\n"
         "Rules:\n"
         "- Every point must matter to Roche France specifically — its drugs, its competitors, "
         "or its oncology strategy in France\n"
@@ -957,7 +993,8 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         "- Flag competitive threats, unmet needs, or sentiment shifts explicitly\n"
         "- Do NOT write generic statements — trace every point back to a specific KOL\n"
         "- Each point max 30 words\n"
-        "- You MUST return a minimum of 3 points even if signals are sparse\n\n"
+        "- You MUST return at least 5 points; if signals are genuinely sparse, "
+        "cover more of the material rather than repeating a point\n\n"
         f"KOL STATEMENTS:\n{insights_text}\n\n"
         "Return ONLY a JSON array of at least 3 (up to 5) strings. No markdown:\n"
         '["point 1", "point 2", "point 3"]'
@@ -966,10 +1003,15 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("kol_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
-        points = [{"text": s, "source": "kol", "priority": _brief_priority(s)} for s in strings[:7]]
+        points = [{"text": s, "source": "kol", "priority": _brief_priority(s)} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -1054,7 +1096,8 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         "You are a senior competitive-intelligence analyst for Roche's oncology strategy team.\n\n"
         f"Below are {len(insights)} statements/publications from monitored COMPETITOR accounts "
         "(rival pharma companies) over the last 30 days.\n"
-        "Generate sharp, SPECIFIC competitive-intelligence points — exactly 3 to 5 points "
+        "Generate sharp, SPECIFIC competitive-intelligence points — 5 to 8 points, "
+        "ordered most important first, each on a DISTINCT angle "
         "(never fewer than 3), the MOST important ones only.\n\n"
         "Rules:\n"
         "- Focus on what competitors are launching, claiming, trialing, or signalling\n"
@@ -1070,10 +1113,15 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("competitor_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
-        points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:7]]
+        points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
@@ -1394,12 +1442,17 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     llm_error = None
     points = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2048)
+        # gemini-2.5-flash counts REASONING against this budget, and these prompts
+        # carry the whole insight corpus (~22k chars for 60 insights). Measured at
+        # 2048: the JSON array was cut mid-string, parsing failed, and the regex
+        # fallback salvaged only the first CLOSED quote — one point from sixty
+        # insights. At 8192 the same prompt returns five.
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("comparison_brief.llm_raw", raw=raw[:400])
         strings = _re.findall(r'"((?:[^"\\]|\\.)+[.!?])"', raw)
         if not strings:
             strings = [s for s in _re.findall(r'"((?:[^"\\]|\\.){20,})"', raw) if not s.startswith("http")]
-        points = [{"text": s, "source": "both", "priority": "high"} for s in strings[:7]]
+        points = [{"text": s, "source": "both", "priority": "high"} for s in strings[:10]]
         if not points:
             llm_error = f"No strings extracted: {raw[:200]}"
     except Exception as exc:
