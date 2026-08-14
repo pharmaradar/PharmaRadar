@@ -958,6 +958,12 @@ export const api = {
       req<{ deleted: number }>(`/accounts/${id}`, { method: "DELETE" }),
     refresh: (id: number) =>
       req<{ queued: boolean }>(`/accounts/${id}/refresh`, { method: "POST" }),
+    // Bulk pause/resume. Sends the ids on screen rather than "all", so the
+    // button means what the current filter shows.
+    setActive: (ids: number[], active: boolean) =>
+      req<{ updated: number; active: boolean }>("/accounts/active", {
+        method: "POST", body: JSON.stringify({ ids, active }),
+      }),
     scanAll: () => req<{ queued: boolean }>("/accounts/scan", { method: "POST" }),
     reportPdf: (id: number) =>
       req<{ pdf_url: string }>(`/accounts/${id}/report/pdf`, { method: "POST" }),

@@ -25,6 +25,26 @@ import { cn } from "@/lib/utils";
  * keyword scan, and it should not queue behind it or fail when it fails.
  */
 
+/**
+ * Collection state as a live dot — green while an account is being collected,
+ * red while it is paused.
+ *
+ * The halo is `animate-ping` behind a solid centre, gated on `motion-safe`:
+ * a full page is 51 cards, and 51 simultaneous pings is exactly what someone
+ * who set prefers-reduced-motion asked not to be shown. They still get the
+ * colour, which is what carries the meaning.
+ */
+function PulseDot({ active, size = 7 }: { active: boolean; size?: number }) {
+  return (
+    <span className="relative inline-flex shrink-0" style={{ width: size, height: size }}>
+      <span className={cn("absolute inline-flex h-full w-full rounded-full opacity-75 motion-safe:animate-ping",
+        active ? "bg-emerald-400" : "bg-red-400")} />
+      <span className={cn("relative inline-flex h-full w-full rounded-full",
+        active ? "bg-emerald-500" : "bg-red-500")} />
+    </span>
+  );
+}
+
 const PLATFORM_META: Record<string, { label: string; icon: React.ElementType; tint: string }> = {
   twitter:   { label: "X / Twitter", icon: Twitter,   tint: "text-sky-500" },
   linkedin:  { label: "LinkedIn",    icon: Linkedin,  tint: "text-blue-600 dark:text-blue-400" },
@@ -830,6 +850,11 @@ export default function AccountTracking() {
       api.accounts.update(id, { active }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
   });
+  const bulkMut = useMutation({
+    mutationFn: ({ ids, active }: { ids: number[]; active: boolean }) =>
+      api.accounts.setActive(ids, active),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["accounts"] }),
+  });
 
   const accounts = (data?.accounts ?? []).filter((a) => {
     if (platform !== "all" && a.platform !== platform) return false;
@@ -839,6 +864,22 @@ export default function AccountTracking() {
   });
   const totals = data?.totals;
   const running = status?.running;
+  // Bulk actions act on what the filters are showing, not on all 51 — so these
+  // are counted from the filtered list, and the buttons say how many.
+  const pausedShown = accounts.filter((a) => !a.active);
+  const activeShown = accounts.filter((a) => a.active);
+
+  function setAllShown(active: boolean) {
+    const targets = active ? pausedShown : activeShown;
+    const scope = accounts.length === (data?.accounts.length ?? 0)
+      ? "" : " currently shown";
+    const consequence = active
+      ? "They will be collected on every sweep — Instagram and Facebook are billed per refresh."
+      : "They stay in the list with their posts; they just stop being collected.";
+    if (!confirm(`${active ? "Activate" : "Pause"} ${targets.length} account`
+      + `${targets.length === 1 ? "" : "s"}${scope}?\n\n${consequence}`)) return;
+    bulkMut.mutate({ ids: targets.map((a) => a.id), active });
+  }
 
   return (
     <div className="space-y-5">
@@ -897,13 +938,20 @@ export default function AccountTracking() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {[
             { label: "Accounts tracked", value: totals.accounts },
-            { label: "Active", value: totals.active },
+            // Dotted so the page answers "is anything actually being collected?"
+            // before you read a single card. Red the moment nothing is.
+            { label: "Active", value: totals.active, dot: totals.active > 0 },
             { label: "Producing posts", value: totals.producing },
             { label: "Posts collected", value: totals.posts },
           ].map((stat) => (
             <div key={stat.label} className="glass rounded-xl p-3">
               <p className="text-xl font-bold text-gray-800 dark:text-white tabular-nums">{stat.value}</p>
-              <p className="text-[11px] text-gray-400">{stat.label}</p>
+              <p className="text-[11px] text-gray-400 flex items-center gap-1.5">
+                {stat.dot !== undefined && <PulseDot active={stat.dot} size={6} />}
+                {stat.label}
+                {stat.dot !== undefined && totals.accounts > totals.active &&
+                  ` · ${totals.accounts - totals.active} paused`}
+              </p>
             </div>
           ))}
         </div>
@@ -930,6 +978,29 @@ export default function AccountTracking() {
             {value === "all" ? "All" : PLATFORM_META[value].label}
           </button>
         ))}
+
+        {isAdmin && accounts.length > 0 && (
+          <div className="ml-auto flex items-center gap-1.5">
+            <button onClick={() => setAllShown(true)}
+              disabled={!pausedShown.length || bulkMut.isPending}
+              title={pausedShown.length
+                ? `Resume collecting ${pausedShown.length} paused account${pausedShown.length === 1 ? "" : "s"}`
+                : "Every account shown is already live"}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-emerald-200 dark:border-emerald-500/20 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 disabled:opacity-40 disabled:hover:bg-transparent transition-colors">
+              <PulseDot active size={6} />
+              Activate all{pausedShown.length ? ` (${pausedShown.length})` : ""}
+            </button>
+            <button onClick={() => setAllShown(false)}
+              disabled={!activeShown.length || bulkMut.isPending}
+              title={activeShown.length
+                ? `Stop collecting ${activeShown.length} account${activeShown.length === 1 ? "" : "s"} — they stay in the list`
+                : "Every account shown is already paused"}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-red-200 dark:border-red-500/20 text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-500/10 disabled:opacity-40 disabled:hover:bg-transparent transition-colors">
+              <PulseDot active={false} size={6} />
+              Pause all{activeShown.length ? ` (${activeShown.length})` : ""}
+            </button>
+          </div>
+        )}
       </div>
 
       {isLoading ? (
@@ -1014,9 +1085,30 @@ function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle,
             PLATFORM_TINT[account.platform] ?? "bg-gray-100 text-gray-600")}>
             <Icon size={10} /> {meta?.label ?? account.platform}
           </span>
-          {!account.active && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-white/5 text-gray-500">
-              paused
+          {/* One control, both states. The old version showed a badge only when
+              paused and hid the switch behind an unlabelled X in the icon row,
+              so "is this account on?" and "how do I turn it off?" had two
+              different answers in two different places. */}
+          {isAdmin ? (
+            <button onClick={(e) => { e.stopPropagation(); onToggle(); }}
+              title={account.active
+                ? "Collecting on every sweep — click to pause"
+                : "Paused — click to resume collecting"}
+              className={cn(
+                "text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-1 transition-colors",
+                account.active
+                  ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-500/20"
+                  : "bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-300 hover:bg-red-100 dark:hover:bg-red-500/20")}>
+              <PulseDot active={account.active} size={6} />
+              {account.active ? "Live" : "Paused"}
+            </button>
+          ) : (
+            <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-1",
+              account.active
+                ? "bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                : "bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-300")}>
+              <PulseDot active={account.active} size={6} />
+              {account.active ? "Live" : "Paused"}
             </span>
           )}
           <span className={cn("ml-auto text-xs tabular-nums px-2 py-0.5 rounded font-medium",
@@ -1088,11 +1180,6 @@ function AccountCard({ account, isAdmin, onOpen, onEdit, onRefresh, onToggle,
                   <ExternalLink size={12} />
                 </a>
               )}
-              <button onClick={onToggle}
-                title={account.active ? "Pause — keep it, stop collecting" : "Resume"}
-                className="p-1 text-gray-400 hover:text-pharma-blue">
-                {account.active ? <X size={12} /> : <Check size={12} />}
-              </button>
               <button onClick={onDelete} title="Remove. Posts already collected are kept."
                 className="p-1 text-gray-400 hover:text-red-500">
                 <Trash2 size={12} />

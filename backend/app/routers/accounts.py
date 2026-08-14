@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_admin
@@ -38,6 +38,11 @@ class AccountIn(BaseModel):
     role: str | None = None
     category: str | None = None
     notes: str | None = None
+
+
+class BulkActive(BaseModel):
+    ids: list[int]
+    active: bool
 
 
 class AccountPatch(BaseModel):
@@ -332,6 +337,26 @@ async def scan_status(user=Depends(get_current_user)):
     """Progress of the current sweep, for the page's progress bar."""
     from app.tasks.accounts import read_status
     return read_status()
+
+
+@router.post("/active", dependencies=[Depends(require_admin)])
+async def set_active(body: BulkActive, db: AsyncSession = Depends(get_db)):
+    """Activate or pause several accounts at once.
+
+    The ids are sent explicitly rather than the endpoint acting on "all",
+    because the page is filtered by platform and search — the button has to
+    mean the accounts the user can actually see, and only the client knows
+    which those are. It also makes an accidental sweep over all 51 impossible.
+    """
+    if not body.ids:
+        raise HTTPException(422, "no accounts given")
+    result = await db.execute(
+        update(TrackedAccount)
+        .where(TrackedAccount.id.in_(body.ids))
+        .values(active=body.active)
+    )
+    await db.commit()
+    return {"updated": result.rowcount, "active": body.active}
 
 
 @router.post("/scan", dependencies=[Depends(require_admin)])
