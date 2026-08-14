@@ -144,6 +144,11 @@ celery_app.conf.update(
             "task": "app.tasks.literature.sync_trials",
             "schedule": crontab(hour=3, minute=50),
         },
+        # Press feeds move daily and cost nothing, so they run twice a day.
+        "sync-fr-feeds": {
+            "task": "app.tasks.literature.sync_fr_feeds",
+            "schedule": crontab(hour="6,18", minute=10),
+        },
         # Account tracking runs on its own daily cadence, deliberately not
         # coupled to the keyword social scan: the client refreshes individual
         # accounts on demand, and this is the background sweep that keeps the

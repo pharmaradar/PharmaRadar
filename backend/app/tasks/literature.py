@@ -217,3 +217,64 @@ def sync_publications(self, target_ids: list[int] | None = None) -> dict:
 def sync_trials(self, target_ids: list[int] | None = None) -> dict:
     """Fetch registry trials for tracked competitors."""
     return asyncio.run(_run_trials(target_ids))
+
+
+async def _run_feeds() -> dict:
+    """Store relevant items from French medical feeds as discovery results.
+
+    DiscoveryResult, not ScrapedPost: these belong to no tracked target. They
+    are general French market coverage, which is what the "all population" view
+    and the topic reports read from.
+    """
+    from app.database import CelerySessionLocal
+    from app.models import DiscoveryResult
+    from app.services.deduplicator import sha256_hash
+    from app.services.fr_feeds import fetch_all
+    from app.services.fr_sources import Scope
+
+    loop = asyncio.get_running_loop()
+    items = await loop.run_in_executor(None, fetch_all)
+
+    saved = 0
+    async with CelerySessionLocal() as sess:
+        for item in items:
+            content = f"{item['title']}\n\n{item['snippet']}".strip()
+            digest = sha256_hash(content)
+            exists = await sess.execute(
+                select(DiscoveryResult.id).where(DiscoveryResult.content_hash == digest))
+            if exists.scalars().first():
+                continue
+            sess.add(DiscoveryResult(
+                query="french medical press",
+                url=item["url"],
+                title=item["title"],
+                snippet=item["snippet"],
+                source_name=item["source_name"],
+                published_date=item["published_date"] or None,
+                content_hash=digest,
+                media_type="article",
+                language="fr",
+                domain=(item["url"].split("/")[2] if "//" in item["url"] else None),
+                # A French outlet's own feed is French by construction — this is
+                # the one lane where the scope needs no detection.
+                source_scope=Scope.FR.value,
+            ))
+            saved += 1
+        if saved:
+            await sess.commit()
+
+    logger.info("literature.feeds_done", fetched=len(items), saved=saved)
+    return {"fetched": len(items), "saved": saved}
+
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.literature.sync_fr_feeds",
+    queue="scrape",
+    acks_late=False,
+    soft_time_limit=600,
+    time_limit=720,
+)
+def sync_fr_feeds(self) -> dict:
+    """Pull French medical press feeds."""
+    return asyncio.run(_run_feeds())
