@@ -148,7 +148,10 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
 
   return (
     <div className="glass-panel rounded-xl border border-slate-200/50 dark:border-white/10 shadow-sm overflow-hidden">
-      <div className="px-5 py-4">
+      <div
+        className="px-5 py-4 cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
@@ -162,7 +165,7 @@ function EntryCard({ entry, onEdit }: { entry: Entry; onEdit: (entry: Entry) => 
             <EntryMeta entry={entry} />
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
             {entry.kind === "topic" && (
               <select
                 value={periodDays ?? ""}
