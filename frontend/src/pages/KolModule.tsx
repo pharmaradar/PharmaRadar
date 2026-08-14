@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown, ChevronUp, Compass, ExternalLink, Linkedin, Loader2, Search,
@@ -137,11 +138,14 @@ function KolDiscovery() {
                       </p>
                       <p className="text-[10px] text-gray-400">papers</p>
                     </div>
-                    <a href={`/targets?add=${encodeURIComponent(a.name)}&type=kol`}
+                    {/* Router Link, not a raw href: an <a> forces a full page
+                        reload in an SPA. Targets reads ?add= / ?type= on mount
+                        and prefills its form. */}
+                    <Link to={`/targets?add=${encodeURIComponent(a.name)}&type=kol`}
                       title="Add as a tracked KOL"
                       className="shrink-0 self-center px-2 py-1 text-[11px] border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5">
                       Track
-                    </a>
+                    </Link>
                   </div>
                 ))}
               </div>
