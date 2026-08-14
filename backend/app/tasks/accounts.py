@@ -205,13 +205,15 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
 
 
 async def _run_sweep(account_ids: list[int] | None = None,
-                     publish_status: bool = True) -> dict:
+                     publish_status: bool = True, require_active: bool = True) -> dict:
     from app.database import CelerySessionLocal
     from app.models import AppSettings, TrackedAccount
     from app.services import apify_client
 
     async with CelerySessionLocal() as session:
-        query = select(TrackedAccount).where(TrackedAccount.active.is_(True))
+        query = select(TrackedAccount)
+        if require_active:
+            query = query.where(TrackedAccount.active.is_(True))
         if account_ids:
             query = query.where(TrackedAccount.id.in_(account_ids))
         accounts = (await session.execute(query.order_by(TrackedAccount.id))).scalars().all()
@@ -283,5 +285,12 @@ def refresh_account(self, account_id: int) -> dict:
 
     Several of these can be in flight at once — the UI queues them — so this
     deliberately does not publish to the shared sweep status.
+
+    `require_active=False`: this is a direct, explicit request for ONE named
+    account, not a sweep — clicking Refresh on a paused account is still a
+    request to collect it now. Before this, `_run_sweep`'s active filter made
+    that click a silent no-op: the query returned zero rows, `last_scanned_at`
+    never moved, and the UI polled for up to 180s before giving up — which is
+    indistinguishable from the task never having run.
     """
-    return asyncio.run(_run_sweep([account_id], publish_status=False))
+    return asyncio.run(_run_sweep([account_id], publish_status=False, require_active=False))
