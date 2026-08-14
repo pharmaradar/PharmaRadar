@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ExternalLink, Linkedin, Loader2, Search, Sparkles, TrendingUp, Twitter, Users, X,
+  ChevronDown, ChevronUp, Compass, ExternalLink, Linkedin, Loader2, Search,
+  Sparkles, TrendingUp, Twitter, Users, X,
 } from "lucide-react";
 import { api, type KolProfileCard, type KolResearch } from "@/lib/api";
 import ShareOfVoice from "@/components/ShareOfVoice";
@@ -38,6 +39,121 @@ const PERIODS = [30, 90, 365];
  *  whose insights arrived from publications showed "No summary yet" while
  *  sitting on dozens of statements. Generation runs in a worker, so the panel
  *  polls the profile until the summary lands rather than guessing a delay. */
+/** Who leads this topic in France that we do NOT already follow.
+ *
+ *  The spec asks for "the main speaker for topic X or Y that could be outside
+ *  our current audience". Every other view can only describe the people already
+ *  on the target list; this finds the list itself, ranked by publication volume
+ *  rather than by who happens to post on social media.
+ *
+ *  Measured on lung cancer: four of the ten most prolific French authors were
+ *  untracked, including one with 73k citations.
+ */
+function KolDiscovery() {
+  const [topic, setTopic] = useState("lung cancer");
+  const [submitted, setSubmitted] = useState("lung cancer");
+  const [open, setOpen] = useState(false);
+
+  const { data, isFetching } = useQuery({
+    queryKey: ["kol-discovery", submitted],
+    queryFn: () => api.discoverKols(submitted),
+    enabled: open,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  return (
+    <div className="glass rounded-xl p-4 space-y-3">
+      <button onClick={() => setOpen((v) => !v)}
+        className="flex items-center justify-between w-full gap-3 text-left">
+        <div className="flex items-center gap-2 min-w-0">
+          <Compass size={16} className="text-pharma-blue dark:text-blue-300 shrink-0" />
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-gray-800 dark:text-[#e2e8f0]">
+              Who else leads this topic
+            </h2>
+            <p className="text-xs text-gray-400">
+              Most published French authors, and which we already follow
+            </p>
+          </div>
+        </div>
+        {open ? <ChevronUp size={16} className="text-gray-400" />
+              : <ChevronDown size={16} className="text-gray-400" />}
+      </button>
+
+      {open && (
+        <div className="space-y-3">
+          <div className="flex items-center gap-2">
+            <input value={topic} onChange={(e) => setTopic(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && setSubmitted(topic.trim() || "lung cancer")}
+              placeholder="lung cancer"
+              className="flex-1 px-2.5 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-white/10 bg-transparent" />
+            <button onClick={() => setSubmitted(topic.trim() || "lung cancer")}
+              className="px-3 py-1.5 text-xs bg-pharma-blue text-white rounded-lg hover:bg-pharma-light transition-colors">
+              Search
+            </button>
+          </div>
+
+          {isFetching ? (
+            <p className="flex items-center gap-2 text-sm text-gray-400">
+              <Loader2 size={14} className="animate-spin" /> Ranking authors…
+            </p>
+          ) : !data?.candidates?.length ? (
+            <p className="text-sm text-gray-400">
+              No untracked authors found — everyone leading this topic is already followed.
+            </p>
+          ) : (
+            <>
+              <p className="text-[11px] text-gray-400">
+                {data.tracked_count} of the top authors are already tracked.
+                The rest are candidates to add.
+              </p>
+              <div className="space-y-1.5">
+                {data.candidates.slice(0, 10).map((a) => (
+                  <div key={a.openalex_id}
+                    className="flex items-start gap-3 p-2.5 rounded-lg border border-slate-200/60 dark:border-white/5">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-gray-800 dark:text-[#e2e8f0] truncate">
+                        {a.name}
+                        {/* France-based is what the client is buying; a foreign
+                            co-author of French research is real signal but must
+                            not be mistaken for local coverage. */}
+                        {!a.france_based && a.institution_country && (
+                          <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 dark:bg-white/5 text-gray-500 uppercase">
+                            {a.institution_country}
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-[11px] text-gray-400 truncate">
+                        {a.institution || "institution unknown"}
+                        {a.cited_by_count ? ` · ${a.cited_by_count.toLocaleString()} citations` : ""}
+                      </p>
+                      {a.topics && a.topics.length > 0 && (
+                        <p className="text-[10px] text-gray-400 truncate mt-0.5">{a.topics[0]}</p>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-sm font-bold text-gray-800 dark:text-white tabular-nums">
+                        {a.papers_on_topic}
+                      </p>
+                      <p className="text-[10px] text-gray-400">papers</p>
+                    </div>
+                    <a href={`/targets?add=${encodeURIComponent(a.name)}&type=kol`}
+                      title="Add as a tracked KOL"
+                      className="shrink-0 self-center px-2 py-1 text-[11px] border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5">
+                      Track
+                    </a>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function SynthesisButton({ profileId, hasSummary }: {
   profileId: number; hasSummary: boolean;
 }) {
@@ -476,6 +592,9 @@ export default function KolModule() {
       </div>
 
       <ShareOfVoice />
+
+      {/* Stakeholder identification: who leads this topic that we don't follow. */}
+      <KolDiscovery />
 
       <div className="relative">
         <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />

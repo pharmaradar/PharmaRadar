@@ -205,6 +205,19 @@ export interface AppSettings {
   social_lang_filter: string;
 }
 
+export interface KolCandidate {
+  openalex_id: string;
+  name: string;
+  papers_on_topic: number;
+  tracked: boolean;
+  institution?: string | null;
+  institution_country?: string | null;
+  france_based?: boolean;
+  works_count?: number;
+  cited_by_count?: number;
+  topics?: string[];
+}
+
 export interface KolProfileCard {
   id: number;
   name: string;
@@ -838,6 +851,13 @@ export const api = {
   regenerateKolSummary: (id: number) =>
     req<{ queued: boolean; insights: number }>(
       `/targets/${id}/summary`, { method: "POST" }),
+  /** Who leads a topic in France, ranked by publication volume, flagged
+   *  tracked or not. Free (OpenAlex) — the spec's stakeholder identification. */
+  discoverKols: (topic = "lung cancer", limit = 25) =>
+    req<{
+      topic: string; tracked_count: number;
+      candidates: KolCandidate[]; authors: KolCandidate[];
+    }>(`/targets/discover?topic=${encodeURIComponent(topic)}&limit=${limit}`),
   refreshAllSyntheses: () =>
     req<{ queued: boolean }>("/reports/syntheses/refresh", { method: "POST" }),
   shareOfVoice: (days = 30, source = "all") =>

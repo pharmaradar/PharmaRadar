@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Target
-from app.auth import require_admin
+from app.auth import get_current_user, require_admin
 
 router = APIRouter(prefix="/api/targets", tags=["targets"])
 
@@ -467,3 +467,47 @@ async def regenerate_summary(target_id: int, db: AsyncSession = Depends(get_db))
     except Exception as exc:                        # noqa: BLE001
         raise HTTPException(503, f"queue unavailable: {str(exc)[:120]}") from exc
     return {"queued": True, "task_id": task.id, "insights": count}
+
+
+@router.get("/discover")
+async def discover_kols(topic: str = "lung cancer", country: str = "fr",
+                        since: str = "2025-01-01", limit: int = 25,
+                        db: AsyncSession = Depends(get_db),
+                        user=Depends(get_current_user)):
+    """Who leads this topic in France, ranked, flagged tracked or not.
+
+    Answers the spec's stakeholder question — "the main speaker for topic X that
+    could be outside our current audience" — from publication volume rather than
+    from who happens to post on social media.
+
+    Free and keyless (OpenAlex), so this can be run as often as the client likes.
+    """
+    import asyncio as _asyncio
+
+    from app.services.openalex import rank_candidates
+
+    known = [n for (n,) in (await db.execute(
+        select(Target.name).where(Target.target_type == "kol"))).all() if n]
+
+    try:
+        ranked = await _asyncio.to_thread(
+            rank_candidates, topic, known,
+            country=country, since=since,
+            limit=max(1, min(limit, 50)), enrich_top=12,
+        )
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(502, f"discovery failed: {str(exc)[:180]}") from exc
+
+    candidates = [a for a in ranked if not a.get("tracked")]
+    return {
+        "topic": topic,
+        "country": country,
+        "since": since,
+        "tracked_count": sum(1 for a in ranked if a.get("tracked")),
+        "authors": ranked,
+        # France-based candidates first: a foreign co-author of French research
+        # is real signal, but the client is buying French coverage.
+        "candidates": sorted(candidates,
+                             key=lambda a: (not a.get("france_based"),
+                                            -(a.get("papers_on_topic") or 0))),
+    }
