@@ -61,10 +61,14 @@ const MIN_LIKES_OPTIONS = [
 ];
 
 // Defaults — used for "reset" detection and actual reset
-const LANGUAGE_OPTIONS = [
-  { value: "all", label: "Global (all)" },
-  { value: "fr",  label: "France only" },
-  { value: "en",  label: "English only" },
+// Region, not language. The server selects on `source_scope` — WHERE a post
+// came from — because a French institution writing in English is French-market
+// content, and a Quebec account writing in French is not. Labelling this
+// "Language" described the wrong thing and invited the client-side re-filter
+// removed below.
+const REGION_OPTIONS = [
+  { value: "fr",  label: "France" },
+  { value: "all", label: "Worldwide" },
 ];
 
 const DEFAULTS = { sortBy: "trending", platform: "all", days: 30, kind: "all", minLikes: 0, language: "fr", fromDate: "", toDate: "" };
@@ -276,7 +280,9 @@ export default function SocialTrends() {
     if (kind !== "all")      posts = posts.filter(p => p.kind === kind);
     if (minLikes > 0)        posts = posts.filter(p => (p.likes ?? 0) >= minLikes);
     if (topicFilter)         posts = posts.filter(p => p.topic === topicFilter);
-    if (language !== "all")  posts = posts.filter(p => p.language === language);
+    // No client-side region filter: the API already selected by source_scope.
+    // Re-filtering on the DETECTED language here silently dropped French
+    // institutions that post in English — 21 posts on the current corpus.
     if (fromDate)            posts = posts.filter(p => p.posted_at && p.posted_at >= fromDate);
     if (toDate)              posts = posts.filter(p => p.posted_at && p.posted_at <= toDate + "T23:59:59Z");
     // Date filter on posted_at; skip posts with no date
@@ -295,7 +301,6 @@ export default function SocialTrends() {
     let base = [...allPosts];
     if (kind !== "all")      base = base.filter(p => p.kind === kind);
     if (minLikes > 0)        base = base.filter(p => (p.likes ?? 0) >= minLikes);
-    if (language !== "all")  base = base.filter(p => p.language === language);
     if (fromDate)            base = base.filter(p => p.posted_at && p.posted_at >= fromDate);
     if (toDate)              base = base.filter(p => p.posted_at && p.posted_at <= toDate + "T23:59:59Z");
     base = base.filter(p => !p.posted_at || p.posted_at >= cutoff);
@@ -422,8 +427,8 @@ export default function SocialTrends() {
               </div>
             </FilterSection>
 
-            <FilterSection title="Language">
-              {LANGUAGE_OPTIONS.map(o => (
+            <FilterSection title="Region">
+              {REGION_OPTIONS.map(o => (
                 <FilterBtn key={o.value} active={language === o.value} onClick={() => setLanguage(o.value)}>
                   {o.label}
                 </FilterBtn>

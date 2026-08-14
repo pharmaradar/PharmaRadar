@@ -275,8 +275,11 @@ export default function TopicExplorer() {
                   </button>
                 ))}
                 <div className="my-2 h-px bg-gray-100 dark:bg-[#1e3a5f]/40" />
-                <p className="text-[10px] font-black uppercase tracking-widest text-gray-300 dark:text-[#334155] px-2 pt-1 pb-1">Language</p>
-                {[{v:"fr",l:"France only"},{v:"en",l:"English only"},{v:"all",l:"Global (all)"}].map(o => (
+                {/* Region, not language: the server selects on source_scope —
+                    where the content came from — so a French institution
+                    writing in English still counts as French-market. */}
+                <p className="text-[10px] font-black uppercase tracking-widest text-gray-300 dark:text-[#334155] px-2 pt-1 pb-1">Region</p>
+                {[{v:"fr",l:"France"},{v:"all",l:"Worldwide"}].map(o => (
                   <button key={o.v} onClick={() => setLangFilter(o.v)}
                     className={cn("w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all",
                       langFilter === o.v ? "bg-pharma-blue text-white" : "text-gray-500 dark:text-[#64748b] hover:bg-gray-50 dark:hover:bg-[#111827] hover:text-gray-800 dark:hover:text-[#94a3b8]")}>
