@@ -43,6 +43,7 @@ celery_app = Celery(
         "app.tasks.synthesis",       # dashboard KOL/competitor/comprehensive PDFs
         "app.tasks.market_report",   # ad-hoc Topic Explorer market-research reports
         "app.tasks.accounts",        # per-account tracking sweep + on-demand refresh
+        "app.tasks.literature",      # Europe PMC publications + ClinicalTrials.gov
     ],
 )
 
@@ -59,6 +60,7 @@ import app.tasks.burning_topics  # noqa: E402,F401
 import app.tasks.synthesis       # noqa: E402,F401
 import app.tasks.market_report   # noqa: E402,F401
 import app.tasks.accounts       # noqa: E402,F401
+import app.tasks.literature     # noqa: E402,F401
 
 celery_app.conf.update(
     task_serializer="json",
@@ -131,6 +133,16 @@ celery_app.conf.update(
         "check-social-scan": {
             "task": "app.tasks.scheduler.check_social_scan",
             "schedule": crontab(minute="*"),
+        },
+        # Publications and trials come from free official APIs, so this can run
+        # daily without a cost conversation. 03:30 UTC, before the account sweep.
+        "sync-publications": {
+            "task": "app.tasks.literature.sync_publications",
+            "schedule": crontab(hour=3, minute=30),
+        },
+        "sync-trials": {
+            "task": "app.tasks.literature.sync_trials",
+            "schedule": crontab(hour=3, minute=50),
         },
         # Account tracking runs on its own daily cadence, deliberately not
         # coupled to the keyword social scan: the client refreshes individual
