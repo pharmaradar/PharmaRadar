@@ -159,7 +159,9 @@ celery_app.conf.update(
         # LLM calls per sweep; a fully-classified DB makes this a no-op query.
         "classify-ae-backfill": {
             "task": "app.tasks.maintenance.classify_ae_backfill",
-            "schedule": 4 * 3600.0,
+            # Hourly, not 4-hourly: an unscreened post is visible to the client
+            # until it is classified, so the backlog is an exposure window.
+            "schedule": 3600.0,
         },
     },
 )
