@@ -742,7 +742,7 @@ class PDFService:
                 "Use the real [id] values above.\n\n"
                 "Reference real drug names and KOLs. Be specific."
             )
-            raw = call_pro([{"role": "user", "content": prompt}], max_tokens=4000)
+            raw = call_pro([{"role": "user", "content": prompt}], max_tokens=8192)
             parsed = parse_synthesis(raw)
         except Exception as exc:
             logger.warning("pdf.synthesis_failed", error=str(exc))

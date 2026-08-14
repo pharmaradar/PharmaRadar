@@ -695,14 +695,18 @@ export default function Dashboard() {
           </div>
         ) : compBrief && compBrief.points.length > 0 ? (
           <div className="space-y-2">
+            {/* Clickable like the KOL brief: a competitor signal needs the same
+                depth — what it means and what to do — not just the headline. */}
             {compBrief.points.map((p, i) => (
-              <div key={i} className="flex items-start gap-3 p-3 rounded-xl border bg-orange-50/40 dark:bg-orange-900/5 border-orange-200/50 dark:border-orange-800/20">
+              <button key={i} onClick={() => setSelectedPoint(p.text)}
+                className="w-full text-left flex items-start gap-3 p-3 rounded-xl border bg-orange-50/40 dark:bg-orange-900/5 border-orange-200/50 dark:border-orange-800/20 hover:border-orange-400/60 hover:shadow-sm transition-all group cursor-pointer">
                 <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 bg-orange-500"/>
                 <div className="flex-1 min-w-0">
                   <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
                   <span className="text-[10px] font-semibold mt-0.5 inline-block text-orange-500">Competitor signal</span>
                 </div>
-              </div>
+                <ChevronRight size={14} className="text-gray-300 group-hover:text-orange-500 shrink-0 mt-0.5 transition-colors"/>
+              </button>
             ))}
           </div>
         ) : (

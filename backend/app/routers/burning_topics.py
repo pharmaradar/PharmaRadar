@@ -344,7 +344,7 @@ async def followup(topic_id: int, report_id: int, body: FollowupRequest,
     # run in a thread pool, same as routers/agent.py
     loop = asyncio.get_event_loop()
     try:
-        answer = await loop.run_in_executor(None, partial(call_llm, messages, max_tokens=2048))
+        answer = await loop.run_in_executor(None, partial(call_llm, messages, max_tokens=8192))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(exc)[:200]}")
 

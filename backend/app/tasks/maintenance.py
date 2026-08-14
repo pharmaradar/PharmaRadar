@@ -242,7 +242,7 @@ def _classify_llm_batch(items: list[tuple[int, str]]) -> dict[int, tuple[bool, s
     try:
         raw = call_llm(
             [{"role": "user", "content": _AE_CLASSIFY_PROMPT.replace("{posts_block}", block)}],
-            temperature=0.0, max_tokens=1500,
+            temperature=0.0, max_tokens=4096,
         )
         cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
         m = re.search(r"\[.*\]", cleaned, re.DOTALL)

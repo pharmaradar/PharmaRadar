@@ -602,7 +602,7 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         for p in social_posts
     ) or "No social posts."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("combined_brief")
 
@@ -636,7 +636,12 @@ async def daily_brief(refresh: bool = False, user=Depends(daily_gen_guard("daily
         # 2048: the JSON array was cut mid-string, parsing failed, and the regex
         # fallback salvaged only the first CLOSED quote — one point from sixty
         # insights. At 8192 the same prompt returns five.
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:daily-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("combined_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
         points = [{"text": s, "source": "both", "priority": _brief_priority(s)} for s in strings[:10]]
@@ -739,7 +744,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
         for p in social_posts
     ) or "No matching social posts."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import re as _re2
 
     def _extract_sec(text: str, marker: str) -> str:
@@ -764,7 +769,7 @@ async def brief_detail(body: BriefDetailRequest, user=Depends(get_current_user))
 
     detail = {}
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         detail = {
             "summary": _extract_sec(raw, "SUMMARY") or point_text,
             "so_what": _extract_sec(raw, "SO_WHAT"),
@@ -854,7 +859,7 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
         for p in posts[:80] if (p.topic or p.query) in topic_set
     )
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("social_brief")
 
@@ -885,7 +890,12 @@ async def social_brief(refresh: bool = False, user=Depends(daily_gen_guard("soci
         # 2048: the JSON array was cut mid-string, parsing failed, and the regex
         # fallback salvaged only the first CLOSED quote — one point from sixty
         # insights. At 8192 the same prompt returns five.
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:social-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("social_brief.llm_raw", raw=raw[:500])
         raw_clean = _re.sub(r'```(?:json)?\s*|\s*```', '', raw).strip()
         m = _re.search(r'\{.*\}', raw_clean, _re.DOTALL)
@@ -975,7 +985,7 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         for ins, name in insights
     )
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("kol_brief")
 
@@ -1008,7 +1018,12 @@ async def kol_brief(refresh: bool = False, user=Depends(daily_gen_guard("kol_bri
         # 2048: the JSON array was cut mid-string, parsing failed, and the regex
         # fallback salvaged only the first CLOSED quote — one point from sixty
         # insights. At 8192 the same prompt returns five.
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:kol-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("kol_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
         points = [{"text": s, "source": "kol", "priority": _brief_priority(s)} for s in strings[:10]]
@@ -1088,7 +1103,7 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         for ins, name in insights
     )
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("competitor_brief")
 
@@ -1118,7 +1133,12 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         # 2048: the JSON array was cut mid-string, parsing failed, and the regex
         # fallback salvaged only the first CLOSED quote — one point from sixty
         # insights. At 8192 the same prompt returns five.
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:competitor-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("competitor_brief.llm_raw", raw=raw[:400])
         strings = _extract_brief_strings(raw)
         points = [{"text": s, "source": "competitor", "priority": _brief_priority(s)} for s in strings[:10]]
@@ -1274,7 +1294,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
         for p in social_posts
     ) or "(no social posts)"
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     from app.services.synthesizer import extract_section, parse_bullets, trim_incomplete
     import structlog as _sl
     _log = _sl.get_logger("combined_synth")
@@ -1302,7 +1322,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
     takeaway = so_what = conclusion = ""
     focus: list[str] = []
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=4000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         _log.info("combined_synth.llm_raw", raw=raw[:400])
         takeaway = trim_incomplete(extract_section(raw, "TAKEAWAY"))
         so_what = trim_incomplete(extract_section(raw, "SO_WHAT"))
@@ -1418,7 +1438,7 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         for p in social_posts
     ) or "No social data."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
     import structlog as _sl
     _log = _sl.get_logger("comparison_brief")
 
@@ -1447,7 +1467,12 @@ async def comparison_brief(refresh: bool = False, user=Depends(daily_gen_guard("
         # 2048: the JSON array was cut mid-string, parsing failed, and the regex
         # fallback salvaged only the first CLOSED quote — one point from sixty
         # insights. At 8192 the same prompt returns five.
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
+        # Two clicks on Regenerate ran this twice — same prompt, same corpus,
+        # double the cost, and the loser discarded by last-write-wins. The
+        # second caller now awaits the first instead.
+        raw = await once_only(
+            "brief:comparison-brief",
+            lambda: call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192))
         _log.info("comparison_brief.llm_raw", raw=raw[:400])
         strings = _re.findall(r'"((?:[^"\\]|\\.)+[.!?])"', raw)
         if not strings:
@@ -1519,7 +1544,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
         for p in posts[:12]
     ) or "No matching posts found."
 
-    from app.services.llm_router import call_llm_async
+    from app.services.llm_router import call_llm_async, once_only
 
     def _extract_section(text: str, marker: str) -> str:
         """Extract content between ##MARKER## and next ## or end."""
@@ -1545,7 +1570,7 @@ async def social_detail(body: SocialDetailRequest, user=Depends(get_current_user
 
     detail: dict = {}
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=3000)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         detail = {
             "summary":  _extract_section(raw, "SUMMARY") or point_text,
             "so_what":  _extract_section(raw, "SO_WHAT"),

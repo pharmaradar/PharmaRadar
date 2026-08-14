@@ -148,6 +148,13 @@ async def research(session, question: str, queries: list[str],
 
 # ── Gathering ─────────────────────────────────────────────
 
+def _fr_scope() -> str:
+    """The stored value marking a French-market source."""
+    from app.services.fr_sources import Scope
+
+    return Scope.FR.value
+
+
 async def _gather_insights(session, terms: list[str], since: datetime) -> list[dict]:
     """What tracked KOLs and competitors said. Attribution here is a foreign key."""
     from sqlalchemy import desc, or_, select
@@ -226,7 +233,14 @@ async def _gather_social(session, terms: list[str], since: datetime,
         .where(social_not_ae())
     )
     if language and language != "all":
-        query = query.where(SocialPost.language == language)
+        # France is a SOURCE property. Measured on this corpus: filtering social
+        # posts by detected language excluded 21 French-source posts (French
+        # institutions writing in English) and admitted 75 posts from
+        # francophone accounts outside France.
+        if language == "fr":
+            query = query.where(SocialPost.source_scope == _fr_scope())
+        else:
+            query = query.where(SocialPost.language == language)
 
     rows = await session.execute(
         query.order_by(desc(SocialPost.likes + SocialPost.comments * 2)).limit(MAX_SOCIAL)
@@ -269,7 +283,14 @@ async def _gather_web(session, terms: list[str], language: str | None) -> list[d
 
     query = select(DiscoveryResult).where(or_(*clauses))
     if language and language != "all":
-        query = query.where(DiscoveryResult.language == language)
+        # The same source-vs-language distinction, and the gap is far wider
+        # here: 100 discovery results carry a French SOURCE, but only 52 are
+        # tagged French by language — so the old filter hid more than half the
+        # French web corpus from Topic Explorer.
+        if language == "fr":
+            query = query.where(DiscoveryResult.source_scope == _fr_scope())
+        else:
+            query = query.where(DiscoveryResult.language == language)
 
     rows = await session.execute(
         query.order_by(desc(DiscoveryResult.scraped_at)).limit(MAX_WEB)

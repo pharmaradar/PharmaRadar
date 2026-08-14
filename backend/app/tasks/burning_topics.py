@@ -190,6 +190,7 @@ async def _gather_db_posts(topic=None, congress=None, window_days: int | None = 
 
     async with CelerySessionLocal() as sess:
         from app.services.ae_filter import post_not_ae, social_not_ae
+        from app.services.fr_sources import Scope
         kol_query = (
             select(ScrapedPost, Target.name)
             .join(Target, ScrapedPost.target_id == Target.id)
@@ -227,7 +228,16 @@ async def _gather_db_posts(topic=None, congress=None, window_days: int | None = 
             .where(social_not_ae())
         )
         if topic is not None and topic.language_filter:
-            social_query = social_query.where(SocialPost.language == topic.language_filter)
+            # France is a SOURCE property, not a language one. Filtering by
+            # detected language both over- and under-selects: it admits
+            # francophone Quebec/Belgian accounts and hides French institutions
+            # that publish in English. Measured on this corpus: 21 French-source
+            # posts wrongly excluded, 75 non-French-source posts wrongly let in.
+            # Social Trends already filters on source_scope; this now matches.
+            if topic.language_filter == "fr":
+                social_query = social_query.where(SocialPost.source_scope == Scope.FR.value)
+            else:
+                social_query = social_query.where(SocialPost.language == topic.language_filter)
         social_query = _exclude(
             social_query, exclusions, SocialPost.text, SocialPost.topic, SocialPost.hashtags
         )

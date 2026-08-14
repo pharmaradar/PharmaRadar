@@ -273,7 +273,7 @@ async def synthesis(days: int = 30, lang: str | None = "fr", refresh: bool = Fal
     err = None
     parsed = {"takeaway": "", "so_what": "", "picks": []}
     try:
-        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=2500)
+        raw = await call_llm_async([{"role": "user", "content": prompt}], max_tokens=8192)
         parsed = parse_synthesis(raw)
     except Exception as exc:
         err = str(exc)[:300]
@@ -583,7 +583,7 @@ async def describe(body: DescribeRequest, db: AsyncSession = Depends(get_db)):
     messages = [{"role": "user", "content": prompt}]
 
     try:
-        reply = await call_llm_async(messages, max_tokens=900)
+        reply = await call_llm_async(messages, max_tokens=8192)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"LLM call failed: {str(exc)[:200]}")
 
