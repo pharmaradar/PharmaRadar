@@ -153,3 +153,51 @@ async def _check_social() -> None:
     logger.info("scheduler.social_triggering", frequency=frequency)
     from app.tasks.social import social_scan
     social_scan.delay()
+
+
+@celery_app.task(name="app.tasks.scheduler.check_auto_synthesis")
+def check_auto_synthesis() -> None:
+    """Fire the daily synthesis refresh when the configured hour arrives.
+
+    Beat fires this every minute; the gate lives here rather than in the beat
+    schedule so the client can change the hour in Settings without a redeploy —
+    the same pattern the scrape cron already uses.
+
+    `auto_synthesis_last_run` is the guard against firing repeatedly inside the
+    matching hour: minute-level matching would misfire if a beat tick were
+    delayed, and an extra run costs several LLM calls.
+    """
+    import asyncio
+    from datetime import datetime, timedelta
+
+    async def _due() -> bool:
+        from app.database import CelerySessionLocal
+        from app.models import AppSettings
+
+        async with CelerySessionLocal() as sess:
+            settings = await sess.get(AppSettings, 1)
+            if not settings or not getattr(settings, "auto_synthesis_enabled", False):
+                return False
+
+            now = datetime.now(_CRON_TZ)
+            if now.hour != (getattr(settings, "auto_synthesis_hour", 7) or 7):
+                return False
+
+            last = getattr(settings, "auto_synthesis_last_run", None)
+            if last is not None:
+                # Compare in the cron timezone; a run inside the last 23h means
+                # today's refresh already happened.
+                if now - last.astimezone(_CRON_TZ) < timedelta(hours=23):
+                    return False
+            return True
+
+    try:
+        if not asyncio.run(_due()):
+            return
+    except Exception as exc:                        # noqa: BLE001
+        logger.warning("auto_synthesis.check_failed", error=str(exc)[:160])
+        return
+
+    from app.tasks.synthesis import refresh_all_syntheses
+    refresh_all_syntheses.delay("daily")
+    logger.info("auto_synthesis.queued", reason="daily")

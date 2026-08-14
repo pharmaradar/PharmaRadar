@@ -58,6 +58,7 @@ def generate_run_summary_pdf(self, run_id: int) -> dict:
         result = PDFService().generate_run_summary(run_id=run_id, ctx=ctx)
         log.info("generate_run_summary_pdf.done", path=result.get("path"))
         _mark_run_finished(run_id, status="success")
+        _refresh_syntheses_if_enabled(run_id)
         return result
     except Exception as exc:
         log.warning("generate_run_summary_pdf.retry", exc=str(exc))
@@ -85,6 +86,35 @@ def generate_run_summary_pdf(self, run_id: int) -> dict:
 )
 def generate_daily_summary_pdf(self, run_id: int) -> dict:
     return generate_run_summary_pdf.run(run_id)
+
+
+def _refresh_syntheses_if_enabled(run_id: int) -> None:
+    """Regenerate the dashboard syntheses once a run has really finished.
+
+    Without this the client finishes a scrape and still sees the previous
+    analysis until they press Generate on each artefact — a stale reading of a
+    fresh corpus, with nothing on screen saying so.
+
+    Only when the client asked for it: each refresh is several LLM calls, so it
+    is opt-in per settings rather than an automatic cost on every run.
+    """
+    import asyncio
+
+    async def _enabled() -> bool:
+        from app.database import CelerySessionLocal
+        from app.models import AppSettings
+        async with CelerySessionLocal() as sess:
+            settings = await sess.get(AppSettings, 1)
+            return bool(settings and getattr(settings, "auto_synthesis_after_run", False))
+
+    try:
+        if not asyncio.run(_enabled()):
+            return
+        from app.tasks.synthesis import refresh_all_syntheses
+        refresh_all_syntheses.delay(f"after_run:{run_id}")
+        logger.info("synthesis.queued_after_run", run_id=run_id)
+    except Exception as exc:                        # noqa: BLE001 - never fail a finished run
+        logger.warning("synthesis.after_run_failed", run_id=run_id, error=str(exc)[:160])
 
 
 def _mark_run_finished(run_id: int, status: str, error_message: str | None = None) -> None:

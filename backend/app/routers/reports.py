@@ -386,3 +386,24 @@ async def analyse_insight(insight_id: int, refresh: bool = False,
     insight.analysed_at = datetime.now(timezone.utc)
     await db.commit()
     return {"sections": sections, "cached": False}
+
+
+@router.post("/syntheses/refresh", status_code=202)
+async def refresh_all_syntheses_now(user=Depends(get_current_user)):
+    """Regenerate every dashboard synthesis in one action.
+
+    The alternative is pressing Generate on each artefact in turn and hoping
+    none was missed — which is how a dashboard ends up mixing analyses written
+    days apart over the same corpus.
+    """
+    from app.auth import enforce_daily_generation
+    from app.tasks.synthesis import refresh_all_syntheses
+
+    # One LLM run per scope, so it draws on the same daily quota as generating
+    # them individually would have.
+    enforce_daily_generation(user, "synthesis_refresh")
+    try:
+        task = refresh_all_syntheses.delay("manual")
+    except Exception as exc:                        # noqa: BLE001
+        raise HTTPException(503, f"queue unavailable: {str(exc)[:120]}") from exc
+    return {"queued": True, "task_id": task.id}

@@ -130,6 +130,12 @@ celery_app.conf.update(
             "task": "app.tasks.scheduler.check_scheduled_run",
             "schedule": crontab(minute="*"),
         },
+        # Every minute, like the scrape cron: the gate reads Settings so the
+        # client can move the hour without a redeploy.
+        "check-auto-synthesis": {
+            "task": "app.tasks.scheduler.check_auto_synthesis",
+            "schedule": crontab(minute="*"),
+        },
         "check-social-scan": {
             "task": "app.tasks.scheduler.check_social_scan",
             "schedule": crontab(minute="*"),

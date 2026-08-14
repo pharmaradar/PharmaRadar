@@ -314,11 +314,44 @@ function SynthesisCard({ scope, label, blurb, icon: Icon, accent }: (typeof SCOP
 }
 
 export default function SynthesisExports() {
+  const qc = useQueryClient();
+  // Regenerating all four in one action. Pressing Generate on each in turn is
+  // how a dashboard ends up mixing analyses written days apart over the same
+  // corpus — and it is easy to miss one.
+  const refreshAll = useMutation({
+    mutationFn: api.refreshAllSyntheses,
+    onSuccess: () => {
+      setTimeout(() => {
+        SCOPES.forEach((s) => qc.invalidateQueries({ queryKey: ["synthesis", s.scope] }));
+      }, 5000);
+    },
+  });
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
         <h2 className="text-sm font-semibold text-gray-700 dark:text-[#e2e8f0]">Downloadable syntheses</h2>
-        <span className="text-[11px] text-gray-400">Last 30 days</span>
+        <div className="flex items-center gap-2">
+          {refreshAll.isError && (
+            <span className="text-[11px] text-red-400">
+              {(refreshAll.error as Error)?.message?.slice(0, 70)}
+            </span>
+          )}
+          {refreshAll.isSuccess && !refreshAll.isPending && (
+            <span className="text-[11px] text-emerald-600 dark:text-emerald-400">
+              Refreshing — cards update as each finishes
+            </span>
+          )}
+          <button onClick={() => refreshAll.mutate()} disabled={refreshAll.isPending}
+            title="Regenerate the KOL, competitor, comprehensive and global syntheses"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">
+            {refreshAll.isPending
+              ? <Loader2 size={12} className="animate-spin" />
+              : <RefreshCw size={12} />}
+            Refresh all
+          </button>
+          <span className="text-[11px] text-gray-400">Last 30 days</span>
+        </div>
       </div>
       <div className={cn("grid gap-4", "grid-cols-1 lg:grid-cols-3")}>
         {SCOPES.map((s) => <SynthesisCard key={s.scope} {...s} />)}

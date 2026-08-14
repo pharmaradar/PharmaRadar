@@ -58,3 +58,69 @@ def generate_synthesis_report(self, scope: str) -> dict:
         "insight_count": result.get("insight_count"),
         "pdf_url": result.get("pdf_url"),
     }
+
+
+# ── Refresh every dashboard synthesis ─────────────────────
+
+@celery_app.task(
+    bind=True,
+    name="app.tasks.synthesis.refresh_all_syntheses",
+    queue="llm",
+    # Not acks_late: a redelivered refresh would pay for the same analysis
+    # twice, and losing one costs only freshness until the next sweep.
+    acks_late=False,
+    soft_time_limit=2400,
+    time_limit=2700,
+)
+def refresh_all_syntheses(self, reason: str = "manual") -> dict:
+    """Regenerate the KOL, competitor, comprehensive and global syntheses.
+
+    These were generate-on-demand, so after a pipeline run the client had to
+    press four separate buttons; whatever they missed silently showed an older
+    analysis of a newer corpus.
+
+    Scopes run in sequence rather than in parallel: they hit the same LLM
+    provider, and firing four at once is the reliable way to earn a 429 that
+    leaves half the dashboard stale.
+    """
+    import asyncio
+
+    from app.services import synthesis_report as sr
+
+    done, failed = [], []
+    for scope in sr.SCOPES:
+        try:
+            generate_synthesis_report.run(scope)
+            done.append(scope)
+        except Exception as exc:                    # noqa: BLE001 - one scope must not stop the rest
+            logger.warning("synthesis.refresh_scope_failed", scope=scope, error=str(exc)[:180])
+            failed.append(scope)
+
+    # The global synthesis merges the briefs, so it runs last — before this it
+    # would have summarised the previous generation's output.
+    try:
+        from app.tasks.llm import generate_global_synthesis
+        generate_global_synthesis.run()
+        done.append("global")
+    except Exception as exc:                        # noqa: BLE001
+        logger.warning("synthesis.refresh_global_failed", error=str(exc)[:180])
+        failed.append("global")
+
+    async def _stamp() -> None:
+        from datetime import datetime, timezone
+
+        from app.database import CelerySessionLocal
+        from app.models import AppSettings
+        async with CelerySessionLocal() as sess:
+            settings = await sess.get(AppSettings, 1)
+            if settings:
+                settings.auto_synthesis_last_run = datetime.now(timezone.utc)
+                await sess.commit()
+
+    try:
+        asyncio.run(_stamp())
+    except Exception as exc:                        # noqa: BLE001
+        logger.debug("synthesis.stamp_failed", error=str(exc)[:120])
+
+    logger.info("synthesis.refresh_all", reason=reason, done=done, failed=failed)
+    return {"reason": reason, "generated": done, "failed": failed}

@@ -178,6 +178,12 @@ export interface AppSettings {
   cron_hour: number;
   cron_minute: number;
   cron_enabled: boolean;
+  /** Regenerate the dashboard syntheses on a schedule / after a pipeline run,
+   *  instead of requiring a click per artefact. */
+  auto_synthesis_enabled?: boolean;
+  auto_synthesis_hour?: number;
+  auto_synthesis_after_run?: boolean;
+  auto_synthesis_last_run?: string | null;
   /** "weekly" | "monthly" — daily was retired on the client's request. */
   cron_frequency: string;
   cron_day_of_week: number;
@@ -832,6 +838,8 @@ export const api = {
   regenerateKolSummary: (id: number) =>
     req<{ queued: boolean; insights: number }>(
       `/targets/${id}/summary`, { method: "POST" }),
+  refreshAllSyntheses: () =>
+    req<{ queued: boolean }>("/reports/syntheses/refresh", { method: "POST" }),
   shareOfVoice: (days = 30, source = "all") =>
     req<ShareOfVoice>(`/stats/share-of-voice?days=${days}&source=${source}`),
 

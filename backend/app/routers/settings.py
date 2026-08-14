@@ -44,6 +44,10 @@ class SettingsOut(BaseModel):
     cron_hour: int
     cron_minute: int
     cron_enabled: bool
+    auto_synthesis_enabled: bool
+    auto_synthesis_hour: int
+    auto_synthesis_after_run: bool
+    auto_synthesis_last_run: str | None = None
     cron_frequency: str
     cron_day_of_week: int
     cron_day_of_month: int
@@ -73,6 +77,9 @@ class SettingsUpdate(BaseModel):
     cron_hour: int | None = None
     cron_minute: int | None = None
     cron_enabled: bool | None = None
+    auto_synthesis_enabled: bool | None = None
+    auto_synthesis_hour: int | None = None
+    auto_synthesis_after_run: bool | None = None
     cron_frequency: str | None = None
     cron_day_of_week: int | None = None
     cron_day_of_month: int | None = None
@@ -117,6 +124,11 @@ def _to_out(s: AppSettings) -> SettingsOut:
         cron_hour=s.cron_hour,
         cron_minute=s.cron_minute,
         cron_enabled=s.cron_enabled,
+        auto_synthesis_enabled=getattr(s, 'auto_synthesis_enabled', False),
+        auto_synthesis_hour=getattr(s, 'auto_synthesis_hour', 7),
+        auto_synthesis_after_run=getattr(s, 'auto_synthesis_after_run', False),
+        auto_synthesis_last_run=(s.auto_synthesis_last_run.isoformat()
+                                 if getattr(s, 'auto_synthesis_last_run', None) else None),
         # A row still holding the retired "daily" value reads back as weekly.
         cron_frequency=_normalise_frequency(s.cron_frequency),
         cron_day_of_week=s.cron_day_of_week if s.cron_day_of_week is not None else 1,
