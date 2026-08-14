@@ -92,7 +92,41 @@ Copy the read-write token into Railway as `VERCEL_BLOB_TOKEN`.
 - Env var (build-time): `VITE_API_URL` = `https://<backend-domain>` — **no trailing slash, no `/api` suffix** (the client appends `/api` itself).
 - Redeploy after changing `VITE_API_URL` (it's baked in at build time).
 
-## 4. Post-deploy checklist
+## 4. Seed the monitoring configuration
+
+The migrations seed 3 targets and 32 tracked accounts. Everything added since —
+the rest of the KOLs, the competitors, the remaining accounts, burning topics and
+congresses — lives only in whichever deployment it was typed into, so copy it
+across rather than retyping it:
+
+```bash
+cd backend
+# 1. from the deployment that HAS the config (reads its .env)
+./.venv/bin/python scripts/seed_config.py export config.json
+
+# 2. against the new one. Railway → Postgres → Variables → DATABASE_PUBLIC_URL
+#    (the internal *.railway.internal host does not resolve from a laptop).
+#    Prints a plan and writes nothing:
+TARGET_DATABASE_URL='postgresql://…' ./.venv/bin/python scripts/seed_config.py import config.json
+
+# 3. same command with --commit once the plan reads right
+```
+
+- **Configuration only.** No posts, insights or reports travel, and an account's
+  scan health and cached analysis are dropped — they measure the source
+  deployment's corpus, and in an empty one they would state a post count and an
+  AI summary for content that isn't there. The destination generates its own.
+- Rows match on a **natural key** (`targets.name`, `tracked_accounts.platform+handle`,
+  topic/congress `name`), never on id, because the seed migrations already
+  created some of them under different ids. Re-running creates nothing.
+- Rows already present are **left alone**; pass `--update-existing` to overwrite
+  them with the source's version.
+- Run it **after** the backend has booted once: `app_settings` has no row until
+  then, so the social keywords and Facebook page list would be skipped.
+- `config.json` holds no credentials, but it does hold the client's target list —
+  don't commit it.
+
+## 5. Post-deploy checklist
 
 1. `GET https://<backend-domain>/health` → `{"status":"ok","version":"3.0.0"}`.
 2. Log in with the `SEED_ADMIN_*` credentials; create real users from the Users page.
