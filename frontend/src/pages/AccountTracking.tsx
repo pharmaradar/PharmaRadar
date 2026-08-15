@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, AtSign, Check, ExternalLink, Eye, Facebook, Heart,
@@ -402,8 +402,16 @@ function AnalysisPanel({ account, onGenerate, busy, onPdf, pdfBusy }: {
   );
 }
 
-function AccountDetailPanel({ id, startEditing = false, onClose }: {
+function AccountDetailPanel({ id, startEditing = false, onClose, refreshing, justDone, onRefresh }: {
   id: number; startEditing?: boolean; onClose: () => void;
+  // Collection state comes from the PAGE, not from a mutation local to this
+  // modal. It used to run its own — closing the modal (unmounting it) killed
+  // that state outright, so a refresh kicked off here looked "stopped" the
+  // moment you hit the X, even though the Celery task kept running untouched.
+  // The page's `queued` tracking survives the modal closing because the modal
+  // is the thing that unmounts, not the page.
+  refreshing: boolean; justDone: { status: string | null; posts: number } | null;
+  onRefresh: () => void;
 }) {
   const qc = useQueryClient();
   const isAdmin = useAuthStore((s) => s.user?.role === "admin");
@@ -434,43 +442,6 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
       qc.invalidateQueries({ queryKey: ["account-detail", id] });
       qc.invalidateQueries({ queryKey: ["accounts"] });
     },
-  });
-
-  // Poll the account until its scan timestamp moves, rather than reloading once
-  // after a guessed delay — a collect can take longer than any fixed wait, and a
-  // single reload that lands too early looks exactly like nothing happening.
-  const [awaiting, setAwaiting] = useState(false);
-  const scanBefore = useRef<string | null>(null);
-
-  useQuery({
-    queryKey: ["account-detail-watch", id, awaiting],
-    queryFn: async () => {
-      const fresh = await api.accounts.detail(id, days);
-      qc.setQueryData(["account-detail", id, days], fresh);
-      if (fresh.account.last_scanned_at
-          && fresh.account.last_scanned_at !== scanBefore.current) {
-        setAwaiting(false);
-        qc.invalidateQueries({ queryKey: ["accounts"] });
-      }
-      return fresh;
-    },
-    enabled: awaiting,
-    refetchInterval: 2000,
-  });
-
-  useEffect(() => {
-    if (!awaiting) return;
-    const timer = setTimeout(() => setAwaiting(false), 120_000);
-    return () => clearTimeout(timer);
-  }, [awaiting]);
-
-  const refreshMut = useMutation({
-    mutationFn: () => api.accounts.refresh(id),
-    onMutate: () => {
-      scanBefore.current = data?.account.last_scanned_at ?? null;
-      setAwaiting(true);
-    },
-    onError: () => setAwaiting(false),
   });
 
   const account = data?.account;
@@ -527,14 +498,14 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
               </button>
             )}
             {isAdmin && (
-              <button onClick={() => refreshMut.mutate()}
-                disabled={refreshMut.isPending || awaiting}
+              <button onClick={onRefresh}
+                disabled={refreshing}
                 title="Collect this account's latest posts now"
                 className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-pharma-blue text-white rounded-lg hover:bg-pharma-light disabled:opacity-50 transition-colors">
-                {refreshMut.isPending || awaiting
+                {refreshing
                   ? <Loader2 size={12} className="animate-spin" />
                   : <RefreshCw size={12} />}
-                {awaiting ? "Collecting…" : "Refresh"}
+                {refreshing ? "Collecting…" : "Refresh"}
               </button>
             )}
             <button onClick={onClose} aria-label="Close"
@@ -544,9 +515,11 @@ function AccountDetailPanel({ id, startEditing = false, onClose }: {
           </div>
         </div>
 
-        {refreshMut.isError && (
-          <p className="text-xs text-red-400">
-            Could not start collection: {(refreshMut.error as Error)?.message?.slice(0, 160)}
+        {!refreshing && justDone && (
+          <p className={cn("text-xs", justDone.status === "empty" ? "text-amber-500" : "text-emerald-500")}>
+            {justDone.status === "empty"
+              ? "Collected — found nothing new."
+              : `Collected — ${justDone.posts} posts.`}
           </p>
         )}
 
@@ -741,6 +714,23 @@ export default function AccountTracking() {
     queryFn: api.accounts.list,
   });
 
+  // Navigating to another page unmounts this one, and React state does not
+  // survive that — so a collect kicked off here, then left running while you
+  // check another section, looked identical to one that silently failed: no
+  // spinner, no "collected" note, nothing, even though the Celery task was
+  // still running (or had already finished) the whole time. sessionStorage
+  // survives the unmount; the poll below still confirms against the server
+  // rather than trusting whatever was written here.
+  const loadPersisted = <T,>(key: string, fallback: T): T => {
+    try {
+      const raw = sessionStorage.getItem(key);
+      return raw ? (JSON.parse(raw) as T) : fallback;
+    } catch { return fallback; }
+  };
+  const persist = (key: string, value: unknown) => {
+    try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode etc. */ }
+  };
+
   // Watch the pipeline for a window after any collect action.
   //
   // Polling "only while running" cannot bootstrap: the flag starts false, so the
@@ -748,8 +738,9 @@ export default function AccountTracking() {
   // never appears. A single-account refresh also finishes in a few seconds, so
   // even correct polling can miss the whole run — which is why the clicked card
   // gets its own spinner below rather than relying on this.
-  const [watchUntil, setWatchUntil] = useState(0);
+  const [watchUntil, setWatchUntil] = useState(() => loadPersisted("accounts:watchUntil", 0));
   const watching = watchUntil > Date.now();
+  useEffect(() => persist("accounts:watchUntil", watchUntil), [watchUntil]);
 
   const { data: status } = useQuery({
     queryKey: ["accounts-status"],
@@ -761,8 +752,10 @@ export default function AccountTracking() {
   // had when queued. Clicking collect on a second account while the first is
   // running adds it here rather than replacing it — Celery already queues the
   // tasks, so losing the earlier one from the UI was purely a display bug.
-  const [queued, setQueued] = useState<Record<number, string | null>>({});
+  const [queued, setQueued] = useState<Record<number, string | null>>(
+    () => loadPersisted("accounts:queued", {}));
   const queuedIds = Object.keys(queued).map(Number);
+  useEffect(() => persist("accounts:queued", queued), [queued]);
 
   const [justDone, setJustDone] = useState<
     Record<number, { status: string | null; posts: number }>>({});
@@ -807,6 +800,12 @@ export default function AccountTracking() {
         setJustDone((prev) => ({ ...prev, ...done }));
         setQueued(stillQueued);
         if (!Object.keys(stillQueued).length) setWatchUntil(0);
+        // If the detail modal is open (or reopened later) on one of these
+        // accounts, its post list has to catch the new posts too — it reads
+        // its own cache entry, which this loop otherwise never touches.
+        for (const id of Object.keys(done)) {
+          qc.invalidateQueries({ queryKey: ["account-detail", Number(id)] });
+        }
       }
       return fresh;
     },
@@ -1027,7 +1026,10 @@ export default function AccountTracking() {
 
       {openId !== null && (
         <AccountDetailPanel id={openId} startEditing={editOnOpen}
-          onClose={() => setOpenId(null)} />
+          onClose={() => setOpenId(null)}
+          refreshing={openId in queued}
+          justDone={justDone[openId] ?? null}
+          onRefresh={() => refreshMut.mutate(openId)} />
       )}
     </div>
   );

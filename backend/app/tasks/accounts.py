@@ -136,7 +136,7 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
     """Collect one account's recent posts. Returns a small result summary."""
     from app.database import CelerySessionLocal
     from app.services import apify_client
-    from app.services.tinyfish_social import fetch_account_posts
+    from app.services.tinyfish_social import fetch_account_posts, looks_like_post
     from app.tasks.social import _ingest_posts
 
     handle = (account.handle or "").strip().lstrip("@")
@@ -192,8 +192,20 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
             saved = await _ingest_posts(
                 session, posts, kind="account", topic=f"account:{handle}",
                 query=f"tracked:{platform}:{handle.lower()}", tracked=(handle,))
-            await _link_posts(session, account.id,
-                              [p.get("post_url") for p in posts if p.get("post_url")])
+            # _link_posts claims by URL only, against rows that may already exist
+            # from an unrelated keyword search — that search never ran this
+            # landing-page check, so it could have stored the account's own bare
+            # page URL as a "post" with no author or text. Filtering here with
+            # the same test _ingest_posts uses for a fresh insert stops that
+            # already-rejected-once row from being credited to this account as
+            # if it were content. Found live: 4 tracked accounts (ansm.sante.fr,
+            # AstraZenecaGlobal, merck, RespirEspoir) whose only "post" was
+            # exactly this — their own homepage, linked in from an unrelated
+            # burning-topic search three days earlier.
+            linkable = [p.get("post_url") for p in posts if p.get("post_url")
+                       and looks_like_post(p.get("platform", platform),
+                                           p.get("post_url"), p.get("text"))]
+            await _link_posts(session, account.id, linkable)
 
     # 'empty' is a real outcome, not a failure: the handle may simply be wrong.
     status = "ok" if posts else "empty"
@@ -205,13 +217,15 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
 
 
 async def _run_sweep(account_ids: list[int] | None = None,
-                     publish_status: bool = True) -> dict:
+                     publish_status: bool = True, require_active: bool = True) -> dict:
     from app.database import CelerySessionLocal
     from app.models import AppSettings, TrackedAccount
     from app.services import apify_client
 
     async with CelerySessionLocal() as session:
-        query = select(TrackedAccount).where(TrackedAccount.active.is_(True))
+        query = select(TrackedAccount)
+        if require_active:
+            query = query.where(TrackedAccount.active.is_(True))
         if account_ids:
             query = query.where(TrackedAccount.id.in_(account_ids))
         accounts = (await session.execute(query.order_by(TrackedAccount.id))).scalars().all()
@@ -283,5 +297,12 @@ def refresh_account(self, account_id: int) -> dict:
 
     Several of these can be in flight at once — the UI queues them — so this
     deliberately does not publish to the shared sweep status.
+
+    `require_active=False`: this is a direct, explicit request for ONE named
+    account, not a sweep — clicking Refresh on a paused account is still a
+    request to collect it now. Before this, `_run_sweep`'s active filter made
+    that click a silent no-op: the query returned zero rows, `last_scanned_at`
+    never moved, and the UI polled for up to 180s before giving up — which is
+    indistinguishable from the task never having run.
     """
-    return asyncio.run(_run_sweep([account_id], publish_status=False))
+    return asyncio.run(_run_sweep([account_id], publish_status=False, require_active=False))
