@@ -136,7 +136,7 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
     """Collect one account's recent posts. Returns a small result summary."""
     from app.database import CelerySessionLocal
     from app.services import apify_client
-    from app.services.tinyfish_social import fetch_account_posts
+    from app.services.tinyfish_social import fetch_account_posts, looks_like_post
     from app.tasks.social import _ingest_posts
 
     handle = (account.handle or "").strip().lstrip("@")
@@ -192,8 +192,20 @@ async def _scan_one(account, lang_filter: str = "fr") -> dict:
             saved = await _ingest_posts(
                 session, posts, kind="account", topic=f"account:{handle}",
                 query=f"tracked:{platform}:{handle.lower()}", tracked=(handle,))
-            await _link_posts(session, account.id,
-                              [p.get("post_url") for p in posts if p.get("post_url")])
+            # _link_posts claims by URL only, against rows that may already exist
+            # from an unrelated keyword search — that search never ran this
+            # landing-page check, so it could have stored the account's own bare
+            # page URL as a "post" with no author or text. Filtering here with
+            # the same test _ingest_posts uses for a fresh insert stops that
+            # already-rejected-once row from being credited to this account as
+            # if it were content. Found live: 4 tracked accounts (ansm.sante.fr,
+            # AstraZenecaGlobal, merck, RespirEspoir) whose only "post" was
+            # exactly this — their own homepage, linked in from an unrelated
+            # burning-topic search three days earlier.
+            linkable = [p.get("post_url") for p in posts if p.get("post_url")
+                       and looks_like_post(p.get("platform", platform),
+                                           p.get("post_url"), p.get("text"))]
+            await _link_posts(session, account.id, linkable)
 
     # 'empty' is a real outcome, not a failure: the handle may simply be wrong.
     status = "ok" if posts else "empty"
