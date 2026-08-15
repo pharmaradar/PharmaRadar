@@ -1164,6 +1164,85 @@ async def competitor_brief(refresh: bool = False, user=Depends(daily_gen_guard("
     return result
 
 
+@app.get("/api/stats/competitor-report")
+async def competitor_report(refresh: bool = False, window_days: int = 180,
+                            user=Depends(daily_gen_guard("competitor_report"))):
+    """Competitor intelligence in the same 6-section market-research format as
+    Topic Explorer, Burning Topics and Account Tracking — Executive Summary,
+    So What, What is being said, Voice distribution, Volume of mentions, Key
+    sub-topics. The flat-bullet /competitor-brief above stays as-is for the
+    Dashboard's compact card; this is the full report for the Competitors page,
+    which is where the client asked for the structured deliverable.
+    """
+    import json as _json
+    from datetime import datetime, timezone
+
+    from app.services.market_report import build_prompt, gather_competitors, parse_report
+
+    _KEY = f"competitor_report:v1:{window_days}"
+    _UKEY = f"{_KEY}:u{user.id}"
+    r = None
+    try:
+        import redis as _redis
+        from app.config import get_settings as _gs
+        r = _redis.Redis.from_url(_gs().redis_url, socket_timeout=2)
+        if not refresh:
+            cached = r.get(_UKEY) or r.get(_KEY)
+            if cached:
+                result = _json.loads(cached)
+                if isinstance(result, dict):
+                    result["cached"] = True
+                return result
+    except Exception:
+        r = None
+
+    from app.database import AsyncSessionLocal
+
+    now = datetime.now(timezone.utc)
+    question = ("What are rival pharma companies launching, claiming, and "
+               "signalling in oncology that Roche France should track?")
+
+    async with AsyncSessionLocal() as sess:
+        material = await gather_competitors(sess, window_days=window_days)
+
+    base = {
+        "question": question, "generated_at": now.isoformat(),
+        "window_days": window_days, "item_count": material.total, "cached": False,
+    }
+
+    if not material.items:
+        empty = parse_report("", material)
+        return {
+            **base, **empty,
+            "error": "No competitor insights yet — add competitor targets and run a scrape.",
+        }
+
+    from app.services.llm_router import call_llm_async, once_only
+    import structlog as _sl
+    _log = _sl.get_logger("competitor_report")
+
+    llm_error = None
+    try:
+        raw = await once_only(
+            "competitor-report",
+            lambda: call_llm_async([{"role": "user", "content": build_prompt(question, material)}],
+                                   max_tokens=8192))
+        _log.info("competitor_report.llm_raw", raw=raw[:400])
+        report = parse_report(raw, material)
+    except Exception as exc:
+        llm_error = str(exc)[:300]
+        _log.warning("competitor_report.failed", exc=llm_error)
+        report = parse_report("", material)
+
+    result = {**base, **report, "error": llm_error}
+    try:
+        if r and not llm_error:
+            r.set(_UKEY if refresh else _KEY, _json.dumps(result), ex=21600)
+    except Exception:
+        pass
+    return result
+
+
 @app.get("/api/stats/competitor-publications")
 async def competitor_publications(days: int = 90, limit: int = 20, user=Depends(get_current_user)):
     """Top competitor publications ranked by engagement.
@@ -1355,7 +1434,7 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
 
 _GEN_FEATURES = ["daily_brief", "kol_brief", "social_brief", "synthesis",
                  "comparison_brief", "social_synthesis", "discovery_synthesis",
-                 "competitor_brief", "global_synthesis",
+                 "competitor_brief", "competitor_report", "global_synthesis",
                  # The three downloadable dashboard syntheses. Quota keys must
                  # match the f"synthesis_{scope}" used in routers/reports.py.
                  "synthesis_kol", "synthesis_competitor", "synthesis_comprehensive",

@@ -385,13 +385,12 @@ export interface MarketReportKeyPost {
   benefit?: string;
 }
 
-export interface MarketReport {
-  id: number;
-  question: string;
-  status: "pending" | "running" | "done" | "failed";
-  error?: string | null;
-  window_days: number;
-  language: string | null;
+/** The six sections the client asked every market-research surface to share
+ *  (Executive Summary / So What / What is being said / Voice distribution /
+ *  Volume of mentions / Key sub-topics), plus main authors and key posts. Kept
+ *  separate from `MarketReport` so a lighter, non-persisted report (the
+ *  Competitors page) can reuse the same renderer without a fake `id`/`status`. */
+export interface MarketReportSections {
   exec_summary: string;
   so_what: string;
   what_is_said: string;
@@ -399,8 +398,8 @@ export interface MarketReport {
   volume_note: string;
   subtopics: string[];
   voice_rows: MarketReportVoiceRow[];
-  /** Main speakers on this question. `tracked: false` marks a voice outside the
-   *  current audience — a candidate KOL. Replaces the old side panel. */
+  /** Main speakers. `tracked: false` marks a voice outside the current
+   *  audience — a candidate KOL. */
   main_authors: MarketReportAuthor[];
   volume: MarketReportVolume;
   key_posts: MarketReportKeyPost[];
@@ -408,8 +407,27 @@ export interface MarketReport {
   item_count: number;
   /** % of voices identified from tracked records rather than inferred. */
   voice_exact_share: number;
+}
+
+export interface MarketReport extends MarketReportSections {
+  id: number;
+  question: string;
+  status: "pending" | "running" | "done" | "failed";
+  error?: string | null;
+  window_days: number;
+  language: string | null;
   pdf_url: string | null;
   created_at: string;
+}
+
+/** Competitor Intelligence Brief — same six sections, generated on request
+ *  and redis-cached rather than persisted as a DB row. */
+export interface CompetitorReport extends MarketReportSections {
+  question: string;
+  error?: string | null;
+  window_days: number;
+  generated_at: string;
+  cached: boolean;
 }
 
 export interface MarketReportSummary {
@@ -787,6 +805,11 @@ export const api = {
     cached: boolean;
     error?: string | null;
   }>(`/stats/competitor-brief${refresh ? "?refresh=true" : ""}`),
+  /** The full 6-section report for the Competitors page — see competitorBrief
+   *  above for the short Dashboard card, which stays a flat bullet list. */
+  competitorReport: (refresh = false, windowDays = 180) =>
+    req<CompetitorReport>(
+      `/stats/competitor-report?window_days=${windowDays}${refresh ? "&refresh=true" : ""}`),
   competitorPublications: (days = 90, limit = 20) =>
     req<{ period_days: number; total: number; publications: CompetitorPublication[] }>(
       `/stats/competitor-publications?days=${days}&limit=${limit}`

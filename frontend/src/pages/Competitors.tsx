@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { BarChart3, Building2, ExternalLink, Loader2, RefreshCw, Users } from "lucide-react";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useGenQuota } from "@/hooks/useGenQuota";
+import { ReportBody } from "@/components/MarketResearchReport";
 
 const PERIODS = [
   { label: "30 days", value: 30 },
@@ -19,18 +20,19 @@ export default function Competitors() {
   const { data: targets } = useQuery({ queryKey: ["targets"], queryFn: api.targets.list });
   const competitors = (targets ?? []).filter((t) => t.target_type === "competitor");
 
-  const { data: brief, isLoading: briefLoading } = useQuery({
-    queryKey: ["competitor-brief"],
-    queryFn: () => api.competitorBrief(),
+  const { data: report, isLoading: reportLoading } = useQuery({
+    queryKey: ["competitor-report"],
+    queryFn: () => api.competitorReport(),
     staleTime: 6 * 60 * 60 * 1000,
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     retry: false,
   });
-  const briefMut = useMutation({
-    mutationFn: () => api.competitorBrief(true),
-    onSuccess: (data) => { qc.setQueryData(["competitor-brief"], data); qc.invalidateQueries({ queryKey: ["gen-quota"] }); },
+  const reportMut = useMutation({
+    mutationFn: () => api.competitorReport(true),
+    onSuccess: (data) => { qc.setQueryData(["competitor-report"], data); qc.invalidateQueries({ queryKey: ["gen-quota"] }); },
   });
+  const building = reportLoading || reportMut.isPending;
 
   const { data: pubs, isLoading: pubsLoading } = useQuery({
     queryKey: ["competitor-publications", days],
@@ -68,34 +70,45 @@ export default function Competitors() {
         </div>
       )}
 
-      {/* Competitor brief */}
-      <div className="glass rounded-xl p-5">
-        <div className="flex items-center justify-between mb-3">
+      {/* Competitor Intelligence Brief — same 6-section market-research format
+          as Topic Explorer, Burning Topics and Account Tracking: Executive
+          Summary, So What, What is being said, Voice distribution, Volume of
+          mentions, Key sub-topics. Generated on request and cached 6h, same
+          as before; only the shape changed. */}
+      <div className="glass rounded-xl p-5 space-y-4">
+        <div className="flex items-center justify-between mb-1">
           <div>
             <h2 className="font-semibold text-sm">Competitor Intelligence Brief</h2>
-            <p className="text-xs text-gray-400">What rival companies are launching, claiming, and signalling — last 6 months</p>
+            <p className="text-xs text-gray-400">
+              Executive summary · So what · What is being said · Voices · Volume · Sub-topics — last 6 months
+            </p>
           </div>
-          {canGen("competitor_brief") && (
-            <button onClick={() => briefMut.mutate()} disabled={briefMut.isPending || briefLoading}
+          {canGen("competitor_report") && (
+            <button onClick={() => reportMut.mutate()} disabled={building}
               className="flex items-center gap-1.5 px-2.5 py-1 text-xs border border-orange-300 dark:border-orange-800 text-orange-600 dark:text-orange-400 rounded-lg hover:bg-orange-50 dark:hover:bg-orange-900/20 disabled:opacity-50">
-              {briefMut.isPending ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
-              Regenerate
+              {building ? <Loader2 size={11} className="animate-spin" /> : <RefreshCw size={11} />}
+              {building ? "Analysing…" : report ? "Regenerate" : "Generate"}
             </button>
           )}
         </div>
-        {briefLoading || briefMut.isPending ? (
-          <div className="flex items-center gap-2 text-sm text-gray-400"><Loader2 size={14} className="animate-spin" />Analysing competitor content…</div>
-        ) : brief && brief.points.length > 0 ? (
-          <div className="space-y-2">
-            {brief.points.map((p, i) => (
-              <div key={i} className="flex items-start gap-3 p-3 rounded-xl border bg-orange-50/40 dark:bg-orange-900/5 border-orange-200/50 dark:border-orange-800/20">
-                <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 bg-orange-500" />
-                <p className="text-sm text-gray-700 dark:text-[#e2e8f0]">{p.text}</p>
-              </div>
-            ))}
+
+        {building ? (
+          <div className="flex items-center gap-2 text-sm text-gray-400">
+            <Loader2 size={14} className="animate-spin" />Analysing competitor content…
           </div>
+        ) : report && !report.error ? (
+          <>
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-gray-400 border-b border-slate-200/50 dark:border-white/5 pb-3">
+              <span className="flex items-center gap-1"><BarChart3 size={11} />{report.item_count} items analysed</span>
+              <span className="flex items-center gap-1"><Users size={11} />{report.voice_exact_share}% voices identified</span>
+              <span>last {report.window_days} days</span>
+            </div>
+            <ReportBody report={report} />
+          </>
         ) : (
-          <p className="text-sm text-gray-400">{brief?.error || "No competitor insights yet — add competitor targets and run a scrape."}</p>
+          <p className="text-sm text-gray-400">
+            {report?.error || "No competitor insights yet — add competitor targets and run a scrape."}
+          </p>
         )}
       </div>
 
