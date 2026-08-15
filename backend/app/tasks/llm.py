@@ -355,7 +355,7 @@ def _render_global_synthesis_pdf(result: dict, now) -> str | None:
     default_retry_delay=60,
     acks_late=True,
 )
-def generate_summary(self, target_id: int, run_id: int) -> dict:
+def generate_summary(self, target_id: int, run_id: int | None) -> dict:
     """Generate PersonSummary (bullets + so-what) for a target after extraction."""
     from app.services.extractor import ExtractorService
     from app.services.run_context import RunContext

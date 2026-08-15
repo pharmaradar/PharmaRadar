@@ -461,9 +461,13 @@ async def regenerate_summary(target_id: int, db: AsyncSession = Depends(get_db))
 
     from app.tasks.llm import generate_summary
     try:
-        # run_id 0: this belongs to no scrape run, and patch_run no-ops on a
-        # missing run, so the progress counters simply have nowhere to write.
-        task = generate_summary.delay(target_id, 0)
+        # run_id None: this belongs to no scrape run. person_summaries.run_id
+        # is nullable for exactly this reason — it used to be the sentinel 0,
+        # which inserted clean but violated the FK to run_logs on every single
+        # call (there is no run_logs row with id 0), so this endpoint could
+        # never succeed. patch_run() already treats a missing run as a no-op,
+        # so None costs it nothing.
+        task = generate_summary.delay(target_id, None)
     except Exception as exc:                        # noqa: BLE001
         raise HTTPException(503, f"queue unavailable: {str(exc)[:120]}") from exc
     return {"queued": True, "task_id": task.id, "insights": count}
