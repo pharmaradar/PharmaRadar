@@ -49,14 +49,27 @@ function extractDate(p: PdfFile): string {
   return "undated";
 }
 
+// Every upload gets a random 12-char token inserted before the extension —
+// the Blob store is public with no per-file auth, and these PDFs name real
+// clinicians, so a guessable filename (Weekly_KOL_Report_2026-08-15.pdf)
+// would let anyone who guessed the date read one (see
+// vercel_blob_storage.unguessable_pathname). It has to survive in the URL;
+// it should not survive into what the client reads as the report's name.
+// The per-KOL case below already dodges this by reading the parent folder
+// instead of the filename — this does the same job for names that have no
+// such folder to fall back to.
+function stripUploadSuffix(name: string): string {
+  return name.replace(/-[\w-]{12}(\.pdf)$/i, "$1");
+}
+
 function prettyName(p: PdfFile, cat: Exclude<Category, "all">): string {
   if (cat === "kol") {
-    // reports/{date}/{Target_Name}/{Target_Name}_{date}.pdf → "Target Name"
+    // reports/{date}/{Target_Name}/{Target_Name}_{date}-{token}.pdf → "Target Name"
     const seg = p.path.split("/");
     const folder = seg.length >= 3 ? seg[seg.length - 2] : "";
     if (folder && !/^\d{4}-\d{2}-\d{2}$/.test(folder)) return folder.replace(/_/g, " ");
   }
-  return p.name.replace(".pdf", "").replace(/_/g, " ");
+  return stripUploadSuffix(p.name).replace(".pdf", "").replace(/_/g, " ");
 }
 
 // Public blob URLs work directly; local-dev /api/... paths need the auth header.
@@ -82,7 +95,7 @@ function PdfRow({ pdf, cat, onPreview }: {
   const open = async (mode: "preview" | "download") => {
     try {
       const url = await resolvePdfUrl(pdf.url);
-      if (mode === "preview") onPreview(url, pdf.name);
+      if (mode === "preview") onPreview(url, prettyName(pdf, cat));
       else {
         const a = document.createElement("a");
         a.href = url; a.download = pdf.name; a.target = "_blank"; a.rel = "noreferrer";
@@ -304,14 +317,14 @@ export default function Reports() {
                           : <ChevronRight size={15} className="text-gray-400" />}
                         <FileText size={15} className="text-pharma-light shrink-0" />
                         <span className="text-sm font-medium text-gray-700 dark:text-[#e2e8f0]">
-                          {pdf.name.replace(".pdf", "").replace(/_/g, " ")}
+                          {prettyName(pdf, "summary")}
                         </span>
                         <span className="text-xs text-gray-400 ml-2">{(pdf.size / 1024).toFixed(0)} KB</span>
                       </div>
                       <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
                         <button
                           onClick={async () => {
-                            try { setPreviewName(pdf.name); setPreviewUrl(await resolvePdfUrl(pdf.url)); }
+                            try { setPreviewName(prettyName(pdf, "summary")); setPreviewUrl(await resolvePdfUrl(pdf.url)); }
                             catch { alert("PDF not available"); }
                           }}
                           className="text-pharma-light hover:text-pharma-blue"
@@ -341,7 +354,7 @@ export default function Reports() {
                           src={summaryUrls[pdf.path] || (pdf.url.startsWith("/api/") ? "about:blank" : pdf.url)}
                           className="w-full border-0"
                           style={{ height: "70vh" }}
-                          title={pdf.name}
+                          title={prettyName(pdf, "summary")}
                         />
                       </div>
                     )}
