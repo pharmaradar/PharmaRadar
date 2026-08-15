@@ -158,47 +158,33 @@ function KolDiscovery() {
 }
 
 
-function SynthesisButton({ profileId, hasSummary }: {
-  profileId: number; hasSummary: boolean;
+/**
+ * Purely presentational — the "is this generating" state and the poll that
+ * watches for it to finish both live on the page component, not here.
+ *
+ * This used to own both: its own `waiting` state and its own 3s poll. That
+ * meant closing the detail panel after clicking Generate — or switching to a
+ * different KOL and back — unmounted this component, killing the poll. The
+ * backend task kept running (a Celery task doesn't know or care that the tab
+ * moved on), but nothing was left watching for it to land, so reopening the
+ * KOL later showed whatever had been fetched at that moment — "no summary" if
+ * you reopened before the task finished — with nothing to refresh it after.
+ * Multiple KOLs generated in a row this way could ALL look like they failed,
+ * even though every one of them wrote a summary server-side.
+ */
+function SynthesisButton({ hasSummary, generating, error, onGenerate }: {
+  hasSummary: boolean; generating: boolean; error: string | null;
+  onGenerate: () => void;
 }) {
-  const qc = useQueryClient();
-  const [waiting, setWaiting] = useState(false);
-
-  useQuery({
-    queryKey: ["kol-summary-watch", profileId, waiting],
-    queryFn: async () => {
-      await qc.invalidateQueries({ queryKey: ["kol-profile", profileId] });
-      return true;
-    },
-    enabled: waiting,
-    refetchInterval: 3000,
-  });
-
-  useEffect(() => {
-    if (!waiting) return;
-    const timer = setTimeout(() => setWaiting(false), 120_000);
-    return () => clearTimeout(timer);
-  }, [waiting]);
-
-  const mut = useMutation({
-    mutationFn: () => api.regenerateKolSummary(profileId),
-    onMutate: () => setWaiting(true),
-    onError: () => setWaiting(false),
-  });
-
   return (
     <div className="flex items-center gap-2">
-      {mut.isError && (
-        <span className="text-[11px] text-red-400">
-          {(mut.error as Error)?.message?.slice(0, 80)}
-        </span>
-      )}
-      <button onClick={() => mut.mutate()} disabled={mut.isPending || waiting}
+      {error && <span className="text-[11px] text-red-400">{error.slice(0, 80)}</span>}
+      <button onClick={onGenerate} disabled={generating}
         className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] border border-slate-300 dark:border-white/10 rounded-lg hover:bg-slate-50 dark:hover:bg-white/5 disabled:opacity-50 transition-colors">
-        {mut.isPending || waiting
+        {generating
           ? <Loader2 size={11} className="animate-spin" />
           : <Sparkles size={11} />}
-        {waiting ? "Writing…" : hasSummary ? "Regenerate" : "Generate"}
+        {generating ? "Writing…" : hasSummary ? "Regenerate" : "Generate"}
       </button>
     </div>
   );
@@ -354,7 +340,10 @@ function SentimentBar({ sentiment }: { sentiment: Record<string, number> }) {
   );
 }
 
-function ProfileDetail({ id, onClose }: { id: number; onClose: () => void }) {
+function ProfileDetail({ id, onClose, generating, generateError, onGenerate }: {
+  id: number; onClose: () => void;
+  generating: boolean; generateError: string | null; onGenerate: () => void;
+}) {
   const [days, setDays] = useState(90);
   const { data: profile, isLoading } = useQuery({
     queryKey: ["kol-profile", id, days],
@@ -419,7 +408,8 @@ function ProfileDetail({ id, onClose }: { id: number; onClose: () => void }) {
                   <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
                     Summary of what they said
                   </div>
-                  <SynthesisButton profileId={profile.id} hasSummary />
+                  <SynthesisButton hasSummary generating={generating}
+                    error={generateError} onGenerate={onGenerate} />
                 </div>
                 <ul className="space-y-1.5">
                   {profile.summary_bullets.map((bullet, i) => (
@@ -441,7 +431,8 @@ function ProfileDetail({ id, onClose }: { id: number; onClose: () => void }) {
                   No synthesis yet — press Generate to write one from the
                   {" "}{profile.insight_count} statements collected.
                 </p>
-                <SynthesisButton profileId={profile.id} hasSummary={false} />
+                <SynthesisButton hasSummary={false} generating={generating}
+                  error={generateError} onGenerate={onGenerate} />
               </div>
             )}
 
@@ -561,7 +552,22 @@ function ProfileCard({ profile, onOpen }: { profile: KolProfileCard; onOpen: () 
   );
 }
 
+// sessionStorage helpers, matching the pattern in AccountTracking.tsx: the
+// generation state has to survive this page unmounting (a route change),
+// not just a detail panel closing. Restored state is still verified against
+// the server on the next poll, never trusted blindly.
+function loadPersisted<T>(key: string, fallback: T): T {
+  try {
+    const raw = sessionStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch { return fallback; }
+}
+function persist(key: string, value: unknown) {
+  try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode etc. */ }
+}
+
 export default function KolModule() {
+  const qc = useQueryClient();
   const [query, setQuery] = useState("");
   const [openId, setOpenId] = useState<number | null>(null);
   const [type, setType] = useState<"kol" | "competitor">("kol");
@@ -569,6 +575,62 @@ export default function KolModule() {
   const { data, isLoading } = useQuery({
     queryKey: ["kol-profiles", type],
     queryFn: () => api.kolProfiles(undefined, type),
+  });
+
+  // Profiles currently generating a summary, mapped to the timestamp they had
+  // when generation started — this, not a plain boolean, is what "on the page
+  // level" means here: the SAME polling loop keeps working whether the detail
+  // panel for that KOL is open, closed, or was closed and a different one
+  // opened in between.
+  const [generating, setGenerating] = useState<Record<number, string | null>>(
+    () => loadPersisted("kol:generating", {}));
+  useEffect(() => persist("kol:generating", generating), [generating]);
+  const [generateErrors, setGenerateErrors] = useState<Record<number, string>>({});
+  const generatingIds = Object.keys(generating).map(Number);
+
+  useQuery({
+    queryKey: ["kol-generate-watch", generatingIds.join(",")],
+    queryFn: async () => {
+      const fresh = await api.kolProfiles(undefined, type);
+      qc.setQueryData(["kol-profiles", type], fresh);
+      const stillGenerating: Record<number, string | null> = {};
+      for (const [key, since] of Object.entries(generating)) {
+        const id = Number(key);
+        const row = fresh.profiles.find((p) => p.id === id);
+        if (row && row.summary_generated_at !== since) {
+          qc.invalidateQueries({ queryKey: ["kol-profile", id] });
+        } else {
+          stillGenerating[id] = since;
+        }
+      }
+      if (Object.keys(stillGenerating).length !== generatingIds.length) {
+        setGenerating(stillGenerating);
+      }
+      return fresh;
+    },
+    enabled: generatingIds.length > 0,
+    refetchInterval: 3000,
+  });
+
+  // Safety net: a dead worker or an unregistered task must not leave the
+  // button stuck on "Writing…" forever.
+  useEffect(() => {
+    if (!generatingIds.length) return;
+    const timer = setTimeout(() => setGenerating({}), 120_000);
+    return () => clearTimeout(timer);
+  }, [generatingIds.length]);
+
+  const generateMut = useMutation({
+    mutationFn: (id: number) => api.regenerateKolSummary(id),
+    onMutate: (id) => {
+      setGenerateErrors((e) => { const n = { ...e }; delete n[id]; return n; });
+      const current = (data?.profiles ?? []).find((p) => p.id === id);
+      setGenerating((g) => ({ ...g, [id]: current?.summary_generated_at ?? null }));
+    },
+    onError: (err, id) => {
+      setGenerating((g) => { const n = { ...g }; delete n[id]; return n; });
+      setGenerateErrors((e) => ({ ...e, [id]: (err as Error)?.message || "Failed" }));
+    },
   });
 
   // Filtering client-side keeps typing instant; the endpoint also accepts `q`
@@ -628,7 +690,12 @@ export default function KolModule() {
         </div>
       )}
 
-      {openId != null && <ProfileDetail id={openId} onClose={() => setOpenId(null)} />}
+      {openId != null && (
+        <ProfileDetail id={openId} onClose={() => setOpenId(null)}
+          generating={openId in generating}
+          generateError={generateErrors[openId] ?? null}
+          onGenerate={() => generateMut.mutate(openId)} />
+      )}
     </div>
   );
 }
