@@ -152,10 +152,10 @@ class ExtractorService:
         logger.info("extractor.done", post_id=post_id, target=target_name, insights=insights_saved)
         return {"insights_saved": insights_saved}
 
-    def summarise(self, target_id: int, run_id: int, ctx: RunContext) -> dict:
+    def summarise(self, target_id: int, run_id: int | None, ctx: RunContext) -> dict:
         return asyncio.run(self._summarise_async(target_id, run_id, ctx))
 
-    async def _summarise_async(self, target_id: int, run_id: int, ctx: RunContext) -> dict:
+    async def _summarise_async(self, target_id: int, run_id: int | None, ctx: RunContext) -> dict:
         from app.database import CelerySessionLocal
         from app.models import ExtractedInsight, PersonSummary, Target
         from sqlalchemy import select

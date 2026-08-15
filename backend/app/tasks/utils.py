@@ -4,13 +4,16 @@ from __future__ import annotations
 import asyncio
 
 
-def patch_run(run_id: int, **fields) -> None:
+def patch_run(run_id: int | None, **fields) -> None:
     """Atomically apply column updates to RunLog(id=run_id).
 
     Uses a single asyncio.run() so asyncpg connections stay on one event loop.
     Silently skips cancelled / finished rows — never overwrites a terminal status.
+    `run_id=None` means the caller isn't part of a scrape run at all (e.g. an
+    on-demand summary) — skip without a DB round trip rather than querying for
+    a row that was never going to exist.
     """
-    if not fields:
+    if not fields or run_id is None:
         return
 
     async def _update():

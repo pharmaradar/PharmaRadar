@@ -5,7 +5,7 @@ import threading
 
 @dataclass
 class RunContext:
-    run_id: int
+    run_id: int | None
     task_id: str = ""
     _stop_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _llm_calls: int = field(default=0, repr=False)
