@@ -6,6 +6,7 @@ import {
   Sparkles, TrendingUp, Twitter, Users, X,
 } from "lucide-react";
 import { api, type KolProfileCard, type KolResearch } from "@/lib/api";
+import TransparencePanel from "@/components/TransparencePanel";
 import ShareOfVoice from "@/components/ShareOfVoice";
 import { cn } from "@/lib/utils";
 
@@ -453,6 +454,11 @@ function ProfileDetail({ id, onClose, generating, generateError, onGenerate }: {
                 <ResearchRecord research={profile.research} />
               </div>
             )}
+
+            {/* Declared industry payments. Sits under the research record because
+                both answer "what is this person's standing in the field" from
+                external evidence rather than from what they posted. */}
+            <TransparencePanel targetId={id} />
 
             <div className="grid sm:grid-cols-2 gap-4">
               <div className="space-y-2">

@@ -763,6 +763,50 @@ export interface AccountScanStatus {
   finished_at?: string;
 }
 
+
+/** French Sunshine Act (Transparence Santé) — declared industry payments.
+ *
+ *  `status` gates everything: figures are shown ONLY when it is "resolved",
+ *  i.e. the target was pinned to exactly one national RPPS identifier. An
+ *  "ambiguous" target carries the reason in `note` and no numbers, because a
+ *  payment attributed to the wrong clinician is worse than an absent one. */
+export interface TransparenceIdentity {
+  target_id: number;
+  target_name: string;
+  status: "unresolved" | "resolved" | "ambiguous" | "not_found";
+  rpps: string | null;
+  confidence: number | null;
+  note: string | null;
+  resolved_at: string | null;
+  synced_at: string | null;
+}
+
+export interface TransparenceCompany {
+  company: string;
+  siren: string | null;
+  payments: number;
+  total_eur: number;
+  first_paid: string | null;
+  last_paid: string | null;
+}
+
+export interface TransparenceTarget extends TransparenceIdentity {
+  displayable: boolean;
+  payment_count: number;
+  total_eur: number;
+  companies: TransparenceCompany[];
+  recent: {
+    company: string; amount_eur: number;
+    paid_on: string | null; reason: string | null; kind: string | null;
+  }[];
+}
+
+export interface TransparenceOverview {
+  companies: (TransparenceCompany & { kols: number; share_pct: number })[];
+  total_eur: number;
+  coverage: Record<string, number>;
+}
+
 export const api = {
   stats: () => req<Stats>("/stats"),
   combinedSynthesis: (refresh = false) =>
@@ -880,6 +924,18 @@ export const api = {
   },
 
   // KOL module — surfaces the per-target summaries the pipeline already writes.
+  /** Declared industry payments to this KOL, grouped by paying company.
+   *  Companies are aggregated server-side by SIREN, not trade name — the
+   *  register files "ROCHE SAS" and "ROCHE" separately for one legal entity. */
+  transparenceTarget: (id: number, limit = 25) =>
+    req<TransparenceTarget>(`/transparence/target/${id}?limit=${limit}`),
+  /** Share of industry investment across every resolved KOL. */
+  transparenceOverview: () =>
+    req<TransparenceOverview>("/transparence/overview"),
+  syncTransparence: (targetId?: number, force = false) =>
+    req<{ queued: boolean; task_id: string; scope: string }>(
+      `/transparence/sync?force=${force}` + (targetId ? `&target_id=${targetId}` : ""),
+      { method: "POST" }),
   kolProfiles: (q?: string, targetType = "kol") =>
     req<{ profiles: KolProfileCard[] }>(
       `/targets/profiles?target_type=${targetType}` + (q ? `&q=${encodeURIComponent(q)}` : "")),
