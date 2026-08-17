@@ -22,7 +22,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from litellm import completion, RateLimitError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import get_settings
 from app.models.app_settings import PROVIDERS
@@ -117,11 +117,87 @@ def _load_settings():
 
 # ── Core call with retry ──────────────────────────────────
 
+# Providers return HTTP 429 for two completely different situations, and litellm
+# maps both to RateLimitError:
+#
+#   transient  "too many requests per minute"     → backing off WORKS
+#   permanent  "prepayment credits are depleted"  → backing off can never work
+#
+# Treating the second as the first is expensive in three ways at once: every
+# call burns the full 15+30+60s backoff ladder before failing, the fallback
+# provider is skipped (see _dispatch), and tasks that loop over LLM calls blow
+# their Celery time limits and get the worker SIGKILLed. That is what happened on
+# 2026-08-17 — Gemini credits ran out and classify_ae_backfill overran its 720s
+# hard limit, because each of its calls sat in a doomed retry ladder.
+#
+# Matched on the message because that is the only place the distinction exists:
+# the status code, the exception type and the litellm mapping are identical for
+# both. Kept deliberately narrow — anything unrecognised stays retryable, since
+# retrying a transient error is cheap and refusing to retry one is not.
+_QUOTA_EXHAUSTED_MARKERS = (
+    "prepayment credits are depleted",
+    "credits are depleted",
+    "resource_exhausted",
+    "insufficient credits",
+    "insufficient_quota",
+    "billing",
+    "exceeded your current quota",
+)
+
+
+def is_quota_exhausted(exc: BaseException) -> bool:
+    """True when a 429 means 'out of money', not 'slow down'."""
+    text = str(exc).lower()
+    return any(m in text for m in _QUOTA_EXHAUSTED_MARKERS)
+
+
+def _retryable(exc: BaseException) -> bool:
+    return isinstance(exc, RateLimitError) and not is_quota_exhausted(exc)
+
+
+# provider_health owns the Redis flag the Settings page reads. Imported lazily
+# and never allowed to raise: a monitoring breadcrumb must not be able to fail
+# an LLM call that otherwise worked.
+def _flag_exhausted(provider: str, message: str) -> None:
+    try:
+        from app.services.provider_health import flag_exhausted
+        flag_exhausted(provider, message[:300])
+    except Exception:
+        pass
+
+
+def _clear_exhausted(provider: str) -> None:
+    try:
+        from app.services.provider_health import clear_exhausted
+        clear_exhausted(provider)
+    except Exception:
+        pass
+
+
+# litellm's default request_timeout is 6000s — 100 minutes, longer than every
+# Celery time limit in this app by an order of magnitude. A provider that accepts
+# the connection and then never answers therefore parks the worker until the hard
+# limit SIGKILLs it, which reads in the logs as "the task is slow" rather than
+# "the provider stalled". Measured 2026-08-17 against NVIDIA NIM: the connection
+# opened in 8ms and returned zero bytes for 120s, on 3 of 4 attempts.
+#
+# 120s is well above a real generation (8192 tokens of Gemini Flash lands in
+# 10-30s) and well under the 300s floor of our shortest task budget. A timeout
+# raises litellm.Timeout, not RateLimitError, so it is NOT caught by the retry
+# predicate below — it falls straight through to the fallback provider in
+# _dispatch, which is bounded by this same timeout. Worst case per call is
+# therefore 2 x 120s, not 2 x 6000s.
+_LLM_TIMEOUT_SECONDS = 120
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=2, min=15, max=120),
-    retry=retry_if_exception_type(RateLimitError),
+    # retry_if_exception passes the EXCEPTION to the predicate. A bare callable
+    # here would receive tenacity's RetryCallState instead, the isinstance check
+    # would be False for every error, and retries would silently never happen.
+    retry=retry_if_exception(_retryable),
 )
 def _call(model_str: str, messages: list[dict], temperature: float, max_tokens: int, extra: dict) -> str:
     response = completion(
@@ -129,6 +205,7 @@ def _call(model_str: str, messages: list[dict], temperature: float, max_tokens: 
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=_LLM_TIMEOUT_SECONDS,
         **extra,
     )
     return response.choices[0].message.content or ""
@@ -151,9 +228,22 @@ def _dispatch(
     logger.debug("llm.dispatch", provider=provider, model=model_str)
 
     try:
-        return _call(model_str, messages, temperature, max_tokens, extra)
-    except RateLimitError:
-        raise
+        result = _call(model_str, messages, temperature, max_tokens, extra)
+    except RateLimitError as exc:
+        # A transient rate limit is the one case where the fallback is the wrong
+        # move: _call already backed off against this provider, and switching
+        # models mid-run changes the voice of the output for no reason. Credit
+        # exhaustion is the opposite — this provider is done until someone tops
+        # it up, so fall through to the fallback rather than failing the request.
+        if not is_quota_exhausted(exc):
+            raise
+        _flag_exhausted(provider, str(exc))
+        logger.warning("llm.quota_exhausted", provider=provider, model=model_str)
+        if provider == "nvidia" or not _config.nvidia_api_key:
+            raise
+        fallback_str = _model_string("nvidia", "meta/llama-3.3-70b-instruct")
+        return _call(fallback_str, messages, temperature, max_tokens,
+                     _extra_kwargs("nvidia", s))
     except Exception as primary_exc:
         if provider != "nvidia" and _config.nvidia_api_key:
             fallback_str = _model_string("nvidia", "meta/llama-3.3-70b-instruct")
@@ -167,6 +257,12 @@ def _dispatch(
             )
             return _call(fallback_str, messages, temperature, max_tokens, fallback_extra)
         raise
+
+    # Reaching here means the configured provider answered, so any stale
+    # exhaustion warning on the Settings page is now wrong. Same auto-clear
+    # convention TinyFish uses.
+    _clear_exhausted(provider)
+    return result
 
 
 def call_llm(messages: list[dict], temperature: float = 0.2, max_tokens: int = 4096) -> str:

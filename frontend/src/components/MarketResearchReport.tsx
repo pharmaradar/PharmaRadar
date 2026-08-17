@@ -4,7 +4,7 @@ import {
   BarChart3, Download, ExternalLink, FileSearch,
   Loader2, Sparkles, Users,
 } from "lucide-react";
-import { api, type MarketReport } from "@/lib/api";
+import { api, type MarketReportSections } from "@/lib/api";
 import { useGenQuota } from "@/hooks/useGenQuota";
 import {
   AuthorList, Prose, SubtopicList, VoiceChart, VolumeBlock,
@@ -39,7 +39,9 @@ function Section({ title, index, children }: {
 
 
 
-function ReportBody({ report }: { report: MarketReport }) {
+/** Exported so any surface with the six sections — the Competitors page's
+ *  non-persisted report included — renders through this one component. */
+export function ReportBody({ report }: { report: MarketReportSections }) {
   return (
     <div className="space-y-6">
       <Section title="Executive summary" index={1}><Prose text={report.exec_summary} /></Section>

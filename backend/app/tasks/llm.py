@@ -1,9 +1,47 @@
 """LLM tasks — run on the 'llm' queue."""
+import time
+
 import structlog
 
 from app.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
+
+# extract_target_posts walks up to 25 posts, one LLM call each, under a 600s
+# soft limit. One call is NOT one round trip: _call_json retries twice, and each
+# attempt goes through llm_router's tenacity retry (4 attempts, 15-120s
+# exponential backoff on 429). A single post can therefore burn 200s+, and 25 of
+# them ran with no clock check at all — the task blew its limit and the worker
+# was SIGKILLed, which with acks_late requeued the whole thing. Same failure
+# mode that classify_ae_backfill hit in production on 2026-08-17.
+#
+# Stopping early is cheap because each extraction commits as it goes: the next
+# pass re-queries for unextracted posts and resumes where this one stopped.
+# Leaves ~2 min of headroom under the 600s soft limit for the final patch_run.
+_EXTRACT_BUDGET_SECONDS = 480
+
+
+def _extract_within_budget(post_ids, extract_one, on_saved, *,
+                           budget=_EXTRACT_BUDGET_SECONDS, clock=time.monotonic):
+    """Extract posts until the budget is spent. Returns (done, insights, capped).
+
+    Split out from the task body so the deadline behaviour is testable with a
+    fake clock — standing up Celery and a real LLM to prove a loop stops early
+    is not a test anyone would run.
+    """
+    started = clock()
+    done = 0
+    insights = 0
+    for post_id in post_ids:
+        # Checked BEFORE the call, never after: discovering the budget is spent
+        # once the expensive call has already been made saves nothing.
+        if clock() - started > budget:
+            return done, insights, True
+        saved = extract_one(post_id)
+        done += 1
+        insights += saved
+        on_saved(saved)
+    return done, insights, False
 
 
 @celery_app.task(
@@ -80,15 +118,19 @@ def extract_target_posts(self, target_id: int, run_id: int) -> dict:
 
         ctx = RunContext(run_id=run_id, task_id=self.request.id)
         extractor = ExtractorService()
-        total_insights = 0
-        for post_id in post_ids:
-            result = extractor.extract(post_id=post_id, ctx=ctx)
-            saved = result.get("insights_saved", 0)
-            total_insights += saved
-            patch_run(run_id, **{"+insights_extracted": saved, "+llm_calls_used": 1})
 
-        log.info("extract_target_posts.done", posts=len(post_ids), insights=total_insights)
-        return {"extracted": len(post_ids), "insights_saved": total_insights}
+        done, total_insights, capped = _extract_within_budget(
+            post_ids,
+            lambda pid: extractor.extract(post_id=pid, ctx=ctx).get("insights_saved", 0),
+            lambda saved: patch_run(
+                run_id, **{"+insights_extracted": saved, "+llm_calls_used": 1}),
+        )
+        if capped:
+            log.info("extract_target_posts.time_capped", posts=done,
+                     remaining=len(post_ids) - done, insights=total_insights)
+
+        log.info("extract_target_posts.done", posts=done, insights=total_insights)
+        return {"extracted": done, "insights_saved": total_insights}
     except Exception as exc:
         log.warning("extract_target_posts.retry", exc=str(exc))
         raise self.retry(exc=exc)

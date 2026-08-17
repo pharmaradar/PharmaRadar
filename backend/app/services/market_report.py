@@ -468,6 +468,65 @@ async def gather(session, question: str, *, terms: list[str] | None = None,
                     authors=_compute_main_authors(items, await _tracked_names(session)))
 
 
+async def gather_competitors(session, window_days: int = 180) -> Material:
+    """Everything tracked competitors have said — no keyword search.
+
+    `gather()` above searches by term because a burning-topic question could be
+    answered by any row in the corpus. A competitor brief doesn't have that
+    problem: the client already told us exactly which targets are competitors,
+    so this takes every one of their insights in the window directly, the same
+    query the old flat-bullet /competitor-brief endpoint used — just fed
+    through the shared 6-section builder instead of a flat prompt.
+    """
+    from sqlalchemy import desc, select
+
+    from app.models import ExtractedInsight, ScrapedPost, Target
+    from app.services.ae_filter import post_not_ae
+
+    since = datetime.now(timezone.utc) - timedelta(days=window_days)
+    rows = await session.execute(
+        select(ExtractedInsight, Target.name, ScrapedPost)
+        .join(Target, ExtractedInsight.target_id == Target.id)
+        .join(ScrapedPost, ExtractedInsight.scraped_post_id == ScrapedPost.id)
+        .where(Target.target_type == "competitor")
+        .where(ExtractedInsight.extracted_at >= since)
+        .where(post_not_ae())
+        .order_by(desc(ExtractedInsight.extracted_at))
+        .limit(MAX_INSIGHTS)
+    )
+    items = [
+        {
+            "kind": "competitor statement",
+            "author": name,
+            "target_type": "competitor",
+            "is_tracked_kol": False,
+            "text": (insight.what_they_said or "").strip(),
+            "topic": insight.topic or "",
+            "sentiment": insight.sentiment or "neutral",
+            "url": post.source_url or "",
+            "source_name": post.source_name or post.domain or "",
+            "date": post.published_date or (
+                insight.extracted_at.date().isoformat() if insight.extracted_at else ""),
+            "engagement": 0,
+            "at": insight.extracted_at,
+        }
+        for insight, name, post in rows.all()
+    ]
+
+    voices = build_breakdown([
+        {
+            "author": i.get("author"),
+            "url": i.get("url"),
+            "is_tracked_kol": i.get("is_tracked_kol"),
+            "target_type": i.get("target_type"),
+        }
+        for i in items
+    ])
+    return Material(items=items, voices=voices,
+                    volume=compute_volume(items, window_days),
+                    authors=_compute_main_authors(items, await _tracked_names(session)))
+
+
 # ── Prompt ────────────────────────────────────────────────
 
 def _voice_summary(voices: VoiceBreakdown) -> str:

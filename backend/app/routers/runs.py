@@ -195,7 +195,15 @@ async def stop_run(db: AsyncSession = Depends(get_db)):
     return {"stopped": True, "cancelled": [r.id for r in runs]}
 
 
-@router.get("/", response_model=list[RunOut])
+# Superadmin-only, matching the frontend: Run History is behind SuperadminRoute
+# in App.tsx and its nav entry is superadmin-flagged. Hiding the page alone left
+# the data readable by any authenticated user straight from the API. Run history
+# exposes operational internals (error messages, credit spend, target counts)
+# that the client's own users have no reason to read.
+# `/current` deliberately stays open to every signed-in user — the Dashboard and
+# Settings pipeline bar both poll it.
+@router.get("/", response_model=list[RunOut],
+            dependencies=[Depends(require_superadmin)])
 async def list_runs(db: AsyncSession = Depends(get_db)):
     rows = await db.execute(select(RunLog).order_by(desc(RunLog.started_at)).limit(50))
     return [_run_to_out(r) for r in rows.scalars().all()]

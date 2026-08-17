@@ -11,6 +11,7 @@ function FormattedMessage({ content }: { content: string }) {
   const elements: React.ReactNode[] = [];
   let i = 0;
 
+  
   while (i < lines.length) {
     const line = lines[i].trim();
 
