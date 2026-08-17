@@ -527,6 +527,13 @@ export interface ProviderHealth {
   usage_label?: string | null;
   message: string;
   checked_at: string;
+  /** Spend metered on our side this calendar month — what WE sent through this
+   *  key, priced per model. Not the provider's invoice: only OpenRouter exposes
+   *  a real balance, so for every other provider this is the only spend figure
+   *  that exists. Null until the key has actually been used. */
+  spend_usd?: number | null;
+  spend_calls?: number | null;
+  spend_tokens?: number | null;
 }
 
 export interface DiscoveryContent {
