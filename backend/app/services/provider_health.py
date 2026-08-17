@@ -27,7 +27,12 @@ logger = structlog.get_logger(__name__)
 
 _EXHAUST_PREFIX = "provider_exhausted:"
 _TF_CREDIT_PREFIX = "tf_credits:"
-_BUNDLE_CACHE_KEY = "provider_health:bundle:v3"
+# BUMP THE VERSION whenever a row gains or loses a field. The bundle is cached in
+# Redis for 5 min and survives deploys, so reusing the key after a shape change
+# serves the OLD shape to clients that already have the new UI — which is exactly
+# what happened when spend metering was added under a stale v3: the panel showed
+# "Key valid" with no spend for minutes after the deploy, and looked broken.
+_BUNDLE_CACHE_KEY = "provider_health:bundle:v4"
 _BUNDLE_CACHE_TTL = 300  # 5 min
 
 

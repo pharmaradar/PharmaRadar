@@ -227,3 +227,26 @@ def test_router_does_not_meter_a_response_without_usage(monkeypatch):
 
     llm_router._call("gemini/x", [], 0.2, 50, {}, "gemini")
     assert calls == []
+
+
+# ── Response contract ─────────────────────────────────────
+
+def test_every_provider_row_declares_the_spend_fields():
+    """Present even when unused, so the response shape does not change depending
+    on whether a key happened to be called. The frontend types them optional,
+    but a row that sometimes omits them makes every consumer defensive."""
+    row = ph._base("x", "X", True)
+    for field in ("spend_usd", "spend_calls", "spend_tokens"):
+        assert field in row, f"{field} missing from the provider row contract"
+
+
+def test_bundle_cache_key_was_bumped_past_the_pre_spend_version():
+    """The bundle is cached 5 min in Redis and survives deploys. Reusing the key
+    after changing a row's shape serves the OLD shape to clients running the NEW
+    UI — the spend panel rendered empty for minutes after release because of
+    exactly that. Any future field change must bump this again.
+    """
+    assert ph._BUNDLE_CACHE_KEY.endswith(("v4", "v5", "v6", "v7", "v8", "v9")), (
+        f"{ph._BUNDLE_CACHE_KEY} looks un-bumped — a row shape change needs a new "
+        f"cache version or clients keep the stale payload until it expires"
+    )
