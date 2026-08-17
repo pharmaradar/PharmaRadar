@@ -98,7 +98,18 @@ def _register_for_wave2(run_id: int, target_id: int,
     queue="scrape",
     max_retries=1,
     default_retry_delay=30,
-    acks_late=True,
+    # NOT acks_late, unlike the rest of the scrape lane. This task is allowed to
+    # run for 30 min but the broker's visibility_timeout is 900s (see
+    # celery_app.broker_transport_options): with acks_late the message stays
+    # un-acked while the task runs, so at T+900s Redis decided it was lost and
+    # redelivered it — a SECOND worker then read the same :processing list below
+    # and re-rescued every target while the first was still going. Wave 2 is the
+    # billed agent path (~52 TinyFish steps/target), so that duplicate was paid
+    # for twice, and it also duplicated the summary/PDF chain.
+    # Every other task whose limit exceeds visibility_timeout already opts out
+    # the same way; this one was the exception. Guarded by
+    # tests/test_task_ack_safety.py so the class of bug cannot come back.
+    acks_late=False,
     soft_time_limit=1800,
     time_limit=1920,   # aligned with the celery_app task_annotations (which win)
 )
@@ -109,11 +120,14 @@ def wave2_rescue(self, run_id: int) -> dict:
     log = logger.bind(run_id=run_id, task_id=self.request.id)
 
     # Read Wave 2 targets from Redis. The list is atomically RENAMEd to a
-    # :processing key instead of read-then-DELETEd: with acks_late a killed
-    # attempt gets redelivered, and the old delete-first pattern meant the
-    # retry found an empty list and silently skipped every rescue target.
-    # Now a retry re-reads the :processing key; it is deleted only after the
-    # rescue loop actually completes.
+    # :processing key instead of read-then-DELETEd: a retry (max_retries=1, or a
+    # worker restart mid-rescue) must not find an empty list and silently skip
+    # every rescue target, which is what the old delete-first pattern did.
+    # A retry re-reads the :processing key; it is deleted only after the rescue
+    # loop actually completes.
+    # NOTE: this makes a retry resumable, it does NOT make concurrent copies
+    # safe — two of these running at once would both read this same list. That
+    # is why the task is not acks_late; see the decorator.
     targets_to_rescue = []
     r = None
     processing_key = None
