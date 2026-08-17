@@ -534,6 +534,9 @@ export interface ProviderHealth {
   spend_usd?: number | null;
   spend_calls?: number | null;
   spend_tokens?: number | null;
+  /** How many of spend_calls litellm had no price for — the dollar figure covers
+   *  the rest. NVIDIA NIM and most OpenRouter models land here. */
+  spend_unpriced?: number | null;
 }
 
 export interface DiscoveryContent {

@@ -65,6 +65,7 @@ def _base(pid: str, name: str, configured: bool) -> dict:
         # Metered-by-us spend (see record_llm_usage). Always present so the
         # response shape does not change depending on whether a key was used.
         "spend_usd": None, "spend_calls": None, "spend_tokens": None,
+        "spend_unpriced": None,
     }
 
 
@@ -114,9 +115,16 @@ def _tf_used(suffix: str) -> int:
 _LLM_SPEND_PREFIX = "llm_spend:"
 
 
-def _llm_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Price one call. Returns 0.0 for models litellm has no price for (Ollama,
-    self-hosted) rather than guessing — a wrong number is worse than no number."""
+def _llm_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """Price one call. None means "no price data", which is NOT the same as free.
+
+    litellm separates the two cleanly and the distinction has to survive:
+      Ollama            -> returns (0, 0)   genuinely free, local inference
+      NVIDIA NIM        -> raises           priced by NVIDIA, unknown to litellm
+      OpenRouter models -> raises           varies per upstream model
+    Collapsing both to 0.0 would print "$0.00" beside a provider that is in fact
+    billing us, which is worse than printing nothing at all.
+    """
     try:
         from litellm import cost_per_token
         prompt_cost, completion_cost = cost_per_token(
@@ -126,7 +134,7 @@ def _llm_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> flo
         )
         return float(prompt_cost or 0) + float(completion_cost or 0)
     except Exception:
-        return 0.0
+        return None
 
 
 def record_llm_usage(provider: str, model: str,
@@ -140,13 +148,17 @@ def record_llm_usage(provider: str, model: str,
         usd = _llm_cost_usd(model, prompt_tokens, completion_tokens)
         base = f"{_LLM_SPEND_PREFIX}{_month()}:{provider}"
         pipe = r.pipeline()
-        pipe.incrbyfloat(f"{base}:usd", usd)
+        # Unpriced calls are counted separately rather than added as 0, so the
+        # dollar total never silently understates a provider we cannot price.
+        pipe.incrbyfloat(f"{base}:usd", usd if usd is not None else 0.0)
+        if usd is None:
+            pipe.incrby(f"{base}:unpriced", 1)
         pipe.incrby(f"{base}:calls", 1)
         pipe.incrby(f"{base}:tokens",
                     max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0)))
         # Two months of history, so the first days of a new month can still be
         # compared against the last one.
-        for suffix in ("usd", "calls", "tokens"):
+        for suffix in ("usd", "calls", "tokens", "unpriced"):
             pipe.expire(f"{base}:{suffix}", 65 * 24 * 3600)
         pipe.execute()
     except Exception:
@@ -154,18 +166,23 @@ def record_llm_usage(provider: str, model: str,
 
 
 def llm_spend(provider: str) -> dict:
-    """This month's metered spend for a provider."""
-    out = {"usd": 0.0, "calls": 0, "tokens": 0}
+    """This month's metered spend for a provider.
+
+    `unpriced` is how many of `calls` litellm had no price for — the dollar
+    figure covers the remainder only.
+    """
+    out = {"usd": 0.0, "calls": 0, "tokens": 0, "unpriced": 0}
     r = _redis()
     if not r:
         return out
     try:
         base = f"{_LLM_SPEND_PREFIX}{_month()}:{provider}"
-        usd, calls, tokens = r.mget(
-            f"{base}:usd", f"{base}:calls", f"{base}:tokens")
+        usd, calls, tokens, unpriced = r.mget(
+            f"{base}:usd", f"{base}:calls", f"{base}:tokens", f"{base}:unpriced")
         out["usd"] = round(float(usd or 0), 4)
         out["calls"] = int(calls or 0)
         out["tokens"] = int(tokens or 0)
+        out["unpriced"] = int(unpriced or 0)
     except Exception:
         pass
     return out
@@ -332,13 +349,28 @@ def _attach_spend(out: dict, pid: str) -> None:
     out["spend_usd"] = spend["usd"]
     out["spend_calls"] = spend["calls"]
     out["spend_tokens"] = spend["tokens"]
+    out["spend_unpriced"] = spend["unpriced"]
+
+    calls = f"{spend['calls']:,} calls"
+
+    # Nothing litellm could price — NVIDIA NIM and most OpenRouter models. Report
+    # the volume and say the cost is unknown, rather than showing "$0.00" beside
+    # a provider that may well be billing us.
+    if spend["unpriced"] >= spend["calls"]:
+        out["usage_label"] = f"{calls} · no price data"
+        return
+
     if out.get("usage_usd") is None:
         out["usage_usd"] = spend["usd"]
     # "metered" is load-bearing: this is what WE spent through this key, not the
     # provider's invoice. Sub-cent spend still deserves a real number rather
     # than rounding to $0.00, which reads as "nothing happened".
     money = f"${spend['usd']:.2f}" if spend["usd"] >= 0.01 else f"${spend['usd']:.4f}"
-    out["usage_label"] = f"{money} · {spend['calls']:,} calls (metered)"
+    label = f"{money} · {calls} (metered)"
+    if spend["unpriced"]:
+        # Partial coverage: say so, or the total looks complete when it is not.
+        label += f", {spend['unpriced']:,} unpriced"
+    out["usage_label"] = label
 
 
 async def _llm_checks(client) -> list[dict]:

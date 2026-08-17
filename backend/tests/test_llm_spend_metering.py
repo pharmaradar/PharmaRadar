@@ -92,10 +92,22 @@ def test_cost_scales_linearly_with_tokens():
     assert ten == pytest.approx(one * 10, rel=1e-6)
 
 
-def test_unknown_model_costs_zero_rather_than_guessing():
-    """Ollama and self-hosted models have no price. A fabricated number on a
-    billing panel is worse than an absent one."""
-    assert ph._llm_cost_usd("ollama/some-local-model", 5000, 5000) == 0.0
+def test_free_local_inference_is_priced_at_zero():
+    """Ollama runs locally and genuinely costs nothing. litellm KNOWS this
+    (returns 0), so 0.0 here is a measurement, not a fallback."""
+    assert ph._llm_cost_usd("ollama/llama3", 5000, 5000) == 0.0
+
+
+@pytest.mark.parametrize("model", [
+    "nvidia_nim/meta/llama-3.3-70b-instruct",
+    "openrouter/meta-llama/llama-3.3-70b-instruct",
+    "totally/made-up-model",
+])
+def test_unpriceable_model_returns_none_not_zero(model):
+    """The distinction that matters on a billing panel: None means "we do not
+    know what this cost", 0.0 means "this cost nothing". Showing $0.00 beside a
+    provider that is actually billing us is the failure being prevented."""
+    assert ph._llm_cost_usd(model, 5000, 5000) is None
 
 
 @pytest.mark.parametrize("p,c", [(None, None), (0, 0), (-5, -5)])
@@ -142,7 +154,7 @@ def test_metering_never_raises_when_redis_is_down(monkeypatch):
     """Telemetry must not be able to fail the LLM call it is describing."""
     monkeypatch.setattr(ph, "_redis", lambda: None)
     ph.record_llm_usage("gemini", "gemini/gemini-2.5-flash", 100, 100)  # must not raise
-    assert ph.llm_spend("gemini") == {"usd": 0.0, "calls": 0, "tokens": 0}
+    assert ph.llm_spend("gemini") == {"usd": 0.0, "calls": 0, "tokens": 0, "unpriced": 0}
 
 
 # ── Presentation ──────────────────────────────────────────
@@ -250,3 +262,43 @@ def test_bundle_cache_key_was_bumped_past_the_pre_spend_version():
         f"{ph._BUNDLE_CACHE_KEY} looks un-bumped — a row shape change needs a new "
         f"cache version or clients keep the stale payload until it expires"
     )
+
+
+# ── Priced vs unpriced ────────────────────────────────────
+
+def test_provider_with_no_price_data_reports_volume_not_dollars(fake_redis):
+    """NVIDIA NIM and most OpenRouter models cannot be priced. The panel should
+    say how much we used and admit it cannot cost it."""
+    for _ in range(7):
+        ph.record_llm_usage("nvidia", "nvidia_nim/meta/llama-3.3-70b-instruct", 500, 200)
+    row = ph._base("nvidia", "NVIDIA NIM", True)
+    ph._attach_spend(row, "nvidia")
+    assert row["usage_label"] == "7 calls · no price data"
+    assert "$" not in row["usage_label"]
+    assert row["usage_usd"] is None, "must not imply a measured $0.00"
+
+
+def test_mixed_priced_and_unpriced_calls_disclose_the_gap(fake_redis):
+    """A total that silently covers only some calls reads as complete."""
+    ph.record_llm_usage("openrouter", "gemini/gemini-2.5-flash", 1000, 500)
+    ph.record_llm_usage("openrouter", "openrouter/meta-llama/llama-3.3-70b-instruct", 1000, 500)
+    row = ph._base("openrouter", "OpenRouter", True)
+    ph._attach_spend(row, "openrouter")
+    assert "unpriced" in row["usage_label"], row["usage_label"]
+    assert ph.llm_spend("openrouter")["unpriced"] == 1
+
+
+def test_free_local_provider_still_shows_a_dollar_total(fake_redis):
+    """Ollama is priced (at zero) rather than unpriceable, so it keeps the
+    normal label — $0.00 is the honest answer for local inference."""
+    ph.record_llm_usage("ollama", "ollama/llama3", 1000, 1000)
+    row = ph._base("ollama", "Ollama", True)
+    ph._attach_spend(row, "ollama")
+    assert "no price data" not in row["usage_label"]
+    assert ph.llm_spend("ollama")["unpriced"] == 0
+
+
+def test_unpriced_calls_do_not_inflate_the_dollar_total(fake_redis):
+    ph.record_llm_usage("nvidia", "nvidia_nim/meta/llama-3.3-70b-instruct", 9_000_000, 9_000_000)
+    assert ph.llm_spend("nvidia")["usd"] == 0.0
+    assert ph.llm_spend("nvidia")["calls"] == 1
