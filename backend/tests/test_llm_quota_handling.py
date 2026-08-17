@@ -187,3 +187,31 @@ def test_a_successful_call_clears_a_stale_exhaustion_flag(monkeypatch):
 
     assert llm_router._dispatch([], 0.2, 100) == "fine"
     assert cleared == ["gemini"]
+
+
+# ── Request timeout ───────────────────────────────────────
+
+def test_every_call_carries_an_explicit_timeout(monkeypatch):
+    """litellm defaults request_timeout to 6000s — 100 minutes, far longer than
+    any Celery limit here. A provider that accepts the connection then stalls
+    would park the worker until the hard limit SIGKILLs it. Measured against
+    NVIDIA NIM on 2026-08-17: connect in 8ms, zero bytes for 120s.
+    """
+    seen = {}
+    monkeypatch.setattr(llm_router, "completion",
+                        lambda **kw: seen.update(kw) or type("R", (), {"choices": [
+                            type("C", (), {"message": type("M", (), {"content": "x"})()})()]})())
+    llm_router._call("gemini/x", [], 0.2, 100, {})
+    assert "timeout" in seen, "no timeout passed — litellm would apply its 6000s default"
+    assert seen["timeout"] == llm_router._LLM_TIMEOUT_SECONDS
+
+
+def test_timeout_is_shorter_than_the_tightest_task_budget():
+    """Two calls (primary + fallback) must still fit inside the shortest task
+    soft limit, or the timeout cannot prevent the kill it exists to prevent."""
+    from app.tasks.celery_app import celery_app
+    floor = celery_app.conf.task_soft_time_limit
+    assert llm_router._LLM_TIMEOUT_SECONDS * 2 <= floor, (
+        f"primary+fallback ({llm_router._LLM_TIMEOUT_SECONDS * 2}s) exceeds the "
+        f"{floor}s default soft limit"
+    )

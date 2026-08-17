@@ -174,6 +174,22 @@ def _clear_exhausted(provider: str) -> None:
         pass
 
 
+# litellm's default request_timeout is 6000s — 100 minutes, longer than every
+# Celery time limit in this app by an order of magnitude. A provider that accepts
+# the connection and then never answers therefore parks the worker until the hard
+# limit SIGKILLs it, which reads in the logs as "the task is slow" rather than
+# "the provider stalled". Measured 2026-08-17 against NVIDIA NIM: the connection
+# opened in 8ms and returned zero bytes for 120s, on 3 of 4 attempts.
+#
+# 120s is well above a real generation (8192 tokens of Gemini Flash lands in
+# 10-30s) and well under the 300s floor of our shortest task budget. A timeout
+# raises litellm.Timeout, not RateLimitError, so it is NOT caught by the retry
+# predicate below — it falls straight through to the fallback provider in
+# _dispatch, which is bounded by this same timeout. Worst case per call is
+# therefore 2 x 120s, not 2 x 6000s.
+_LLM_TIMEOUT_SECONDS = 120
+
+
 @retry(
     reraise=True,
     stop=stop_after_attempt(4),
@@ -189,6 +205,7 @@ def _call(model_str: str, messages: list[dict], temperature: float, max_tokens: 
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=_LLM_TIMEOUT_SECONDS,
         **extra,
     )
     return response.choices[0].message.content or ""
