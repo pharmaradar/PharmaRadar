@@ -283,13 +283,23 @@ async def _classify_ae() -> dict:
         if not pending:
             return {"classified": 0, "flagged": 0}
 
+        # Bisection isolates ONE poison post (refusal / malformed JSON) among
+        # otherwise-fine ones. But when the LLM refuses systematically — e.g. a
+        # safety filter blocking on "did a patient suffer harm from this drug"
+        # phrasing, which pharmacovigilance content is prone to — every
+        # sub-batch fails too, and a 15-post chunk can fan out to 29 nested
+        # calls with their own retry/backoff each. That blew past the 600s/720s
+        # task time limits and got the worker SIGKILLed. Cap total calls per
+        # sweep iteration so a systematically-refusing chunk degrades to "these
+        # posts stay unclassified until next sweep" instead of a runaway.
+        calls_made = 0
+        _MAX_CALLS = 4
+
         def _classify_chunk(chunk: list) -> None:
-            """Classify a chunk; on total failure bisect down to singles so one
-            poison post (LLM refusal / malformed JSON) can't block the rest —
-            without this, a bad batch got re-selected every sweep forever."""
-            nonlocal classified, flagged
-            if not chunk:
+            nonlocal classified, flagged, calls_made
+            if not chunk or calls_made >= _MAX_CALLS:
                 return
+            calls_made += 1
             results = _classify_llm_batch([(i, text) for i, (_, text) in enumerate(chunk, 1)])
             if not results and len(chunk) > 1:
                 mid = len(chunk) // 2
