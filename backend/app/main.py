@@ -1436,7 +1436,11 @@ async def combined_synthesis(refresh: bool = False, user=Depends(daily_gen_guard
     return result
 
 
-_GEN_FEATURES = ["daily_brief", "kol_brief", "social_brief", "synthesis",
+_GEN_FEATURES = [# Answering a typed question from the posts that matched it. Must match the
+                 # daily_gen_guard key in routers/social.answer_question, or the
+                 # quota check passes silently and the feature is unmetered.
+                 "social_answer",
+                 "daily_brief", "kol_brief", "social_brief", "synthesis",
                  "comparison_brief", "social_synthesis", "discovery_synthesis",
                  "competitor_brief", "competitor_report", "global_synthesis",
                  # The three downloadable dashboard syntheses. Quota keys must

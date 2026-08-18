@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import MarketResearchReport from "@/components/MarketResearchReport";
 import PostAnalysisPanel from "@/components/PostAnalysisPanel";
+import SocialAnswerPanel from "@/components/SocialAnswerPanel";
 import { api, type SocialPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/store";
@@ -479,6 +480,10 @@ export default function SocialTrends() {
           {/* Manual search results */}
           {submitted && (
             <div className="p-5 border-b border-slate-200/50 dark:border-slate-800/50">
+              {/* A typed question deserves an answer, not a page of posts to
+                  read. Sits above the grid because the grid is the evidence,
+                  not the deliverable. */}
+              <SocialAnswerPanel question={submitted} />
               <div className="flex flex-wrap items-center gap-2 mb-3">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                   Results for "{submitted}"

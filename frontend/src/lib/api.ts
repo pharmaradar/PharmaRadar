@@ -852,6 +852,32 @@ export interface MarketAccessSummary {
   synced_at: string | null;
 }
 
+
+/** A direct answer to a typed question, synthesised from the posts that matched
+ *  it and citing them. `evidence_fits_question` is the honest half: a question
+ *  about patients answered from pharma corporate accounts is misleading unless
+ *  the reader is told, so the voice split travels with the answer. */
+export interface SocialAnswer {
+  question: string;
+  answered: boolean;
+  reason?: string;
+  asks_about?: string | null;
+  evidence_fits_question?: boolean;
+  evidence_note?: string;
+  posts_considered?: number;
+  posts_used?: number;
+  duplicates_removed?: number;
+  voices?: Record<string, number>;
+  points: string[];
+  answer_text?: string;
+  so_what?: string;
+  confidence?: string;
+  citations: {
+    n: number; platform: string | null; author: string | null;
+    voice: string | null; url: string | null; excerpt: string;
+  }[];
+}
+
 export const api = {
   stats: () => req<Stats>("/stats"),
   combinedSynthesis: (refresh = false) =>
@@ -979,6 +1005,12 @@ export const api = {
       + (owner ? `&owner=${encodeURIComponent(owner)}` : "")
       + (kind ? `&kind=${encodeURIComponent(kind)}` : "")),
   marketAccessSummary: () => req<MarketAccessSummary>("/market-access/summary"),
+  /** Answer a typed question from the posts that matched it, instead of
+   *  handing back a page of posts to read. */
+  answerSocialQuestion: (q: string, lang = "fr") =>
+    req<SocialAnswer>("/social/answer", {
+      method: "POST", body: JSON.stringify({ q, lang }),
+    }),
   transparenceTarget: (id: number, limit = 25) =>
     req<TransparenceTarget>(`/transparence/target/${id}?limit=${limit}`),
   /** Share of industry investment across every resolved KOL. */

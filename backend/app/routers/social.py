@@ -698,6 +698,83 @@ async def _account_coverage(db) -> dict[tuple[str, str], dict]:
     return coverage
 
 
+class AnswerRequest(BaseModel):
+    q: str
+    lang: str | None = "fr"
+    refresh: bool = False
+
+
+@router.post("/answer")
+async def answer_question(body: AnswerRequest,
+                          db: AsyncSession = Depends(get_db),
+                          user=Depends(daily_gen_guard("social_answer"))):
+    """Answer a typed question from the posts that matched it.
+
+    The search already finds the right material; this reads it. Without this the
+    client types "what is the top 5 subject that lung cancer patient want to
+    discuss" and receives 120 posts to read himself — which is what happened.
+
+    The answer is grounded in the retrieved posts and cites them by index, and
+    it carries the voice split of its own evidence: that question is about
+    PATIENTS, and the posts matching it were largely pharma corporate accounts,
+    so an answer that did not say so would be confidently misleading.
+    """
+    from app.services import social_answer as sa
+    from app.services.llm_router import call_llm_async
+    from app.services.voice_profile import classify
+
+    question = (body.q or "").strip()
+    if len(question) < 5:
+        raise HTTPException(422, "Ask a question of at least a few words")
+
+    # Reuse the search path verbatim so the answer is about the same posts the
+    # user is looking at. A separate query would answer a different question.
+    found = await discover(q=question, fresh=False, lang=body.lang,
+                           limit=200, db=db, user=user)
+    posts = found.get("results") or []
+    if not posts:
+        return {"question": question, "answered": False,
+                "reason": "No posts matched this question yet — run a scan or widen the region.",
+                "points": [], "citations": []}
+
+    evidence = sa.dedupe_evidence(posts)[:sa.MAX_EVIDENCE]
+
+    voices: dict[str, int] = {}
+    for item in evidence:
+        bucket, _confidence, _why = classify(
+            item.get("author") or "", url=item.get("post_url") or "",
+            is_tracked_kol=False, target_type=None)
+        item["voice"] = bucket
+        item["url"] = item.get("post_url")
+        voices[bucket] = voices.get(bucket, 0) + 1
+
+    audience = sa.asks_about(question)
+    fits, voice_note = sa.evidence_matches_audience(audience, voices)
+
+    raw = await call_llm_async(
+        [{"role": "user",
+          "content": sa.build_prompt(question, evidence, audience, voice_note)}],
+        # 8192, not 4096: this emits three sections and the model reasons before
+        # writing them. At 4096 the first live run stopped mid-sentence with
+        # ##SO_WHAT## and ##CONFIDENCE## never reached. Same reason
+        # burning_topics raised its own budget when it gained sections.
+        max_tokens=8192)
+
+    parsed = sa.parse_answer(raw, evidence, sa.wants_ranked_list(question))
+    return {
+        "question": question,
+        "answered": True,
+        "asks_about": audience,
+        "evidence_fits_question": fits,
+        "evidence_note": voice_note,
+        "posts_considered": len(posts),
+        "posts_used": len(evidence),
+        "duplicates_removed": len(posts) - len(sa.dedupe_evidence(posts)),
+        "voices": voices,
+        **parsed,
+    }
+
+
 @router.get("/accounts")
 async def list_accounts(db: AsyncSession = Depends(get_db)):
     from app.models import TrackedAccount
