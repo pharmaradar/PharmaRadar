@@ -89,7 +89,26 @@ def clear_login_failures(email: str) -> None:
 
 # ── Passwords ─────────────────────────────────────────────
 
+# bcrypt hashes at most 72 BYTES and this version raises rather than truncating.
+# Bytes, not characters: "é" is two, so a 60-character French passphrase can be
+# over the limit. Truncating silently would be worse than refusing — it would
+# make a long passphrase and its 72-byte prefix the same password.
+BCRYPT_MAX_PASSWORD_BYTES = 72
+
+
+def password_too_long(password: str) -> bool:
+    return len((password or "").encode("utf-8")) > BCRYPT_MAX_PASSWORD_BYTES
+
+
 def hash_password(password: str) -> str:
+    if password_too_long(password):
+        # Explicit, so callers can turn it into a 422. Without this the library
+        # raised its own ValueError and every caller returned an opaque 500 —
+        # which is what a password manager generating a 100-character passphrase
+        # got when creating a user or changing a password.
+        raise ValueError(
+            f"password must be at most {BCRYPT_MAX_PASSWORD_BYTES} bytes "
+            f"({BCRYPT_MAX_PASSWORD_BYTES} ASCII characters, fewer with accents)")
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
