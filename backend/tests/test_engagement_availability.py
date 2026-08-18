@@ -120,3 +120,15 @@ def test_the_baseline_is_never_presented_as_a_post_s_own_engagement():
     unmeasured = Post("linkedin")
     assert _engagement(unmeasured) == 0
     assert engagement_available(unmeasured) is False
+
+
+def test_a_search_sourced_platform_is_unmeasurable_even_if_a_number_appears():
+    """The platform check is not redundant with the value check.
+
+    X and LinkedIn reach us through TinyFish search, which does not report
+    engagement. If a stray figure ever appears on one of those rows it is an
+    artefact of the search result, not a measurement of the post, and treating
+    it as real would let one unreliable number outrank genuinely measured posts.
+    """
+    assert engagement_available(Post("linkedin", likes=999)) is False
+    assert engagement_available(Post("twitter", likes=50, comments=10)) is False

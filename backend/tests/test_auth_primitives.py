@@ -61,7 +61,11 @@ def test_an_overlong_password_is_refused_with_an_actionable_error():
 
     Refusing beats truncating: silently cutting to 72 bytes would make the long
     passphrase and its prefix the same password."""
-    with pytest.raises(ValueError, match="72 bytes"):
+    # Match OUR wording, not bcrypt's. The library's own error also contains
+    # "72 bytes", so a looser assertion passed whether our guard fired or not —
+    # and the point of the guard is to fail before bcrypt with a message a
+    # caller can turn into a 422.
+    with pytest.raises(ValueError, match="at most"):
         auth.hash_password("x" * 200)
 
 
