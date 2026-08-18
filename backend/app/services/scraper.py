@@ -932,6 +932,38 @@ def _process_url_agent(
     return "new" if saved else "dup"
 
 
+# How much of the fetch ceiling may be spent on French pages that are NOT about
+# the target. Off-topic material still has some value (it is French and in the
+# right field) and it keeps a thin target off the billed agent-rescue path, but
+# it must not scale with the ceiling — otherwise raising the ceiling mostly buys
+# noise. Measured motivation: of the KOL posts collected so far, the great
+# majority never mention the KOL by name.
+# An ABSOLUTE cap, deliberately not a share of the ceiling. Backfill exists for
+# one purpose: stop a thin target ending Pass 1 empty and escalating to the
+# Wave-2 agent rescue, the only path that bills credits. A handful of posts
+# achieves that. Making it proportional meant a bigger ceiling bought
+# proportionally more material that is not about the target — which is the
+# behaviour this whole change set to remove.
+_MAX_BACKFILL = 6
+
+# Ceiling on Pass-1 fetches per target, before known_urls are added.
+#
+# Raised from 10 because Pass 1 is FREE: `_billable_steps` shows only `agent run`
+# consumes TinyFish credits — search and fetch are rate-limited but unmetered —
+# so this cap was throttling a resource that costs nothing. The binding
+# constraint is the rate limiter (3 keys x 30/min = 90 calls/min) and the 480s
+# scrape_target budget, not money.
+#
+# Sizing: a target issues roughly 20 search queries plus this many fetches. With
+# worker-scrape at concurrency 3, that is ~3 x 44 = 132 calls per wave against
+# 90/min, so a target clears in well under two minutes — comfortably inside 480s.
+#
+# Safe to raise only BECAUSE _select_candidates now caps off-topic backfill: a
+# bigger ceiling used to mean more French pages that were not about the target,
+# since every spare slot got padded. Now the extra slots go to on-topic material
+# or stay empty. Raise them together or not at all.
+_FETCH_CEILING = 24
+
 # Share of Pass-1 fetch slots reserved for French sources under the French scope.
 # A reservation rather than a hard filter: a hard French-only cut starves targets
 # whose French coverage is thin that week, and a target that ends Pass 1 with zero
@@ -968,8 +1000,30 @@ def _select_candidates(candidates: list[dict], limit: int, scope: str = "fr") ->
         on_topic = [c for c in french if c.get("relevant")]
         if len(on_topic) >= limit:
             return on_topic[:limit]
+
+        # Backfill is capped rather than unlimited. `limit` is a ceiling on how
+        # much we MAY fetch, not a quota to fill: padding every spare slot with
+        # French pages that are not about this person imports noise, and it gets
+        # worse the higher the ceiling goes — which is exactly the direction the
+        # ceiling is moving now that free fetches are known to be unmetered.
+        #
+        # Some backfill is still wanted: a target with two on-topic hits should
+        # not end the pass at two, because an empty-ish Wave 1 escalates to the
+        # agent rescue, the one path that actually costs money. So allow a
+        # bounded amount of off-topic French material and stop there.
         rest = [c for c in french if not c.get("relevant")]
-        return (on_topic + rest)[:limit]
+        room = max(0, limit - len(on_topic))
+
+        # Cap the backfill only when relevance was actually ASSESSED. A caller
+        # that never set the flag has not told us these are off-topic, it has
+        # told us nothing — treating "unknown" as "off-topic" would throttle
+        # such a path to _MAX_BACKFILL and look like a collapse in intake.
+        assessed = any("relevant" in c for c in french)
+        backfill = min(room, _MAX_BACKFILL) if assessed else room
+        if rest and backfill < room:
+            logger.debug("scrape.backfill_capped", on_topic=len(on_topic),
+                         off_topic_available=len(rest), off_topic_used=backfill)
+        return on_topic + rest[:backfill]
 
     if candidates:
         logger.info("scrape.no_french_candidates",
@@ -1057,7 +1111,7 @@ class ScrapeService:
         n_known = len([k for k in (known_urls or []) if k and not _is_binary(k)])
         top_candidates = _select_candidates(
             [c for c in candidates if not ctx.should_stop],
-            limit=10 + n_known,
+            limit=_FETCH_CEILING + n_known,
             scope=scope,
         )
 
