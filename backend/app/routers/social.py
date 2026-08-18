@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import SocialPost, SearchHistory, User
 from app.auth import get_current_user, require_admin, daily_gen_guard
+from app.services.thumbnails import usable_thumbnail
 from app.services.ae_filter import social_not_ae
 from app.services.fr_sources import Scope
 
@@ -46,7 +47,14 @@ def _to_out(p: SocialPost, now: datetime) -> dict:
         "post_url": p.post_url,
         "author": p.author,
         "text": (p.text or "")[:2000],
-        "thumbnail_url": p.thumbnail_url,
+        # Meta's CDN signs image URLs with an expiry; 62% of the stored
+        # Instagram thumbnails were already dead, which is what produced a grid
+        # of blank grey frames. Sending None lets the card omit the image area
+        # entirely instead of rendering a box around a 403.
+        "thumbnail_url": usable_thumbnail(p.thumbnail_url),
+        # So the UI can say "image no longer available" rather than silently
+        # dropping it, and so this is measurable rather than merely fixed.
+        "thumbnail_expired": bool(p.thumbnail_url) and not usable_thumbnail(p.thumbnail_url),
         "likes": p.likes or 0,
         "comments": p.comments or 0,
         "views": p.views or 0,

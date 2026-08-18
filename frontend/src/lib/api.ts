@@ -323,6 +323,9 @@ export interface SocialPost {
   author: string | null;
   text: string;
   thumbnail_url: string | null;
+  /** True when a thumbnail WAS stored but its signed CDN URL has expired —
+   *  distinct from a post that never had an image. */
+  thumbnail_expired?: boolean;
   likes: number;
   comments: number;
   views: number;
