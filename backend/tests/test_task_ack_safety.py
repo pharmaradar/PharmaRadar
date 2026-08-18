@@ -113,3 +113,57 @@ def test_wave2_rescue_specifically_is_not_acks_late():
         "task got faster or the timeout got longer, and the acks_late=False "
         "reasoning in its decorator needs rereading."
     )
+
+
+# ── Wave 2 cost containment ───────────────────────────────
+#
+# wave2_rescue is the ONLY path that bills TinyFish credits (search and fetch
+# are unmetered; `agent run` bills its num_of_steps). Anything that makes it
+# repeat work spends real money, so its budget arithmetic is pinned here.
+
+def test_wave2_budget_leaves_room_for_one_whole_target():
+    """The loop must never START a target it cannot finish. One target is up to
+    5 agent calls (~120s each) plus a 180s wait on the summary chain; without
+    headroom the task was killed mid-target by the soft limit."""
+    from app.tasks import scrape
+
+    assert scrape._WAVE2_BUDGET > scrape._PER_TARGET_BUDGET, (
+        "budget cannot fit a single target, so the loop would never run one")
+
+    task = celery_app.tasks["app.tasks.scrape.wave2_rescue"]
+    soft, _hard = _effective_limits("app.tasks.scrape.wave2_rescue", task)
+    assert scrape._WAVE2_BUDGET < soft, (
+        f"budget {scrape._WAVE2_BUDGET}s must expire before the {soft}s soft "
+        f"limit, or the guard never fires and Celery kills the task instead")
+
+
+def test_a_finished_target_is_dropped_by_its_exact_redis_member():
+    """Resumability is what stops a retry re-paying for completed rescues.
+
+    LREM matches exact bytes. Passing a re-serialised dict only works while
+    json.dumps happens to reproduce the original string; when it does not, the
+    removal silently does nothing and the next attempt re-runs the agent.
+    """
+    from app.tasks.scrape import _drop_from_queue
+
+    class FakeRedis:
+        def __init__(self): self.removed = []
+        def lrem(self, key, count, value): self.removed.append((key, count, value))
+
+    r = FakeRedis()
+    raw = '{"target_id": 7, "bot_blocked": [], "idempotency_key": "k"}'
+    _drop_from_queue(r, "wave2:1:processing", raw, __import__("structlog").get_logger())
+    assert r.removed == [("wave2:1:processing", 1, raw)], \
+        "the queue member must be removed verbatim, not re-serialised"
+
+
+def test_dropping_from_the_queue_never_raises():
+    """Bookkeeping must not be able to fail a rescue that already succeeded and
+    was already paid for."""
+    from app.tasks.scrape import _drop_from_queue
+
+    class Broken:
+        def lrem(self, *a, **k): raise RuntimeError("redis gone")
+
+    _drop_from_queue(Broken(), "k", "raw", __import__("structlog").get_logger())
+    _drop_from_queue(None, "k", "raw", __import__("structlog").get_logger())

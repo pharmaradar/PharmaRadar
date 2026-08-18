@@ -1,7 +1,7 @@
 """Auth endpoints: login, me, and admin-only user management."""
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,11 +33,27 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
+def _check_password_length(value: str | None) -> str | None:
+    """Reject a password bcrypt cannot hash, with a message the user can act on.
+
+    Enforced here as well as in hash_password so the API answers 422 with a
+    reason rather than 500 with a traceback.
+    """
+    from app.auth import BCRYPT_MAX_PASSWORD_BYTES, password_too_long
+
+    if value is not None and password_too_long(value):
+        raise ValueError(
+            f"password must be at most {BCRYPT_MAX_PASSWORD_BYTES} bytes")
+    return value
+
+
 class CreateUserBody(BaseModel):
     name: str | None = None
     email: str
     password: str
     role: str = "user"  # user | admin
+
+    _check_password = field_validator("password")(_check_password_length)
 
 
 class UpdateUserBody(BaseModel):
@@ -47,12 +63,16 @@ class UpdateUserBody(BaseModel):
     role: str | None = None
     is_active: bool | None = None
 
+    _check_password = field_validator("password")(_check_password_length)
+
 
 class ProfileUpdate(BaseModel):
     name: str | None = None
     email: str | None = None
     current_password: str | None = None
     new_password: str | None = None
+
+    _check_password = field_validator("new_password")(_check_password_length)
 
 
 def _valid_email(email: str) -> bool:
@@ -100,6 +120,8 @@ async def me(user: User = Depends(get_current_user)):
 class ChangePasswordBody(BaseModel):
     current_password: str
     new_password: str
+
+    _check_password = field_validator("new_password")(_check_password_length)
 
 
 @router.post("/change-password")

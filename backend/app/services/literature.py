@@ -116,11 +116,26 @@ def resolve_author(name: str, disease_terms: str) -> str | None:
         results = (payload.get("resultList") or {}).get("result") or []
         if not results:
             continue
-        wanted = _fold(surname)
+        # Verify the INITIAL too, not just the surname.
+        #
+        # Checking the surname alone catches "wrong surname entirely" — the
+        # Moro/Russano case this function was written for — but not the failure
+        # that is far more common with French surnames: the right surname and
+        # the wrong person. Asking for AUTH:"Bennouna J" and getting back a page
+        # of papers by Bennouna L passed verification, because "bennouna" is
+        # present in every one of them, and those papers were then filed under
+        # the wrong KOL.
+        #
+        # Author strings are formatted "Bennouna J, Girard N.", so requiring the
+        # folded "<surname> <initial>" to appear as a substring pins the pair
+        # without needing to parse the list. It still matches "Bennouna JA" and
+        # "Bennouna Jaafar", which are the same person written differently.
+        wanted = f"{_fold(surname)} {initial.lower()}".strip() if initial else _fold(surname)
         if any(wanted in _fold(r.get("authorString") or "") for r in results):
             resolved = clause
             break
-        logger.debug("literature.candidate_rejected", author=name, clause=clause)
+        logger.debug("literature.candidate_rejected", author=name, clause=clause,
+                     wanted=wanted)
 
     if resolved is None:
         logger.info("literature.author_unresolved", author=name)

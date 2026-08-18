@@ -27,7 +27,12 @@ logger = structlog.get_logger(__name__)
 
 _EXHAUST_PREFIX = "provider_exhausted:"
 _TF_CREDIT_PREFIX = "tf_credits:"
-_BUNDLE_CACHE_KEY = "provider_health:bundle:v3"
+# BUMP THE VERSION whenever a row gains or loses a field. The bundle is cached in
+# Redis for 5 min and survives deploys, so reusing the key after a shape change
+# serves the OLD shape to clients that already have the new UI — which is exactly
+# what happened when spend metering was added under a stale v3: the panel showed
+# "Key valid" with no spend for minutes after the deploy, and looked broken.
+_BUNDLE_CACHE_KEY = "provider_health:bundle:v4"
 _BUNDLE_CACHE_TTL = 300  # 5 min
 
 
@@ -57,6 +62,10 @@ def _base(pid: str, name: str, configured: bool) -> dict:
         "id": pid, "name": name, "configured": configured,
         "status": "unknown", "usage_usd": None, "limit_usd": None,
         "percent": None, "usage_label": None, "message": "", "checked_at": _now(),
+        # Metered-by-us spend (see record_llm_usage). Always present so the
+        # response shape does not change depending on whether a key was used.
+        "spend_usd": None, "spend_calls": None, "spend_tokens": None,
+        "spend_unpriced": None,
     }
 
 
@@ -86,6 +95,97 @@ def _tf_used(suffix: str) -> int:
         return int(v) if v else 0
     except Exception:
         return 0
+
+
+# ── LLM spend metering (we price our own calls; no balance API) ──────────
+#
+# Only OpenRouter exposes a balance endpoint. Google AI Studio, Anthropic and
+# NVIDIA have none — the traceback that says "prepayment credits are depleted"
+# is the first and only warning you get, which is how this platform found out on
+# 2026-08-17. So spend is metered the same way TinyFish credits are: count what
+# WE consume, priced per model with litellm's cost map, aggregated per calendar
+# month in Redis.
+#
+# This is OUR spend through OUR key, not the provider's invoice: usage from any
+# other app sharing the key is invisible to it, and the price map can lag a
+# provider's pricing change. It is labelled "metered" everywhere it surfaces so
+# it is never mistaken for the authoritative bill. As a burn-rate signal, which
+# is what "am I about to run out mid-run?" needs, it is exactly right — and
+# unlike a balance API it attributes cost per provider AND per model.
+_LLM_SPEND_PREFIX = "llm_spend:"
+
+
+def _llm_cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """Price one call. None means "no price data", which is NOT the same as free.
+
+    litellm separates the two cleanly and the distinction has to survive:
+      Ollama            -> returns (0, 0)   genuinely free, local inference
+      NVIDIA NIM        -> raises           priced by NVIDIA, unknown to litellm
+      OpenRouter models -> raises           varies per upstream model
+    Collapsing both to 0.0 would print "$0.00" beside a provider that is in fact
+    billing us, which is worse than printing nothing at all.
+    """
+    try:
+        from litellm import cost_per_token
+        prompt_cost, completion_cost = cost_per_token(
+            model=model,
+            prompt_tokens=max(0, int(prompt_tokens or 0)),
+            completion_tokens=max(0, int(completion_tokens or 0)),
+        )
+        return float(prompt_cost or 0) + float(completion_cost or 0)
+    except Exception:
+        return None
+
+
+def record_llm_usage(provider: str, model: str,
+                     prompt_tokens: int, completion_tokens: int) -> None:
+    """Meter one completed LLM call. Never raises — billing telemetry must not
+    be able to fail the call it is describing."""
+    r = _redis()
+    if not r or not provider:
+        return
+    try:
+        usd = _llm_cost_usd(model, prompt_tokens, completion_tokens)
+        base = f"{_LLM_SPEND_PREFIX}{_month()}:{provider}"
+        pipe = r.pipeline()
+        # Unpriced calls are counted separately rather than added as 0, so the
+        # dollar total never silently understates a provider we cannot price.
+        pipe.incrbyfloat(f"{base}:usd", usd if usd is not None else 0.0)
+        if usd is None:
+            pipe.incrby(f"{base}:unpriced", 1)
+        pipe.incrby(f"{base}:calls", 1)
+        pipe.incrby(f"{base}:tokens",
+                    max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0)))
+        # Two months of history, so the first days of a new month can still be
+        # compared against the last one.
+        for suffix in ("usd", "calls", "tokens", "unpriced"):
+            pipe.expire(f"{base}:{suffix}", 65 * 24 * 3600)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def llm_spend(provider: str) -> dict:
+    """This month's metered spend for a provider.
+
+    `unpriced` is how many of `calls` litellm had no price for — the dollar
+    figure covers the remainder only.
+    """
+    out = {"usd": 0.0, "calls": 0, "tokens": 0, "unpriced": 0}
+    r = _redis()
+    if not r:
+        return out
+    try:
+        base = f"{_LLM_SPEND_PREFIX}{_month()}:{provider}"
+        usd, calls, tokens, unpriced = r.mget(
+            f"{base}:usd", f"{base}:calls", f"{base}:tokens", f"{base}:unpriced")
+        out["usd"] = round(float(usd or 0), 4)
+        out["calls"] = int(calls or 0)
+        out["tokens"] = int(tokens or 0)
+        out["unpriced"] = int(unpriced or 0)
+    except Exception:
+        pass
+    return out
 
 
 # ── Exhaustion flags (written from failure paths, e.g. scraper) ──────────
@@ -220,7 +320,57 @@ async def _check_llm(client, pid, name, key, url, headers, on_ok=None) -> dict:
     except Exception as exc:
         out["status"] = "error"
         out["message"] = str(exc)[:160]
+
+    _attach_spend(out, pid)
+
+    # A live 200 only proves the key authenticates. Google returns 200 from the
+    # models endpoint with a dead balance, so the exhaustion flag the router
+    # writes on a real "credits depleted" failure is the stronger signal and
+    # must win — otherwise Settings shows a green "Key valid" during an outage.
+    flag = _get_flag(pid)
+    if flag:
+        out["status"] = "exhausted"
+        out["message"] = (flag.get("message")
+                          or "Reported credit exhaustion on the last call")[:160]
     return out
+
+
+def _attach_spend(out: dict, pid: str) -> None:
+    """Add this month's metered spend to a provider row.
+
+    Left off rows that never billed anything, so an unused provider does not
+    display a misleading "$0.00" as though it had been measured. Does not
+    overwrite usage_usd where the provider reports a real balance (OpenRouter) —
+    an authoritative number beats our estimate.
+    """
+    spend = llm_spend(pid)
+    if not spend["calls"]:
+        return
+    out["spend_usd"] = spend["usd"]
+    out["spend_calls"] = spend["calls"]
+    out["spend_tokens"] = spend["tokens"]
+    out["spend_unpriced"] = spend["unpriced"]
+
+    calls = f"{spend['calls']:,} calls"
+
+    # Nothing litellm could price — NVIDIA NIM and most OpenRouter models. Report
+    # the volume and say the cost is unknown, rather than showing "$0.00" beside
+    # a provider that may well be billing us.
+    if spend["unpriced"] >= spend["calls"]:
+        out["usage_label"] = f"{calls} · no price data"
+        return
+
+    if out.get("usage_usd") is None:
+        out["usage_usd"] = spend["usd"]
+    # "metered" is load-bearing: this is what WE spent through this key, not the
+    # provider's invoice. Sub-cent spend still deserves a real number rather
+    # than rounding to $0.00, which reads as "nothing happened".
+    money = f"${spend['usd']:.2f}" if spend["usd"] >= 0.01 else f"${spend['usd']:.4f}"
+    label = f"{money} · {calls} (metered)"
+    if spend["unpriced"]:
+        # Partial coverage: say so, or the total looks complete when it is not.
+        label += f", {spend['unpriced']:,} unpriced"
+    out["usage_label"] = label
 
 
 async def _llm_checks(client) -> list[dict]:

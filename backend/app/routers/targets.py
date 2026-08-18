@@ -344,6 +344,7 @@ async def get_profile(target_id: int, days: int = 30, db: AsyncSession = Depends
 
     from app.models import ExtractedInsight, PersonSummary, ScrapedPost
     from app.services.ae_filter import post_not_ae
+    from app.services.brands import tally
 
     target = await db.get(Target, target_id)
     if not target:
@@ -373,8 +374,25 @@ async def get_profile(target_id: int, days: int = 30, db: AsyncSession = Depends
     topics = Counter()
     per_week = Counter()
     statements = []
+    # Which PRODUCTS this person actually discusses, ours against the
+    # competition. Topics say what they talk about; a medical-affairs team needs
+    # which assets, because that is what decides who is worth engaging and about
+    # what. Built from the rows already loaded above — brand detection is
+    # word-boundary regex over stored text, so this adds no query and no LLM
+    # call. Read it beside the declared payments on the same profile: a KOL a
+    # competitor funds AND who discusses that competitor's asset is a different
+    # situation from one where only the money is there.
+    brand_items = []
     for insight, post in rows:
         sentiment[(insight.sentiment or "neutral").lower()] += 1
+        brand_items.append({
+            # Topic and statement both carry brand names; searching only one
+            # misses mentions that live in the other.
+            "text": f"{insight.topic or ''} {insight.what_they_said or ''} {insight.context or ''}",
+            "sentiment": insight.sentiment or "neutral",
+            "engagement": (post.likes or 0) + (post.views or 0),
+            "source": post.source_name or post.domain or "",
+        })
         if insight.topic:
             topics[insight.topic.strip()] += 1
         when = insight.extracted_at
@@ -433,6 +451,9 @@ async def get_profile(target_id: int, days: int = 30, db: AsyncSession = Depends
         "per_week": dict(sorted(per_week.items())),
         "statements": statements,
         "research": research,
+        # Same tally() the global share-of-voice uses, scoped to this person, so
+        # "our share of their conversation" is computed one way everywhere.
+        "brands": tally(brand_items),
     }
 
 

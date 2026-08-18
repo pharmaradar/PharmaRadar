@@ -199,7 +199,8 @@ _LLM_TIMEOUT_SECONDS = 120
     # would be False for every error, and retries would silently never happen.
     retry=retry_if_exception(_retryable),
 )
-def _call(model_str: str, messages: list[dict], temperature: float, max_tokens: int, extra: dict) -> str:
+def _call(model_str: str, messages: list[dict], temperature: float, max_tokens: int,
+          extra: dict, provider: str | None = None) -> str:
     response = completion(
         model=model_str,
         messages=messages,
@@ -208,7 +209,37 @@ def _call(model_str: str, messages: list[dict], temperature: float, max_tokens: 
         timeout=_LLM_TIMEOUT_SECONDS,
         **extra,
     )
+    _meter(provider, model_str, response)
     return response.choices[0].message.content or ""
+
+
+def _meter(provider: str | None, model_str: str, response) -> None:
+    """Record what this call cost, for the Settings spend panel.
+
+    Metered here rather than at the call sites because this is the one place
+    every provider's traffic passes through, and the only place the real token
+    counts exist — estimating from len(prompt) would be fiction. Wrapped so a
+    telemetry failure can never fail an LLM call that actually succeeded.
+
+    `provider` is the app's own id ("gemini", "nvidia", ...) and must be passed
+    explicitly: it cannot be recovered from model_str, because _model_string
+    renames some providers (nvidia -> "nvidia_nim/", vertex -> "vertex_ai/") and
+    gives OpenAI and Anthropic no prefix at all. Deriving it would file OpenAI
+    spend under "gpt-4o" and never match the health panel's rows.
+    """
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is None or not provider:
+            return
+        from app.services.provider_health import record_llm_usage
+        record_llm_usage(
+            provider=provider,
+            model=model_str,
+            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+        )
+    except Exception:
+        pass
 
 
 def _dispatch(
@@ -228,7 +259,7 @@ def _dispatch(
     logger.debug("llm.dispatch", provider=provider, model=model_str)
 
     try:
-        result = _call(model_str, messages, temperature, max_tokens, extra)
+        result = _call(model_str, messages, temperature, max_tokens, extra, provider)
     except RateLimitError as exc:
         # A transient rate limit is the one case where the fallback is the wrong
         # move: _call already backed off against this provider, and switching
@@ -243,7 +274,7 @@ def _dispatch(
             raise
         fallback_str = _model_string("nvidia", "meta/llama-3.3-70b-instruct")
         return _call(fallback_str, messages, temperature, max_tokens,
-                     _extra_kwargs("nvidia", s))
+                     _extra_kwargs("nvidia", s), "nvidia")
     except Exception as primary_exc:
         if provider != "nvidia" and _config.nvidia_api_key:
             fallback_str = _model_string("nvidia", "meta/llama-3.3-70b-instruct")
@@ -255,7 +286,8 @@ def _dispatch(
                 fallback_model=fallback_str,
                 reason=str(primary_exc)[:200],
             )
-            return _call(fallback_str, messages, temperature, max_tokens, fallback_extra)
+            return _call(fallback_str, messages, temperature, max_tokens,
+                         fallback_extra, "nvidia")
         raise
 
     # Reaching here means the configured provider answered, so any stale

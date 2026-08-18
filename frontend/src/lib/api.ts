@@ -260,6 +260,19 @@ export interface KolResearch {
   }[];
 }
 
+/** Which PRODUCTS a person discusses, ours against the competition — the same
+ *  tally() that powers global share of voice, scoped to one KOL. Topics say what
+ *  someone talks about; brands say which assets, which is what decides who is
+ *  worth engaging and about what. Read beside their declared payments. */
+export interface BrandTally {
+  total_mentions: number;
+  roche_mentions: number;
+  competitor_mentions: number;
+  roche_share: number;
+  brands: BrandRow[];
+  by_owner: { owner: string; is_ours: boolean; mentions: number; share: number }[];
+}
+
 export interface KolProfile extends KolProfileCard {
   known_urls: string[];
   window_days: number;
@@ -268,6 +281,7 @@ export interface KolProfile extends KolProfileCard {
   top_topics: { topic: string; count: number }[];
   per_week: Record<string, number>;
   statements: KolStatement[];
+  brands?: BrandTally;
 }
 
 /** Share of voice by product — a brand lead thinks in assets, not topics. */
@@ -527,6 +541,16 @@ export interface ProviderHealth {
   usage_label?: string | null;
   message: string;
   checked_at: string;
+  /** Spend metered on our side this calendar month — what WE sent through this
+   *  key, priced per model. Not the provider's invoice: only OpenRouter exposes
+   *  a real balance, so for every other provider this is the only spend figure
+   *  that exists. Null until the key has actually been used. */
+  spend_usd?: number | null;
+  spend_calls?: number | null;
+  spend_tokens?: number | null;
+  /** How many of spend_calls litellm had no price for — the dollar figure covers
+   *  the rest. NVIDIA NIM and most OpenRouter models land here. */
+  spend_unpriced?: number | null;
 }
 
 export interface DiscoveryContent {
@@ -753,6 +777,107 @@ export interface AccountScanStatus {
   finished_at?: string;
 }
 
+
+/** French Sunshine Act (Transparence Santé) — declared industry payments.
+ *
+ *  `status` gates everything: figures are shown ONLY when it is "resolved",
+ *  i.e. the target was pinned to exactly one national RPPS identifier. An
+ *  "ambiguous" target carries the reason in `note` and no numbers, because a
+ *  payment attributed to the wrong clinician is worse than an absent one. */
+export interface TransparenceIdentity {
+  target_id: number;
+  target_name: string;
+  status: "unresolved" | "resolved" | "ambiguous" | "not_found";
+  rpps: string | null;
+  confidence: number | null;
+  note: string | null;
+  resolved_at: string | null;
+  synced_at: string | null;
+}
+
+export interface TransparenceCompany {
+  company: string;
+  siren: string | null;
+  payments: number;
+  total_eur: number;
+  first_paid: string | null;
+  last_paid: string | null;
+}
+
+export interface TransparenceTarget extends TransparenceIdentity {
+  displayable: boolean;
+  payment_count: number;
+  total_eur: number;
+  companies: TransparenceCompany[];
+  recent: {
+    company: string; amount_eur: number;
+    paid_on: string | null; reason: string | null; kind: string | null;
+  }[];
+}
+
+export interface TransparenceOverview {
+  companies: (TransparenceCompany & { kols: number; share_pct: number })[];
+  total_eur: number;
+  coverage: Record<string, number>;
+}
+
+
+/** French market-access events: HAS added-benefit rulings and ANSM shortages.
+ *  ASMR runs I (major added benefit) to V (none) and drives price and
+ *  reimbursement in France, so a competitor's rating is a commercial event. */
+export interface MarketAccessEvent {
+  kind: "asmr" | "smr" | "shortage";
+  brand: string;
+  owner: string;
+  is_ours: boolean;
+  rating: string | null;
+  rating_label: string | null;
+  rating_rank: number | null;
+  opinion_ref: string | null;
+  event_date: string | null;
+  end_date: string | null;
+  url: string | null;
+  summary: string | null;
+  holder: string | null;
+  /** One HAS opinion covers every presentation of a drug; identical rulings are
+   *  collapsed server-side and this carries how many were folded together. */
+  presentations: number;
+  drug_name: string;
+}
+
+export interface MarketAccessSummary {
+  owners: { owner: string; is_ours: boolean; total: number; ratings: Record<string, number> }[];
+  rating_meaning: Record<string, { label: string; rank: number }>;
+  latest_event: string | null;
+  synced_at: string | null;
+}
+
+
+/** A direct answer to a typed question, synthesised from the posts that matched
+ *  it and citing them. `evidence_fits_question` is the honest half: a question
+ *  about patients answered from pharma corporate accounts is misleading unless
+ *  the reader is told, so the voice split travels with the answer. */
+export interface SocialAnswer {
+  question: string;
+  answered: boolean;
+  reason?: string;
+  asks_about?: string | null;
+  evidence_fits_question?: boolean;
+  evidence_note?: string;
+  posts_considered?: number;
+  posts_used?: number;
+  duplicates_removed?: number;
+  voices?: Record<string, number>;
+  points: string[];
+  answer_text?: string;
+  so_what?: string;
+  confidence?: string;
+  citations: {
+    n: number; platform: string | null; author: string | null;
+    voice: string | null; url: string | null; excerpt: string;
+  }[];
+}
+
 export const api = {
   stats: () => req<Stats>("/stats"),
   combinedSynthesis: (refresh = false) =>
@@ -870,6 +995,31 @@ export const api = {
   },
 
   // KOL module — surfaces the per-target summaries the pipeline already writes.
+  /** Declared industry payments to this KOL, grouped by paying company.
+   *  Companies are aggregated server-side by SIREN, not trade name — the
+   *  register files "ROCHE SAS" and "ROCHE" separately for one legal entity. */
+  /** HAS rulings + ANSM shortages on tracked drugs, newest first. */
+  marketAccessEvents: (days = 1825, owner?: string, kind?: string, limit = 60) =>
+    req<{ events: MarketAccessEvent[]; window_days: number }>(
+      `/market-access/events?days=${days}&limit=${limit}`
+      + (owner ? `&owner=${encodeURIComponent(owner)}` : "")
+      + (kind ? `&kind=${encodeURIComponent(kind)}` : "")),
+  marketAccessSummary: () => req<MarketAccessSummary>("/market-access/summary"),
+  /** Answer a typed question from the posts that matched it, instead of
+   *  handing back a page of posts to read. */
+  answerSocialQuestion: (q: string, lang = "fr") =>
+    req<SocialAnswer>("/social/answer", {
+      method: "POST", body: JSON.stringify({ q, lang }),
+    }),
+  transparenceTarget: (id: number, limit = 25) =>
+    req<TransparenceTarget>(`/transparence/target/${id}?limit=${limit}`),
+  /** Share of industry investment across every resolved KOL. */
+  transparenceOverview: () =>
+    req<TransparenceOverview>("/transparence/overview"),
+  syncTransparence: (targetId?: number, force = false) =>
+    req<{ queued: boolean; task_id: string; scope: string }>(
+      `/transparence/sync?force=${force}` + (targetId ? `&target_id=${targetId}` : ""),
+      { method: "POST" }),
   kolProfiles: (q?: string, targetType = "kol") =>
     req<{ profiles: KolProfileCard[] }>(
       `/targets/profiles?target_type=${targetType}` + (q ? `&q=${encodeURIComponent(q)}` : "")),

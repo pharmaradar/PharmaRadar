@@ -4,6 +4,8 @@ Two-wave pipeline:
   Wave 1  scrape_target   — free fetch only (fast, no agent), all targets in parallel
   Wave 2  wave2_rescue    — agent on 0-post targets after Wave 1 completes
 """
+import time
+
 import structlog
 
 from app.tasks.celery_app import celery_app
@@ -12,6 +14,27 @@ logger = structlog.get_logger(__name__)
 
 # Redis key pattern: wave2:{run_id}  →  JSON list of {target_id, bot_blocked, idempotency_key}
 _WAVE2_KEY = "wave2:{run_id}"
+
+# Wave 2 runs under a 1800s soft limit (celery_app.task_annotations). Reserve
+# enough headroom that the loop never STARTS a target it cannot finish: one
+# target is up to 5 agent calls at ~120s plus a 180s wait on the summary chain.
+_PER_TARGET_BUDGET = 780
+_WAVE2_BUDGET = 1680          # 2 min under the soft limit, for the final cleanup
+
+
+def _drop_from_queue(r, processing_key, raw_entry, log) -> None:
+    """Remove one finished target from the Redis queue snapshot.
+
+    Makes the rescue resumable at target granularity. Without it the snapshot
+    only cleared after the whole loop, so any interruption meant the retry paid
+    the agent again for targets already rescued.
+    """
+    if r is None or not processing_key:
+        return
+    try:
+        r.lrem(processing_key, 1, raw_entry)
+    except Exception as exc:      # noqa: BLE001 - bookkeeping must not fail the rescue
+        log.debug("wave2.queue_drop_failed", exc=str(exc)[:120])
 
 
 @celery_app.task(
@@ -144,7 +167,11 @@ def wave2_rescue(self, run_id: int) -> dict:
             except Exception:
                 pass   # key vanished between exists() and rename — fall through
         raw_list = r.lrange(processing_key, 0, -1)
-        targets_to_rescue = [json.loads(x) for x in raw_list]
+        # Keep each entry's ORIGINAL Redis string beside the parsed dict. LREM
+        # matches on exact bytes, and re-serialising a parsed dict only happens
+        # to match while key order and separators round-trip identically — a
+        # silent no-op the moment that stops being true.
+        targets_to_rescue = [(json.loads(x), x) for x in raw_list]
     except Exception as exc:
         log.warning("wave2.redis_read_failed", exc=str(exc))
 
@@ -161,11 +188,27 @@ def wave2_rescue(self, run_id: int) -> dict:
     from app.tasks.pdf import generate_target_pdf
 
     total_rescued = 0
+    started = time.monotonic()
+    skipped = 0
 
-    for entry in targets_to_rescue:
+    for position, (entry, raw_entry) in enumerate(targets_to_rescue):
         target_id  = entry["target_id"]
         bot_blocked = entry.get("bot_blocked", [])
         ikey       = entry.get("idempotency_key", f"rescue_{run_id}")
+
+        # One target costs up to _PER_TARGET_BUDGET: the rescue is capped at 5
+        # agent calls (~120s each) and the summary chain waits up to 180s. With
+        # no clock check the loop simply ran until the 1800s soft limit killed
+        # it mid-target — and because the queue snapshot is only deleted AFTER
+        # the loop, the retry then re-rescued every target that had already
+        # succeeded. Wave 2 is the one path that actually bills TinyFish
+        # credits, so that re-ran the most expensive work in the system.
+        if time.monotonic() - started > _WAVE2_BUDGET - _PER_TARGET_BUDGET:
+            skipped = len(targets_to_rescue) - position
+            log.warning("wave2.time_capped", skipped=skipped,
+                        rescued_so_far=total_rescued,
+                        hint="remaining targets stay queued for the next run")
+            break
 
         ctx = RunContext(run_id=run_id, task_id=self.request.id)
         result = ScrapeService().rescue(
@@ -178,6 +221,12 @@ def wave2_rescue(self, run_id: int) -> dict:
         if rescued > 0:
             patch_run(run_id, **{"+new_posts_found": rescued})
             log.info("wave2.rescued", target_id=target_id, posts=rescued)
+
+        # Drop this target from the queue snapshot as soon as its agent work is
+        # done, not at the end of the loop. Whatever kills this task next — the
+        # time limit, a redeploy, an OOM — must not cause the agent to run again
+        # for a target already paid for.
+        _drop_from_queue(r, processing_key, raw_entry, log)
 
         # Chain summary → pdf and wait (max 3 min). If it takes longer, skip and
         # move on so the run summary isn't blocked indefinitely.

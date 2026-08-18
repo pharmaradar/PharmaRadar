@@ -37,7 +37,9 @@ celery_app = Celery(
         "app.tasks.llm",
         "app.tasks.pdf",
         "app.tasks.scheduler",
-        "app.tasks.maintenance",  # reap_stale_runs
+        "app.tasks.maintenance",
+        "app.tasks.transparence",    # French Sunshine Act payment sync
+        "app.tasks.market_access",   # HAS rulings + ANSM shortages
         "app.tasks.social",       # social_scan (Apify)
         "app.tasks.burning_topics",  # generate_topic_report
         "app.tasks.synthesis",       # dashboard KOL/competitor/comprehensive PDFs
@@ -61,6 +63,8 @@ import app.tasks.synthesis       # noqa: E402,F401
 import app.tasks.market_report   # noqa: E402,F401
 import app.tasks.accounts       # noqa: E402,F401
 import app.tasks.literature     # noqa: E402,F401
+import app.tasks.transparence   # noqa: E402,F401
+import app.tasks.market_access  # noqa: E402,F401
 
 celery_app.conf.update(
     task_serializer="json",
@@ -96,6 +100,8 @@ celery_app.conf.update(
         "app.tasks.pdf.*": {"queue": "pdf"},
         "app.tasks.scheduler.*": {"queue": "llm"},
         "app.tasks.maintenance.*": {"queue": "llm"},
+        "app.tasks.transparence.*": {"queue": "llm"},
+        "app.tasks.market_access.*": {"queue": "llm"},
         "app.tasks.social.*": {"queue": "scrape"},
         "app.tasks.burning_topics.*": {"queue": "scrape"},
     },
@@ -149,6 +155,18 @@ celery_app.conf.update(
         "sync-trials": {
             "task": "app.tasks.literature.sync_trials",
             "schedule": crontab(hour=3, minute=50),
+        },
+        # The Sunshine Act register publishes new declarations every day, so a
+        # daily pull is what keeps the figures current. Free official API, no
+        # key, no per-call cost — same footing as the literature lanes above.
+        "sync-transparence": {
+            "task": "app.tasks.transparence.sync_transparence",
+            "schedule": crontab(hour=4, minute=10),
+        },
+        # HAS rulings and ANSM shortages — official files, republished daily.
+        "sync-market-access": {
+            "task": "app.tasks.market_access.sync_market_access",
+            "schedule": crontab(hour=4, minute=40),
         },
         # Press feeds move daily and cost nothing, so they run twice a day.
         "sync-fr-feeds": {
