@@ -1,7 +1,9 @@
+import { useEffect, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { AlertTriangle, ExternalLink, Loader2, Sparkles } from "lucide-react";
 import { api, type SocialAnswer } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useGenQuota } from "@/hooks/useGenQuota";
 
 /**
  * A direct answer to the question in the search bar.
@@ -44,11 +46,46 @@ function VoiceSplit({ voices }: { voices: Record<string, number> }) {
   );
 }
 
+/** Does this search read as a question rather than a keyword lookup?
+ *
+ *  The distinction decides whether we spend a generation automatically. "what
+ *  is the top 5 subject that lung cancer patient want to discuss" is a question
+ *  and answering it is the whole point; "tecentriq" and "sma" — both real
+ *  entries in the client's recent searches — are lookups where an LLM answer
+ *  would burn quota to restate a word.
+ *
+ *  French and English, because the client works in both. */
+const QUESTION_WORDS = /^(what|why|how|who|which|when|where|do|does|did|is|are|can|should|would|will|quel|quelle|quels|quelles|comment|pourquoi|qui|est-ce|y a-t-il)\b/i;
+
+export function looksLikeQuestion(query: string): boolean {
+  const q = (query || "").trim();
+  if (q.length < 12) return false;
+  if (q.endsWith("?")) return true;
+  if (QUESTION_WORDS.test(q)) return true;
+  // A long phrase is a question in intent even without the grammar —
+  // "top subjects lung cancer patients discuss" wants an answer, not a match.
+  return q.split(/\s+/).length >= 5;
+}
+
 export default function SocialAnswerPanel({ question }: { question: string }) {
+  const { can, spent } = useGenQuota();
   const ask = useMutation({
     mutationFn: () => api.answerSocialQuestion(question),
+    onSuccess: () => spent(),
   });
   const data: SocialAnswer | undefined = ask.data;
+
+  // Answer a question without being asked twice. Once per question, ever:
+  // without the ref this re-fires on every render after a failure and spends
+  // the whole daily quota on a question that cannot be answered.
+  const autoTried = useRef<string | null>(null);
+  useEffect(() => {
+    if (!question || autoTried.current === question) return;
+    if (!looksLikeQuestion(question)) return;   // a keyword lookup wants the grid
+    if (!can("social_answer")) return;          // quota spent: the button remains
+    autoTried.current = question;
+    ask.mutate();
+  }, [question, can, ask]);
 
   if (!question || question.trim().length < 5) return null;
 
@@ -60,7 +97,9 @@ export default function SocialAnswerPanel({ question }: { question: string }) {
             <Sparkles size={16} className="text-pharma-blue dark:text-blue-300" />
           </div>
           <div className="min-w-0">
-            <h2 className="font-semibold text-sm">Answer this question</h2>
+            <h2 className="font-semibold text-sm">
+              {looksLikeQuestion(question) ? "Answer" : "Answer this question"}
+            </h2>
             <p className="text-xs text-gray-400">
               Reads the matched posts and answers directly, citing them — instead of
               leaving you to read the results
