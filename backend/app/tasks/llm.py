@@ -119,12 +119,31 @@ def extract_target_posts(self, target_id: int, run_id: int) -> dict:
         ctx = RunContext(run_id=run_id, task_id=self.request.id)
         extractor = ExtractorService()
 
-        done, total_insights, capped = _extract_within_budget(
-            post_ids,
-            lambda pid: extractor.extract(post_id=pid, ctx=ctx).get("insights_saved", 0),
-            lambda saved: patch_run(
-                run_id, **{"+insights_extracted": saved, "+llm_calls_used": 1}),
+        # Posts are handed over in small batches: one LLM call covers several,
+        # which is the platform's largest single LLM saving (extraction is ~23
+        # calls per target, ~1,160 for a 50-KOL run). extract_batch returns None
+        # for anything unexpected, and the group then falls back to one call per
+        # post — so batching can save calls but never lose insights.
+        from app.services.extractor import _BATCH_SIZE
+
+        def _extract_group(group: list[int]) -> int:
+            batched = extractor.extract_batch(post_ids=group, ctx=ctx) if len(group) > 1 else None
+            if batched is not None:
+                patch_run(run_id, **{"+llm_calls_used": 1})
+                return batched.get("insights_saved", 0)
+            saved = 0
+            for pid in group:
+                saved += extractor.extract(post_id=pid, ctx=ctx).get("insights_saved", 0)
+                patch_run(run_id, **{"+llm_calls_used": 1})
+            return saved
+
+        groups = [post_ids[i:i + _BATCH_SIZE] for i in range(0, len(post_ids), _BATCH_SIZE)]
+        done_groups, total_insights, capped = _extract_within_budget(
+            groups,
+            _extract_group,
+            lambda saved: patch_run(run_id, **{"+insights_extracted": saved}),
         )
+        done = sum(len(g) for g in groups[:done_groups])
         if capped:
             log.info("extract_target_posts.time_capped", posts=done,
                      remaining=len(post_ids) - done, insights=total_insights)
