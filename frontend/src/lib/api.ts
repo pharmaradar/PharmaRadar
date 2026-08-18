@@ -260,6 +260,19 @@ export interface KolResearch {
   }[];
 }
 
+/** Which PRODUCTS a person discusses, ours against the competition — the same
+ *  tally() that powers global share of voice, scoped to one KOL. Topics say what
+ *  someone talks about; brands say which assets, which is what decides who is
+ *  worth engaging and about what. Read beside their declared payments. */
+export interface BrandTally {
+  total_mentions: number;
+  roche_mentions: number;
+  competitor_mentions: number;
+  roche_share: number;
+  brands: BrandRow[];
+  by_owner: { owner: string; is_ours: boolean; mentions: number; share: number }[];
+}
+
 export interface KolProfile extends KolProfileCard {
   known_urls: string[];
   window_days: number;
@@ -268,6 +281,7 @@ export interface KolProfile extends KolProfileCard {
   top_topics: { topic: string; count: number }[];
   per_week: Record<string, number>;
   statements: KolStatement[];
+  brands?: BrandTally;
 }
 
 /** Share of voice by product — a brand lead thinks in assets, not topics. */

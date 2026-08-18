@@ -5,7 +5,7 @@ import {
   ChevronDown, ChevronUp, Compass, ExternalLink, Linkedin, Loader2, Search,
   Sparkles, TrendingUp, Twitter, Users, X,
 } from "lucide-react";
-import { api, type KolProfileCard, type KolResearch } from "@/lib/api";
+import { api, type BrandTally, type KolProfileCard, type KolResearch } from "@/lib/api";
 import TransparencePanel from "@/components/TransparencePanel";
 import ShareOfVoice from "@/components/ShareOfVoice";
 import { cn } from "@/lib/utils";
@@ -314,6 +314,85 @@ function ResearchRecord({ research }: { research: KolResearch }) {
 }
 
 
+
+/**
+ * Which products this person discusses, ours against the competition.
+ *
+ * Topics answer "what do they talk about"; this answers "about whose assets",
+ * which is the question that decides engagement. Deliberately placed next to
+ * the declared-payments panel: a KOL a competitor funds AND whose conversation
+ * leans to that competitor's asset is a different situation from one where only
+ * the money leans, and neither number tells you that alone.
+ *
+ * Share is of THEIR conversation, not of the market — one statement naming two
+ * drugs counts for both, so these are shares of mentions and are not summed.
+ */
+function BrandAffinity({ brands }: { brands: BrandTally }) {
+  if (!brands || brands.total_mentions === 0) {
+    return (
+      <p className="text-sm text-slate-400">
+        No tracked product named in their statements yet.
+      </p>
+    );
+  }
+  const top = brands.brands[0]?.mentions ?? 1;
+  return (
+    <div className="space-y-3">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span className="text-2xl font-bold tabular-nums text-pharma-blue dark:text-blue-300">
+          {brands.roche_share}%
+        </span>
+        <span className="text-xs text-slate-500">
+          of their product talk is ours — {brands.roche_mentions} of{" "}
+          {brands.total_mentions} mentions
+        </span>
+      </div>
+
+      <div className="flex h-2 rounded-full overflow-hidden bg-slate-100 dark:bg-[#1e3a5f]">
+        <div className="bg-pharma-blue h-full"
+             style={{ width: `${brands.roche_share}%` }} />
+        <div className="bg-orange-400 h-full"
+             style={{ width: `${100 - brands.roche_share}%` }} />
+      </div>
+
+      <div className="space-y-2">
+        {brands.brands.slice(0, 8).map((b) => (
+          <div key={b.brand}>
+            <div className="flex items-baseline justify-between gap-2 mb-0.5">
+              <span className={cn("text-sm truncate",
+                b.is_ours ? "font-semibold text-pharma-blue dark:text-blue-300"
+                          : "text-slate-700 dark:text-[#e2e8f0]")}>
+                {b.brand}
+                <span className="text-[11px] text-slate-400 font-normal ml-1.5">
+                  {b.owner}{b.is_ours && " · ours"}
+                </span>
+              </span>
+              <span className="text-xs tabular-nums text-slate-500 shrink-0">
+                {b.mentions}
+                {/* Only shown when opinions were actually expressed. A brand
+                    discussed neutrally is unrated, not neutral-scoring, and
+                    collapsing those two would invent a signal. */}
+                {b.net_sentiment != null && (
+                  <span className={cn("ml-1.5",
+                    b.net_sentiment > 0 ? "text-emerald-600 dark:text-emerald-400"
+                                        : b.net_sentiment < 0 ? "text-red-500" : "")}>
+                    {b.net_sentiment > 0 ? "+" : ""}{b.net_sentiment}%
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-slate-100 dark:bg-[#1e3a5f] overflow-hidden">
+              <div className={cn("h-full rounded-full",
+                b.is_ours ? "bg-pharma-blue" : "bg-orange-400")}
+                style={{ width: `${Math.max((b.mentions / top) * 100, 3)}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SentimentBar({ sentiment }: { sentiment: Record<string, number> }) {
   const total = Object.values(sentiment).reduce((a, b) => a + b, 0);
   if (!total) return null;
@@ -455,9 +534,20 @@ function ProfileDetail({ id, onClose, generating, generateError, onGenerate }: {
               </div>
             )}
 
+            {profile.brands && (
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  Products they discuss
+                </div>
+                <BrandAffinity brands={profile.brands} />
+              </div>
+            )}
+
             {/* Declared industry payments. Sits under the research record because
                 both answer "what is this person's standing in the field" from
-                external evidence rather than from what they posted. */}
+                external evidence rather than from what they posted — and directly
+                below the brand split, because mindshare and money are read
+                together or not at all. */}
             <TransparencePanel targetId={id} />
 
             <div className="grid sm:grid-cols-2 gap-4">
