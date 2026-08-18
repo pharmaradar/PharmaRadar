@@ -63,6 +63,27 @@ function EntryMeta({ entry }: { entry: Entry }) {
           <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5 line-clamp-2">{t.description}</p>
         )}
         <div className="flex flex-wrap gap-1.5 mt-2 text-xs text-slate-400">
+          {/* Activity in this window against the one before it — the only place
+              the platform says whether a tracked topic is MOVING rather than
+              just what is in it. Annotation only: the list keeps the order the
+              topics were created in, because this is a watchlist. */}
+          {t.momentum && t.momentum.current > 0 && (
+            <span className={cn(
+              "px-2 py-0.5 rounded-full font-medium",
+              t.momentum.direction === "rising"
+                ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-300"
+                : t.momentum.direction === "falling"
+                ? "bg-orange-50 text-orange-700 dark:bg-orange-900/20 dark:text-orange-300"
+                : "bg-slate-100 text-slate-500 dark:bg-white/5",
+            )}>
+              {t.momentum.current} posts
+              {/* No percentage without a baseline worth one — "new" and
+                  "+200% (1→3)" are different claims. */}
+              {t.momentum.change_pct != null
+                ? ` · ${t.momentum.change_pct > 0 ? "+" : ""}${Math.round(t.momentum.change_pct)}%`
+                : t.momentum.direction === "new" ? " · new" : ""}
+            </span>
+          )}
           <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">last {t.period_days}d</span>
           {/* Always shown: an unset value means France, not "no region". */}
           <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/5">

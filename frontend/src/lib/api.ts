@@ -577,6 +577,15 @@ export interface BurningTopic {
   is_active: boolean;
   created_at: string;
   latest_report: { id: number; status: string; created_at: string; pdf_url: string | null } | null;
+  /** Activity in this topic's window against the window before it. Annotation,
+   *  not ranking — the list stays in the order the topics were set up.
+   *  `change_pct` is null when there is no baseline worth a percentage. */
+  momentum?: {
+    current: number; previous: number;
+    change_pct: number | null;
+    direction: "rising" | "falling" | "steady" | "new" | "unknown";
+    window_days: number;
+  } | null;
 }
 
 export interface BurningTopicImportantPost {
@@ -660,6 +669,15 @@ export interface Congress {
   created_at: string;
   questions: CongressQuestion[];
   latest_report: { id: number; status: string; created_at: string; pdf_url: string | null } | null;
+  /** Activity in this topic's window against the window before it. Annotation,
+   *  not ranking — the list stays in the order the topics were set up.
+   *  `change_pct` is null when there is no baseline worth a percentage. */
+  momentum?: {
+    current: number; previous: number;
+    change_pct: number | null;
+    direction: "rising" | "falling" | "steady" | "new" | "unknown";
+    window_days: number;
+  } | null;
 }
 
 export interface TopicsData {
