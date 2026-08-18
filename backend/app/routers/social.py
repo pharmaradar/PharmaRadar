@@ -729,7 +729,7 @@ async def answer_question(body: AnswerRequest,
     """
     from app.services import social_answer as sa
     from app.services.llm_router import call_llm_async
-    from app.services.voice_profile import classify
+    from app.services.voice_profile import account_voice_map, classify
 
     question = (body.q or "").strip()
     if len(question) < 5:
@@ -747,11 +747,16 @@ async def answer_question(body: AnswerRequest,
 
     evidence = sa.dedupe_evidence(posts)[:sa.MAX_EVIDENCE]
 
+    # The client's own account categorisations, loaded once for the whole
+    # batch. Without them an account he has explicitly labelled is still
+    # classified by guessing at its handle.
+    known = await account_voice_map(db)
+
     voices: dict[str, int] = {}
     for item in evidence:
         bucket, _confidence, _why = classify(
             item.get("author") or "", url=item.get("post_url") or "",
-            is_tracked_kol=False, target_type=None)
+            is_tracked_kol=False, target_type=None, known_accounts=known)
         item["voice"] = bucket
         item["url"] = item.get("post_url")
         voices[bucket] = voices.get(bucket, 0) + 1
@@ -926,10 +931,11 @@ async def analyse_post(post_id: int, refresh: bool = False,
 
     # Who is speaking is a classification, not a distribution: one post has one
     # author, so a percentage chart would be theatre.
-    from app.services.voice_profile import classify
+    from app.services.voice_profile import account_voice_map, classify
     bucket, confidence, evidence = classify(
         post.author or "", url=post.post_url or "",
-        is_tracked_kol=False, target_type=None)
+        is_tracked_kol=False, target_type=None,
+        known_accounts=await account_voice_map(db))
 
     hashtags = json.loads(post.hashtags) if post.hashtags else []
     reach = _post_reach(post, platform_stats)

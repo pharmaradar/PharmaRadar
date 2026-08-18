@@ -112,9 +112,87 @@ _ORG_RE = re.compile(
     r"(?:pharma|labo|laborator|institut|hopital|hôpital|chu\b|clinic|clinique|"
     r"fondation|foundation|societ|société|federation|fédération|agence|agency|"
     r"ministere|ministère|journal|revue|magazine|news|presse|press|inc\b|sa\b|"
-    r"gmbh|ltd|official|france\b|group|groupe)",
+    r"gmbh|ltd|official|france\b|group|groupe|"
+    # French health bodies and networks write themselves as acronyms or
+    # hyphenated slugs, so none of the words above appear. Measured on the live
+    # table, 100 of 152 distinct authors fell to "other" — among them ANSM and
+    # HAS, the French drug agency and health authority, and IFCT, the francophone
+    # thoracic-oncology intergroup. On a French pharma platform those are the
+    # most authoritative voices there are, and they were counted as unknown.
+    r"unicancer|oncorif|oncopl|assurance-maladie|inca\b|sfpo|splf|afsos|"
+    r"reseau|réseau|ifsi|ifct|aphp|ap-hp|inserm|cnrs|invs|"
+    # Learned societies, journals and registries, French and international.
+    r"nejm|lancet|jama|bmj|esmo|asco|aacr|who\b|oms\b)",
     re.IGNORECASE,
 )
+
+# Standalone acronyms, matched whole so they cannot fire inside a longer word:
+# "has" is a verb, "ars" and "cnam" are not.
+_ORG_ACRONYMS = frozenset({
+    "ansm", "has", "hcsp", "inca", "aphp", "ap-hp", "inserm", "cnrs", "ars",
+    "cnam", "ameli", "splf", "sfpo", "afsos", "ifct", "unicancer", "oncorif",
+    "nejm", "esmo", "asco", "aacr", "ema", "fda", "oms", "who",
+})
+
+# A LinkedIn public identifier for a PERSON: "firstname-lastname" plus
+# LinkedIn's disambiguating suffix, e.g. "mahmoud-zureik-92548b161". Company
+# pages never carry that suffix ("haute-autorite-de-sante", "ap-hp"), which is
+# what makes the two separable.
+#
+# The suffix MUST contain a digit. Without that requirement the last word of a
+# hyphenated organisation name qualifies as an id: "ligue-contre-le-cancer" read
+# as a person, which would file the Ligue contre le cancer — a major French
+# patient organisation — as an individual and drop it out of the patient bucket.
+_LINKEDIN_PERSON_RE = re.compile(
+    r"^[a-z]+(?:-[a-z]+){1,3}-(?=[a-z0-9]*[0-9])[a-z0-9]{6,12}$", re.IGNORECASE)
+
+
+async def account_voice_map(session) -> dict[str, str]:
+    """handle (lowercased) -> voice bucket, from the tracked-accounts registry.
+
+    The registry is the client's own curation: he adds and edits these accounts
+    in the UI, and each carries a category (institution, cancer_centre,
+    learned_society, patient_association...) that _CATEGORY_BUCKET already knows
+    how to read. Until now that was consulted only for URLs, so an account the
+    client had explicitly categorised was still classified by guessing at its
+    handle — and 67% of distinct authors landed in "other", ANSM and HAS among
+    them.
+
+    Loaded once and passed down rather than queried per author, the same way
+    tasks/social threads the tracked-handle list through a scan.
+    """
+    from sqlalchemy import select
+
+    from app.models import TrackedAccount
+
+    rows = (await session.execute(
+        select(TrackedAccount.handle, TrackedAccount.category, TrackedAccount.role)
+    )).all()
+
+    out: dict[str, str] = {}
+    for handle, category, role in rows:
+        if not handle:
+            continue
+        # `role` is the more specific field and wins where it is set; `category`
+        # is what is actually populated today.
+        bucket = _CATEGORY_BUCKET.get((role or "").strip().lower()) \
+            or _CATEGORY_BUCKET.get((category or "").strip().lower())
+        if bucket:
+            out[handle.strip().lstrip("@").lower()] = bucket
+    return out
+
+
+def _is_org_acronym(name: str) -> bool:
+    cleaned = name.strip().lstrip("@").lower()
+    return cleaned in _ORG_ACRONYMS
+
+
+def looks_like_linkedin_person(name: str) -> bool:
+    """A LinkedIn slug that identifies an individual rather than a company."""
+    cleaned = (name or "").strip().lstrip("@").lower()
+    if cleaned in _ORG_ACRONYMS:
+        return False
+    return bool(_LINKEDIN_PERSON_RE.match(cleaned))
 
 
 @dataclass
@@ -165,7 +243,8 @@ class VoiceBreakdown:
 
 
 def classify(author: str | None, *, url: str = "", is_tracked_kol: bool = False,
-             target_type: str | None = None) -> tuple[str, str, str]:
+             target_type: str | None = None,
+             known_accounts: dict[str, str] | None = None) -> tuple[str, str, str]:
     """Classify one speaker. Returns ``(bucket, confidence, evidence)``.
 
     Order matters: facts first, heuristics last.
@@ -188,15 +267,31 @@ def classify(author: str | None, *, url: str = "", is_tracked_kol: bool = False,
     if not name:
         return OTHER, UNKNOWN, "no author recorded"
 
+    # 2b. The client's own registry, before any heuristic. If he has categorised
+    # this account, that is a fact about it and no pattern should overrule it.
+    if known_accounts:
+        registered = known_accounts.get(name.lstrip("@").lower())
+        if registered:
+            return registered, EXACT, "categorised in the tracked-accounts registry"
+
     # 3. Heuristics on the author string. Patient wording is checked before the
     # doctor title so "association de patients" is not read as an institution.
     if _PATIENT_RE.search(name):
         return PATIENT, INFERRED, "patient/association wording in author"
     if _DOCTOR_RE.search(name) or _looks_like_clinician_handle(name):
         return DOCTOR, INFERRED, "clinical title in author"
+    if _is_org_acronym(name):
+        return ORGANISATION, INFERRED, "known health body or society"
     if _ORG_RE.search(name) or (host and not host.endswith((".com", ".net"))
                                 and category is None and " " not in name and "." in name):
         return ORGANISATION, INFERRED, "organisation wording in author"
+
+    # Checked LAST, after every organisation signal: a LinkedIn slug proves this
+    # is an individual, not which KIND. Calling them a doctor would be a guess
+    # (many are researchers, managers or patients), so they land in OTHER with
+    # the reason recorded rather than being promoted on no evidence.
+    if looks_like_linkedin_person(name):
+        return OTHER, INFERRED, "individual LinkedIn profile, role unknown"
 
     return OTHER, UNKNOWN, "no identifying signal"
 
