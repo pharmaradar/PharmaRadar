@@ -807,6 +807,37 @@ export interface TransparenceOverview {
   coverage: Record<string, number>;
 }
 
+
+/** French market-access events: HAS added-benefit rulings and ANSM shortages.
+ *  ASMR runs I (major added benefit) to V (none) and drives price and
+ *  reimbursement in France, so a competitor's rating is a commercial event. */
+export interface MarketAccessEvent {
+  kind: "asmr" | "smr" | "shortage";
+  brand: string;
+  owner: string;
+  is_ours: boolean;
+  rating: string | null;
+  rating_label: string | null;
+  rating_rank: number | null;
+  opinion_ref: string | null;
+  event_date: string | null;
+  end_date: string | null;
+  url: string | null;
+  summary: string | null;
+  holder: string | null;
+  /** One HAS opinion covers every presentation of a drug; identical rulings are
+   *  collapsed server-side and this carries how many were folded together. */
+  presentations: number;
+  drug_name: string;
+}
+
+export interface MarketAccessSummary {
+  owners: { owner: string; is_ours: boolean; total: number; ratings: Record<string, number> }[];
+  rating_meaning: Record<string, { label: string; rank: number }>;
+  latest_event: string | null;
+  synced_at: string | null;
+}
+
 export const api = {
   stats: () => req<Stats>("/stats"),
   combinedSynthesis: (refresh = false) =>
@@ -927,6 +958,13 @@ export const api = {
   /** Declared industry payments to this KOL, grouped by paying company.
    *  Companies are aggregated server-side by SIREN, not trade name — the
    *  register files "ROCHE SAS" and "ROCHE" separately for one legal entity. */
+  /** HAS rulings + ANSM shortages on tracked drugs, newest first. */
+  marketAccessEvents: (days = 1825, owner?: string, kind?: string, limit = 60) =>
+    req<{ events: MarketAccessEvent[]; window_days: number }>(
+      `/market-access/events?days=${days}&limit=${limit}`
+      + (owner ? `&owner=${encodeURIComponent(owner)}` : "")
+      + (kind ? `&kind=${encodeURIComponent(kind)}` : "")),
+  marketAccessSummary: () => req<MarketAccessSummary>("/market-access/summary"),
   transparenceTarget: (id: number, limit = 25) =>
     req<TransparenceTarget>(`/transparence/target/${id}?limit=${limit}`),
   /** Share of industry investment across every resolved KOL. */

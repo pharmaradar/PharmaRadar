@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useGenQuota } from "@/hooks/useGenQuota";
 import { ReportBody } from "@/components/MarketResearchReport";
+import MarketAccessPanel from "@/components/MarketAccessPanel";
 
 const PERIODS = [
   { label: "30 days", value: 30 },
@@ -111,6 +112,10 @@ export default function Competitors() {
           </p>
         )}
       </div>
+
+      {/* French market access. Sits with the competitor view because an ASMR
+          ruling on a rival product is a commercial event, not a scientific one. */}
+      <MarketAccessPanel />
 
       {/* Top publications by engagement */}
       <div className="glass rounded-xl p-5">

@@ -16,6 +16,7 @@ from app.routers import targets, runs, reports, settings as settings_router, age
 from app.routers import accounts as accounts_router
 from app.routers import discovery as discovery_router
 from app.routers import transparence as transparence_router
+from app.routers import market_access as market_access_router
 from app.routers import social as social_router
 from app.routers import auth as auth_router
 from app.routers import burning_topics as burning_topics_router
@@ -344,6 +345,7 @@ app.include_router(agent.router)
 app.include_router(discovery_router.router)
 app.include_router(social_router.router)
 app.include_router(transparence_router.router)
+app.include_router(market_access_router.router)
 app.include_router(accounts_router.router)
 app.include_router(burning_topics_router.router)
 app.include_router(congress_router.router)
