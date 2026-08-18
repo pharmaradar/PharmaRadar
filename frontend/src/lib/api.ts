@@ -335,6 +335,11 @@ export interface SocialPost {
   kind: string;
   posted_at: string | null;
   trend_score: number;
+  /** False when this platform's engagement figures cannot be read at all —
+   *  X and LinkedIn arrive through search, and Instagram's metrics fetch is
+   *  frequently rate-limited. Show "—", never "0 likes": absent and zero are
+   *  different facts. */
+  engagement_available?: boolean;
   has_description: boolean;
   language: string;
 }

@@ -689,10 +689,23 @@ function PostCard({ post: p, onClick }: { post: SocialPost; onClick: () => void 
         {p.author && <p className="text-xs font-semibold text-pharma-light truncate">{p.author}</p>}
         <p className="text-xs text-gray-600 dark:text-[#94a3b8] line-clamp-3 mt-1 flex-1">{p.text || "—"}</p>
         <div className="flex items-center gap-3 mt-2 pt-2 border-t border-gray-100 dark:border-slate-800">
-          <Stat icon={Heart} value={p.likes} />
-          <Stat icon={MessageCircle} value={p.comments} />
-          <Stat icon={Eye} value={p.views} />
-          <Stat icon={Share2} value={p.shares} />
+          {/* "0 likes" and "we cannot see the likes" are different facts, and
+              only one of them says anything about the post. X and LinkedIn come
+              through search with no metrics at all, and Instagram's are often
+              rate-limited away — 72% of the corpus. Showing zeroes there reads
+              as "nobody engaged". */}
+          {p.engagement_available === false ? (
+            <span className="text-[11px] text-gray-400 italic">
+              engagement not available on {p.platform}
+            </span>
+          ) : (
+            <>
+              <Stat icon={Heart} value={p.likes} />
+              <Stat icon={MessageCircle} value={p.comments} />
+              <Stat icon={Eye} value={p.views} />
+              <Stat icon={Share2} value={p.shares} />
+            </>
+          )}
         </div>
       </div>
     </div>
