@@ -232,7 +232,7 @@ async def _ingest_posts(session, posts: list[dict], *, kind: str, topic: str,
     any other post.
     """
     from app.models import SocialPost
-    from app.services.deduplicator import sha256_hash
+    from app.services.deduplicator import sha256_hash, social_content_key
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     inserted = 0
@@ -258,7 +258,11 @@ async def _ingest_posts(session, posts: list[dict], *, kind: str, topic: str,
             domain=normalize_host(url),
             source_scope=_scope_of(url, post.get("author"), _lang, tracked),
             posted_at=post.get("posted_at"),
-            content_hash=sha256_hash(url),
+            # Keyed on what the post SAYS, not its address. Facebook rotates its
+            # pfbid URLs between scrapes, so a URL hash re-inserted the same post
+            # every time — 133 of the 139 duplicate rows measured were Facebook.
+            content_hash=social_content_key(post.get("platform"), post.get("author"),
+                                            post.get("text"), url),
         ).on_conflict_do_nothing(index_elements=["content_hash"])
         try:
             result = await session.execute(stmt)
@@ -477,7 +481,7 @@ async def _run_scan(lang_override: str | None = None) -> dict:
     from app.database import CelerySessionLocal
     from app.models import AppSettings, SocialPost, Target
     from app.services import apify_client
-    from app.services.deduplicator import sha256_hash
+    from app.services.deduplicator import sha256_hash, social_content_key
     from sqlalchemy import select
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -606,7 +610,8 @@ async def _run_scan(lang_override: str | None = None) -> dict:
                         continue
                     # NOTE: posts saved regardless of language to maximize Apify ROI.
                     # Language is detected and stored; UI filters by language at display time.
-                    ch = sha256_hash(post["post_url"])
+                    ch = social_content_key(post.get("platform"), post.get("author"),
+                                            post.get("text"), post["post_url"])
                     stmt = pg_insert(SocialPost).values(
                         platform=post["platform"],
                         post_url=post["post_url"],
@@ -811,7 +816,7 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
     from app.database import CelerySessionLocal
     from app.models import AppSettings, SocialPost
     from app.services import apify_client
-    from app.services.deduplicator import sha256_hash
+    from app.services.deduplicator import sha256_hash, social_content_key
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     # Apify gates only the paid lane. The free TinyFish lane below needs no
@@ -890,7 +895,8 @@ async def _run_discover(query: str, lang_override: str | None = None) -> dict:
                 # Tag with primary keyword as topic for display in trend chips
                 post["topic"] = keywords[0] if keywords else query
                 # Posts saved regardless of language — UI filters at display time
-                ch = sha256_hash(post["post_url"])
+                ch = social_content_key(post.get("platform"), post.get("author"),
+                                        post.get("text"), post["post_url"])
                 stmt = pg_insert(SocialPost).values(
                     platform=post["platform"], post_url=post["post_url"],
                     author=post.get("author"), text=post.get("text"),

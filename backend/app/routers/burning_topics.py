@@ -10,6 +10,7 @@ import json
 from functools import partial
 from pathlib import Path
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -20,6 +21,8 @@ from app.auth import enforce_daily_generation, get_current_user
 from app.config import get_settings
 from app.database import get_db
 from app.models import BurningTopic, BurningTopicReport, User
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/burning-topics", tags=["burning-topics"])
 
@@ -155,7 +158,28 @@ async def list_topics(db: AsyncSession = Depends(get_db),
         )
         latest_by_topic = {r.topic_id: r for r in rep_rows.all()}
 
-    return [_topic_out(t, latest_by_topic.get(t.id)) for t in topics]
+    # Activity for each TRACKED topic: how much is being said now against the
+    # window immediately before it. Burning Topics is a tracking feature — these
+    # topics are ones the client chose to monitor — so this is added as
+    # information beside each one, and the list deliberately keeps his order.
+    # Sorting his watchlist by movement would shuffle it under him every time
+    # the page loaded.
+    #
+    # Counting only: no LLM, no scraping. It reuses the topic's own match rules
+    # so the number describes the same posts the topic's report is written from.
+    from app.services.topic_momentum import topic_momentum
+
+    out = []
+    for t in topics:
+        try:
+            momentum = (await topic_momentum(t)).as_dict()
+        except Exception as exc:                      # noqa: BLE001
+            # A counting failure must not take the topic list down with it.
+            logger.warning("burning_topics.momentum_failed", topic=t.id, exc=str(exc)[:160])
+            momentum = None
+        out.append({**_topic_out(t, latest_by_topic.get(t.id)), "momentum": momentum})
+
+    return out
 
 
 @router.post("/", status_code=status.HTTP_201_CREATED)

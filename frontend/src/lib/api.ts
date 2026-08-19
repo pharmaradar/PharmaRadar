@@ -323,6 +323,9 @@ export interface SocialPost {
   author: string | null;
   text: string;
   thumbnail_url: string | null;
+  /** True when a thumbnail WAS stored but its signed CDN URL has expired —
+   *  distinct from a post that never had an image. */
+  thumbnail_expired?: boolean;
   likes: number;
   comments: number;
   views: number;
@@ -332,6 +335,11 @@ export interface SocialPost {
   kind: string;
   posted_at: string | null;
   trend_score: number;
+  /** False when this platform's engagement figures cannot be read at all —
+   *  X and LinkedIn arrive through search, and Instagram's metrics fetch is
+   *  frequently rate-limited. Show "—", never "0 likes": absent and zero are
+   *  different facts. */
+  engagement_available?: boolean;
   has_description: boolean;
   language: string;
 }
@@ -574,6 +582,15 @@ export interface BurningTopic {
   is_active: boolean;
   created_at: string;
   latest_report: { id: number; status: string; created_at: string; pdf_url: string | null } | null;
+  /** Activity in this topic's window against the window before it. Annotation,
+   *  not ranking — the list stays in the order the topics were set up.
+   *  `change_pct` is null when there is no baseline worth a percentage. */
+  momentum?: {
+    current: number; previous: number;
+    change_pct: number | null;
+    direction: "rising" | "falling" | "steady" | "new" | "unknown";
+    window_days: number;
+  } | null;
 }
 
 export interface BurningTopicImportantPost {
@@ -657,6 +674,15 @@ export interface Congress {
   created_at: string;
   questions: CongressQuestion[];
   latest_report: { id: number; status: string; created_at: string; pdf_url: string | null } | null;
+  /** Activity in this topic's window against the window before it. Annotation,
+   *  not ranking — the list stays in the order the topics were set up.
+   *  `change_pct` is null when there is no baseline worth a percentage. */
+  momentum?: {
+    current: number; previous: number;
+    change_pct: number | null;
+    direction: "rising" | "falling" | "steady" | "new" | "unknown";
+    window_days: number;
+  } | null;
 }
 
 export interface TopicsData {

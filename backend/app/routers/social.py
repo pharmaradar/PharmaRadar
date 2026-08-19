@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models import SocialPost, SearchHistory, User
 from app.auth import get_current_user, require_admin, daily_gen_guard
+from app.services.thumbnails import usable_thumbnail
 from app.services.ae_filter import social_not_ae
 from app.services.fr_sources import Scope
 
@@ -26,17 +27,70 @@ _HALF_LIFE_DAYS = 7
 _STATUS_KEY = "social_scan:status"
 
 
+# Platforms whose engagement figures we can actually see. X and LinkedIn arrive
+# through TinyFish search, which carries no metrics at all, and Instagram's
+# metrics come from a separate Apify request that Instagram rate-limits — the
+# actor logs "media metrics rate limited / unable to get media metrics fill" and
+# returns the post without them.
+#
+# Measured on the live table: engagement is absent for 100% of X, 100% of
+# LinkedIn and 32% of Instagram — 752 of 1,044 posts. `_post_reach` already says
+# "their numbers are absent rather than zero", but ranking multiplied by that
+# zero, so nearly three quarters of the corpus could never trend and could never
+# pass a minimum-likes filter. "Trending on Social" was effectively Facebook.
+_ENGAGEMENT_PLATFORMS = ("instagram", "facebook")
+
+
+def engagement_available(p: SocialPost) -> bool:
+    """Can this post's engagement be measured at all?
+
+    A zero from a platform we CAN read is a real zero — nobody engaged. A zero
+    from one we cannot is an absence, and the two must not rank the same.
+    """
+    if p.platform not in _ENGAGEMENT_PLATFORMS:
+        return False
+    # Instagram posts whose metrics fetch was rate-limited come back with the
+    # whole set empty; a genuinely unengaged post is vanishingly rare there.
+    return bool((p.likes or 0) or (p.comments or 0) or (p.views or 0) or (p.shares or 0))
+
+
 def _engagement(p: SocialPost) -> float:
     """Weighted raw engagement. Comments weighted highest (strongest signal of
     real discussion in medical/patient discourse); views scaled way down."""
     return (p.likes or 0) + 2 * (p.comments or 0) + 1.5 * (p.shares or 0) + 0.05 * (p.views or 0)
 
 
-def _trend_score(p: SocialPost, now: datetime) -> float:
+def _recency(p: SocialPost, now: datetime) -> float:
     when = p.posted_at or p.scraped_at
     age_days = max(0.0, (now - when).total_seconds() / 86400) if when else 30.0
-    decay = math.exp(-age_days / _HALF_LIFE_DAYS)
-    return round(_engagement(p) * decay, 3)
+    return math.exp(-age_days / _HALF_LIFE_DAYS)
+
+
+def _trend_score(p: SocialPost, now: datetime,
+                 neutral_engagement: float | None = None) -> float:
+    """Rank a post, without punishing one whose engagement cannot be seen.
+
+    `neutral_engagement` is the median engagement of the posts in the same batch
+    that DO carry figures. Unmeasurable posts are scored against that, so they
+    sit mid-pack and compete on recency instead of being pinned to the bottom by
+    a zero that was never a measurement. It is used for ORDERING only and is
+    never presented as this post's engagement.
+    """
+    decay = _recency(p, now)
+    if engagement_available(p):
+        return round(_engagement(p) * decay, 3)
+    return round((neutral_engagement if neutral_engagement is not None else 0.0) * decay, 3)
+
+
+def _neutral_engagement(posts: list[SocialPost]) -> float:
+    """Median engagement among the posts we can actually measure."""
+    values = sorted(_engagement(p) for p in posts if engagement_available(p))
+    if not values:
+        # Nothing measurable in this batch, so engagement cannot separate
+        # anything: fall back to pure recency by giving every post the same 1.0.
+        return 1.0
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
 
 
 def _to_out(p: SocialPost, now: datetime) -> dict:
@@ -46,7 +100,14 @@ def _to_out(p: SocialPost, now: datetime) -> dict:
         "post_url": p.post_url,
         "author": p.author,
         "text": (p.text or "")[:2000],
-        "thumbnail_url": p.thumbnail_url,
+        # Meta's CDN signs image URLs with an expiry; 62% of the stored
+        # Instagram thumbnails were already dead, which is what produced a grid
+        # of blank grey frames. Sending None lets the card omit the image area
+        # entirely instead of rendering a box around a 403.
+        "thumbnail_url": usable_thumbnail(p.thumbnail_url),
+        # So the UI can say "image no longer available" rather than silently
+        # dropping it, and so this is measurable rather than merely fixed.
+        "thumbnail_expired": bool(p.thumbnail_url) and not usable_thumbnail(p.thumbnail_url),
         "likes": p.likes or 0,
         "comments": p.comments or 0,
         "views": p.views or 0,
@@ -56,6 +117,9 @@ def _to_out(p: SocialPost, now: datetime) -> dict:
         "kind": p.kind,
         "posted_at": p.posted_at.isoformat() if p.posted_at else None,
         "trend_score": _trend_score(p, now),
+        # So the card can show "—" rather than "0 likes" for a platform whose
+        # figures we cannot see. Absent and zero are different facts.
+        "engagement_available": engagement_available(p),
         "has_description": bool(p.llm_description),
         "language": p.language or "en",
     }
@@ -170,7 +234,8 @@ async def trends(
     rows = await db.execute(q)
     posts = rows.scalars().all()
 
-    ranked = sorted(posts, key=lambda p: _trend_score(p, now), reverse=True)
+    _neutral = _neutral_engagement(posts)
+    ranked = sorted(posts, key=lambda p: _trend_score(p, now, _neutral), reverse=True)
     top_posts = [_to_out(p, now) for p in ranked[:limit]]
 
     # Aggregate trending topics (group by topic/query)
@@ -241,7 +306,8 @@ async def synthesis(days: int = 30, lang: str | None = "fr", refresh: bool = Fal
     if not posts:
         return empty
 
-    ranked = sorted(posts, key=lambda p: _trend_score(p, now), reverse=True)
+    _neutral = _neutral_engagement(posts)
+    ranked = sorted(posts, key=lambda p: _trend_score(p, now, _neutral), reverse=True)
     sample = ranked[:50]
     listing = "\n".join(
         f"[{p.id}] ({p.platform}, {p.likes}♥ {p.comments}\U0001f4ac) "
@@ -467,7 +533,8 @@ async def discover(q: str, fresh: bool = True, lang: str | None = "fr",
         haystack = " ".join(parts).lower()
         return sum(1 for t in lowered if t in haystack)
 
-    ranked = sorted(posts, key=lambda p: (_relevance(p), _trend_score(p, now)),
+    _neutral = _neutral_engagement(posts)
+    ranked = sorted(posts, key=lambda p: (_relevance(p), _trend_score(p, now, _neutral)),
                     reverse=True)
     results = [_to_out(p, now) for p in ranked[:max(1, min(limit, 200))]]
 
@@ -721,7 +788,7 @@ async def answer_question(body: AnswerRequest,
     """
     from app.services import social_answer as sa
     from app.services.llm_router import call_llm_async
-    from app.services.voice_profile import classify
+    from app.services.voice_profile import account_voice_map, classify
 
     question = (body.q or "").strip()
     if len(question) < 5:
@@ -739,11 +806,16 @@ async def answer_question(body: AnswerRequest,
 
     evidence = sa.dedupe_evidence(posts)[:sa.MAX_EVIDENCE]
 
+    # The client's own account categorisations, loaded once for the whole
+    # batch. Without them an account he has explicitly labelled is still
+    # classified by guessing at its handle.
+    known = await account_voice_map(db)
+
     voices: dict[str, int] = {}
     for item in evidence:
         bucket, _confidence, _why = classify(
             item.get("author") or "", url=item.get("post_url") or "",
-            is_tracked_kol=False, target_type=None)
+            is_tracked_kol=False, target_type=None, known_accounts=known)
         item["voice"] = bucket
         item["url"] = item.get("post_url")
         voices[bucket] = voices.get(bucket, 0) + 1
@@ -918,10 +990,11 @@ async def analyse_post(post_id: int, refresh: bool = False,
 
     # Who is speaking is a classification, not a distribution: one post has one
     # author, so a percentage chart would be theatre.
-    from app.services.voice_profile import classify
+    from app.services.voice_profile import account_voice_map, classify
     bucket, confidence, evidence = classify(
         post.author or "", url=post.post_url or "",
-        is_tracked_kol=False, target_type=None)
+        is_tracked_kol=False, target_type=None,
+        known_accounts=await account_voice_map(db))
 
     hashtags = json.loads(post.hashtags) if post.hashtags else []
     reach = _post_reach(post, platform_stats)

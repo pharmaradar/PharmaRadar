@@ -2,8 +2,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Flame, Heart, MessageCircle, Eye, Share2, ExternalLink, X,
-  Sparkles, Loader2, Search, RefreshCw, SlidersHorizontal, Clock,
-} from "lucide-react";
+  Sparkles, Loader2, Search, RefreshCw, SlidersHorizontal, Clock, ImageOff } from "lucide-react";
 import MarketResearchReport from "@/components/MarketResearchReport";
 import PostAnalysisPanel from "@/components/PostAnalysisPanel";
 import SocialAnswerPanel from "@/components/SocialAnswerPanel";
@@ -664,10 +663,20 @@ function PostCard({ post: p, onClick }: { post: SocialPost; onClick: () => void 
   return (
     <div onClick={onClick}
       className="glass-panel rounded-xl overflow-hidden cursor-pointer hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col">
+      {/* The image area exists only when there is an image to put in it.
+          Previously onError hid the <img> but left this wrapper, so every
+          expired Instagram URL rendered as a 128px grey rectangle — the blank
+          boxes filling the grid. Meta signs its CDN links with an expiry and
+          62% of the stored ones were already dead, so the API now withholds
+          them and the whole frame is skipped. If one dies between the response
+          and the render, the wrapper removes itself rather than the image. */}
       {p.thumbnail_url && (
         <div className="h-32 bg-slate-100 dark:bg-slate-800 overflow-hidden shrink-0">
           <img src={p.thumbnail_url} alt="" loading="lazy" className="w-full h-full object-cover"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+            onError={(e) => {
+              const img = e.target as HTMLImageElement;
+              img.parentElement?.remove();
+            }} />
         </div>
       )}
       <div className="p-3 flex-1 flex flex-col">
@@ -680,10 +689,23 @@ function PostCard({ post: p, onClick }: { post: SocialPost; onClick: () => void 
         {p.author && <p className="text-xs font-semibold text-pharma-light truncate">{p.author}</p>}
         <p className="text-xs text-gray-600 dark:text-[#94a3b8] line-clamp-3 mt-1 flex-1">{p.text || "—"}</p>
         <div className="flex items-center gap-3 mt-2 pt-2 border-t border-gray-100 dark:border-slate-800">
-          <Stat icon={Heart} value={p.likes} />
-          <Stat icon={MessageCircle} value={p.comments} />
-          <Stat icon={Eye} value={p.views} />
-          <Stat icon={Share2} value={p.shares} />
+          {/* "0 likes" and "we cannot see the likes" are different facts, and
+              only one of them says anything about the post. X and LinkedIn come
+              through search with no metrics at all, and Instagram's are often
+              rate-limited away — 72% of the corpus. Showing zeroes there reads
+              as "nobody engaged". */}
+          {p.engagement_available === false ? (
+            <span className="text-[11px] text-gray-400 italic">
+              engagement not available on {p.platform}
+            </span>
+          ) : (
+            <>
+              <Stat icon={Heart} value={p.likes} />
+              <Stat icon={MessageCircle} value={p.comments} />
+              <Stat icon={Eye} value={p.views} />
+              <Stat icon={Share2} value={p.shares} />
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -717,6 +739,14 @@ export function DescribeModal({ post, onClose }: { post: SocialPost; onClose: ()
           {post.thumbnail_url && (
             <img src={post.thumbnail_url} alt="" className="w-full rounded-lg object-cover max-h-64"
               onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+          )}
+          {/* Said plainly rather than left blank: the post is still fully
+              readable, and "the picture expired" is different from "there was
+              never a picture". */}
+          {!post.thumbnail_url && post.thumbnail_expired && (
+            <p className="flex items-center gap-1.5 text-xs text-gray-400 italic">
+              <ImageOff size={12} /> The original image is no longer available from {post.platform}.
+            </p>
           )}
 
           {isLoading ? (
