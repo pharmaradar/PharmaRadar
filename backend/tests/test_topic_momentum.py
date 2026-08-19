@@ -83,3 +83,69 @@ def test_the_direction_is_always_one_of_the_known_words():
     known = {"rising", "falling", "steady", "new", "unknown"}
     for current, previous in [(0, 0), (5, 0), (1, 2), (50, 50), (90, 30), (0, 50)]:
         assert classify(current, previous)[1] in known
+
+
+# ── The SQL itself, executed against a real database ──────
+#
+# The counting query was rewritten to use conditional aggregation — both windows
+# in ONE query per table instead of four round trips, on the caller's session
+# instead of a fresh connection per topic, because the topic list renders every
+# tracked topic and polls. That rewrite is real SQL and the tests above only
+# cover the pure classify() helper, so it is exercised here for real.
+
+import pytest_asyncio  # noqa: E402
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+class _Topic:
+    """Minimal stand-in carrying what _scope_terms and the window need."""
+    def __init__(self, name="immunothérapie", days=30):
+        self.name = name
+        self.period_days = days
+        self.restriction_terms = None
+        self.exclusion_words = None
+        self.language_filter = "fr"
+
+
+@pytest.mark.asyncio
+async def test_the_counting_query_runs_and_splits_the_two_windows(db_session):
+    """Executes the real query. Rows are placed either side of the window edge,
+    so a query that collapsed the two CASE branches — or got the boundary
+    backwards — would report them in the wrong bucket rather than merely fail."""
+    from app.models import ScrapedPost, Target
+    from app.services.topic_momentum import topic_momentum
+
+    now = datetime.now(timezone.utc)
+    target = Target(name="MOMENTUM TEST KOL", known_urls="[]")
+    db_session.add(target)
+    await db_session.flush()
+
+    def post(days_ago: int, n: int):
+        return ScrapedPost(
+            target_id=target.id,
+            source_url=f"https://example.test/momentum/{days_ago}/{n}",
+            raw_content="Un article sur l'immunothérapie dans le cancer du poumon.",
+            content_hash=f"momentum-{days_ago}-{n}",
+            scraped_at=now - timedelta(days=days_ago),
+        )
+
+    # 3 inside the current 30-day window, 1 inside the previous one.
+    for n in range(3):
+        db_session.add(post(5, n))
+    db_session.add(post(40, 0))
+    await db_session.flush()
+
+    result = await topic_momentum(_Topic(days=30), session=db_session)
+    assert result.current == 3, "current window miscounted"
+    assert result.previous == 1, "previous window miscounted"
+    assert result.direction == "new" or result.previous > 0
+
+
+@pytest.mark.asyncio
+async def test_a_topic_matching_nothing_counts_zero_without_error(db_session):
+    from app.services.topic_momentum import topic_momentum
+
+    result = await topic_momentum(_Topic(name="zzz-nonexistent-topic-zzz"),
+                                  session=db_session)
+    assert result.current == 0 and result.previous == 0
+    assert result.direction == "unknown"

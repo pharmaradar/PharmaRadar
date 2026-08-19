@@ -773,6 +773,7 @@ class AnswerRequest(BaseModel):
 
 @router.post("/answer")
 async def answer_question(body: AnswerRequest,
+                          refresh: bool = False,
                           db: AsyncSession = Depends(get_db),
                           user=Depends(daily_gen_guard("social_answer"))):
     """Answer a typed question from the posts that matched it.
@@ -793,6 +794,36 @@ async def answer_question(body: AnswerRequest,
     question = (body.q or "").strip()
     if len(question) < 5:
         raise HTTPException(422, "Ask a question of at least a few words")
+
+    # Answers are cached per question, like every other generated artefact here.
+    # This panel now fires automatically when a search reads as a question, so
+    # without a cache the client re-pays for an 8192-token call over 35 posts
+    # every time he revisits the same search.
+    import hashlib as _hashlib
+    _qkey = _hashlib.sha256(f"{question.lower()}|{body.lang}".encode()).hexdigest()[:24]
+    _CACHE_KEY = f"social_answer:v1:{_qkey}"
+    _redis_client = None
+    try:
+        import redis as _redis
+        from app.config import get_settings as _gs
+        _redis_client = _redis.Redis.from_url(_gs().redis_url, socket_timeout=2)
+        if not (refresh or body.refresh):
+            cached = _redis_client.get(_CACHE_KEY)
+            if cached:
+                result = json.loads(cached)
+                if isinstance(result, dict):
+                    result["cached"] = True
+                    return result
+    except Exception:                                   # noqa: BLE001
+        _redis_client = None
+
+    # Metered HERE, not by the dependency. daily_gen_guard reads `refresh` as a
+    # QUERY parameter, and this endpoint's flag arrives in the JSON body — so
+    # the guard always saw False and never charged for a call that ALWAYS
+    # generates. Every other quota'd endpoint returns a cache hit for free and
+    # only charges on regeneration; this one had neither cache nor charge.
+    from app.auth import enforce_daily_generation
+    enforce_daily_generation(user, "social_answer")
 
     # Reuse the search path verbatim so the answer is about the same posts the
     # user is looking at. A separate query would answer a different question.
@@ -833,7 +864,7 @@ async def answer_question(body: AnswerRequest,
         max_tokens=8192)
 
     parsed = sa.parse_answer(raw, evidence, sa.wants_ranked_list(question))
-    return {
+    payload = {
         "question": question,
         "answered": True,
         "asks_about": audience,
@@ -843,8 +874,17 @@ async def answer_question(body: AnswerRequest,
         "posts_used": len(evidence),
         "duplicates_removed": len(posts) - len(sa.dedupe_evidence(posts)),
         "voices": voices,
+        "cached": False,
         **parsed,
     }
+    if _redis_client is not None:
+        try:
+            # Six hours, matching the other generated artefacts: long enough that
+            # revisiting a search is free, short enough that a fresh scan shows.
+            _redis_client.setex(_CACHE_KEY, 6 * 3600, json.dumps(payload))
+        except Exception:                               # noqa: BLE001
+            pass
+    return payload
 
 
 @router.get("/accounts")

@@ -97,14 +97,69 @@ def test_integer_keys_are_accepted_as_well_as_strings():
     assert ex.batch_analyses({1: {}, 2: {}}, [10, 11]) is not None
 
 
+class _FakePost:
+    def __init__(self, pid):
+        self.id, self.target_id, self.raw_content = pid, 1, "some real content " * 40
+
+
+class _FakeTarget:
+    name = "GIRARD NICOLAS"
+
+
+class _FakeSession:
+    """Stands in for the DB so this test exercises the LLM path deterministically.
+
+    Written against a real session first, which made it depend on the local
+    Postgres: with the database up `sess.get` returned None and the function
+    returned at its missing-post guard, so the test passed WITHOUT ever reaching
+    the LLM. With the database down the connection error propagated and it
+    failed. Either way it was not testing what it claimed.
+    """
+    async def get(self, model, pid):
+        return _FakeTarget() if model.__name__ == "Target" else _FakePost(pid)
+
+    async def __aenter__(self): return self
+    async def __aexit__(self, *a): return False
+
+
 def test_an_llm_exception_falls_back_rather_than_propagating(monkeypatch):
+    """An LLM failure must return None so the caller retries per post. A
+    DATABASE failure deliberately does NOT — the per-post path would fail the
+    same way, and the task's own retry is the right handler; swallowing it would
+    look like "nothing to extract" and lose the work silently."""
+    import app.database as db_mod
+
     svc = ExtractorService()
     monkeypatch.setattr(ex, "_load_prompt", lambda name: "RULES {name}")
+    monkeypatch.setattr(db_mod, "CelerySessionLocal", lambda: _FakeSession())
 
     def boom(*a, **k):
         raise RuntimeError("provider down")
 
     monkeypatch.setattr(ex, "_call_json", boom)
+    assert svc.extract_batch(post_ids=[1, 2], ctx=_Ctx()) is None
+
+
+def test_an_unparseable_batch_reply_falls_back(monkeypatch):
+    """The other half of the same contract, now that the LLM is actually reached."""
+    import app.database as db_mod
+
+    svc = ExtractorService()
+    monkeypatch.setattr(ex, "_load_prompt", lambda name: "RULES {name}")
+    monkeypatch.setattr(db_mod, "CelerySessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(ex, "_call_json", lambda *a, **k: None)
+    assert svc.extract_batch(post_ids=[1, 2], ctx=_Ctx()) is None
+
+
+def test_a_reply_missing_one_post_falls_back(monkeypatch):
+    """Reached through the real function now, not just batch_analyses."""
+    import app.database as db_mod
+
+    svc = ExtractorService()
+    monkeypatch.setattr(ex, "_load_prompt", lambda name: "RULES {name}")
+    monkeypatch.setattr(db_mod, "CelerySessionLocal", lambda: _FakeSession())
+    monkeypatch.setattr(ex, "_call_json",
+                        lambda *a, **k: {"results": {"1": {"insights": []}}})
     assert svc.extract_batch(post_ids=[1, 2], ctx=_Ctx()) is None
 
 
