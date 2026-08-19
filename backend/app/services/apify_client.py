@@ -30,8 +30,13 @@ logger = structlog.get_logger(__name__)
 
 ACTORS = {
     "instagram": "apify/instagram-hashtag-scraper",
-    # microworlds uses browser automation — survives X API lockdowns that kill API-based scrapers
-    "twitter":   "microworlds/twitter-scraper",
+    # apidojo/tweet-scraper — 158M runs, $0.40 per 1,000 tweets. Replaces
+    # microworlds/twitter-scraper, which no longer exists; X therefore fell
+    # through to TinyFish search, and TinyFish search carries NO engagement, so
+    # 100% of stored X posts had zero likes and could never rank in Trending on
+    # Social. It also takes `tweetLanguage` and `geocode`, which targets France
+    # at acquisition rather than filtering for it afterwards.
+    "twitter":   "apidojo/tweet-scraper",
     # requires LinkedIn session cookie configured in the Apify actor settings
     "linkedin":  "apify/linkedin-post-search-scraper",
     # used only when curated page_urls are provided; keyword fallback uses _ACTOR_FB_SEARCH
@@ -50,6 +55,14 @@ _ACTOR_FB_SEARCH = "apify/facebook-search-scraper"
 # multiplying the Apify bill.
 _ACTOR_IG_PROFILE = "apify/instagram-scraper"
 _ACTOR_IG_COMMENTS = "apify/instagram-comment-scraper"
+
+# Absolute ceiling on tweets fetched per run, whatever a caller asks for.
+#
+# This actor bills PER TWEET ($0.40/1,000), so a mis-set max_results is a bill
+# rather than a slow run — the one failure mode worth making structurally
+# impossible. A weekly scan wants a few hundred; 600 leaves headroom and caps
+# the worst case at about 24 cents.
+_X_MAX_ITEMS = 600
 
 _HASHTAG_RE = re.compile(r"#(\w+)")
 
@@ -267,9 +280,20 @@ def _build_input(platform: str, term: str, max_results: int, since: str | None,
     if platform == "instagram":
         return _ig_run_input([term], max_results) or {}
     if platform == "twitter":
-        # Native Twitter operator filters by language at search time
-        q = f"{term} lang:{lang_filter}" if lang_filter and lang_filter != "all" else term
-        return {"searchTerms": [q], "maxItems": max_results}
+        # Clamped here as well as at the call site. The SDK's max_items already
+        # bounds the run, but this actor bills per tweet, and a spend ceiling
+        # that holds only on one of two layers is one refactor from not holding
+        # at all.
+        run_input: dict = {
+            "searchTerms": [term],
+            "maxItems": max(1, min(int(max_results or 0), _X_MAX_ITEMS)),
+        }
+        if lang_filter and lang_filter != "all":
+            # The actor's own filter, applied before results are counted, so a
+            # French run pays only for French tweets — unlike the `lang:` search
+            # operator, which bills for whatever the search returned.
+            run_input["tweetLanguage"] = lang_filter
+        return run_input
     if platform == "linkedin":
         # apify/linkedin-post-search-scraper — keywords as array
         return {"keywords": [term], "resultsLimit": max_results}
@@ -427,8 +451,13 @@ def fetch_platform_expanded(
     LinkedIn   — TinyFish search (Apify deferred to later).
     Facebook   — page_urls scraper when available, else keyword search.
     """
-    # Twitter + LinkedIn now use TinyFish search (free under existing licence)
-    if platform in ("twitter", "linkedin"):
+    # LinkedIn still goes through TinyFish search: its Apify actor
+    # (apify/linkedin-post-search-scraper) returns 404 and no replacement is
+    # wired yet. X now has a working actor again — see ACTORS — and only falls
+    # back to TinyFish when Apify is unconfigured or returns nothing, so
+    # enabling it cannot reduce coverage.
+    _x_via_apify = platform == "twitter" and bool(get_settings().apify_api_token)
+    if platform in ("twitter", "linkedin") and not _x_via_apify:
         from app.services.tinyfish_social import fetch_via_tinyfish
         # Mix hashtags + keywords for broader recall
         terms = [t for t in (keywords + hashtags) if t and t.strip()][:6]
@@ -460,10 +489,17 @@ def fetch_platform_expanded(
         actor_id = ACTORS["twitter"]
         terms_clean = [t.strip() for t in keywords if t.strip()][:4]
         combined = " OR ".join(f'"{t}"' if " " in t else t for t in terms_clean)
-        # Append lang:fr filter when lang_filter is set
+        run_input = {
+            "searchTerms": [combined],
+            # Clamped, not trusted: this actor bills per tweet.
+            "maxItems": max(1, min(int(max_results or 0), _X_MAX_ITEMS)),
+            "sort": "Latest",
+        }
+        # `tweetLanguage` is the actor's own filter and is applied before results
+        # are counted, so a French run pays only for French tweets. The `lang:`
+        # search operator would still bill for whatever the search returned.
         if lang_filter and lang_filter != "all":
-            combined = f"({combined}) lang:{lang_filter}"
-        run_input = {"searchTerms": [combined], "maxItems": max_results}
+            run_input["tweetLanguage"] = lang_filter
 
     elif platform == "linkedin":
         actor_id = ACTORS["linkedin"]
@@ -492,10 +528,14 @@ def fetch_platform_expanded(
 
     try:
         client = ApifyClient(token)
+        # Belt and braces on a per-item-billed actor: the SDK cap is clamped
+        # too, so neither the input nor the run can exceed the ceiling.
+        capped = (max(1, min(int(max_results or 0), _X_MAX_ITEMS))
+                  if platform == "twitter" else max_results)
         run = client.actor(actor_id).call(
             run_input=run_input,
             run_timeout=timedelta(seconds=timeout_secs),
-            max_items=max_results,
+            max_items=capped,
         )
         dataset_id = getattr(run, "default_dataset_id", None) if run else None
         if not dataset_id:
@@ -519,6 +559,18 @@ def fetch_platform_expanded(
         if post["posted_at"] and post["posted_at"] < cutoff:
             continue
         posts.append(post)
+
+    # Enabling the Apify path must not be able to reduce coverage. X previously
+    # came from TinyFish search; if the actor yields nothing — bad query, actor
+    # outage, credit exhaustion — fall back to what was working before rather
+    # than reporting an empty week.
+    if not posts and platform == "twitter":
+        logger.warning("apify.x_empty_falling_back_to_tinyfish")
+        from app.services.tinyfish_social import fetch_via_tinyfish
+        terms = [t for t in (keywords + hashtags) if t and t.strip()][:6]
+        if terms:
+            return fetch_via_tinyfish(platform, terms, max_results=max_results,
+                                      lang_filter=lang_filter, accounts=accounts)
 
     logger.info("apify.fetched_expanded", platform=platform, count=len(posts))
     return posts
@@ -578,10 +630,14 @@ def fetch_platform(platform: str, term: str, max_results: int = 30,
 
     try:
         client = ApifyClient(token)
+        # Belt and braces on a per-item-billed actor: the SDK cap is clamped
+        # too, so neither the input nor the run can exceed the ceiling.
+        capped = (max(1, min(int(max_results or 0), _X_MAX_ITEMS))
+                  if platform == "twitter" else max_results)
         run = client.actor(actor_id).call(
             run_input=run_input,
             run_timeout=timedelta(seconds=timeout_secs),
-            max_items=max_results,
+            max_items=capped,
         )
         dataset_id = getattr(run, "default_dataset_id", None) if run else None
         if not dataset_id:
