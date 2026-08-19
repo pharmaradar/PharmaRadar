@@ -113,8 +113,45 @@ def evidence_matches_audience(audience: str | None, voices: dict) -> tuple[bool,
     return True, ""
 
 
+def main_voices(evidence: list[dict], tracked_names: set[str] | None = None,
+                limit: int = 8) -> list[dict]:
+    """Who is actually driving this conversation, loudest first.
+
+    The client asks for answers with people in them — "the top 5 topics and give
+    me the name of the people". Every matched post already carries an author and
+    a voice classification, so naming them costs nothing and turns a list of
+    themes into a list of people to approach.
+
+    Reuses market_report._compute_main_authors so "main voices" is computed one
+    way across the platform, and keeps its `tracked` flag: an untracked author
+    near the top is a candidate KOL nobody is following yet, which is the
+    stakeholder-identification ask from the original spec.
+    """
+    from app.services.market_report import _compute_main_authors
+
+    items = [{
+        "author": item.get("author"),
+        "engagement": item.get("likes", 0) + item.get("comments", 0),
+        "platform": item.get("platform"),
+        "is_tracked_kol": False,
+        "target_type": None,
+    } for item in evidence]
+    voices = _compute_main_authors(items, tracked_names or set(), limit=limit)
+
+    # Carry each author's voice bucket through, so the reader can see whether a
+    # name is a clinician, an organisation or unclassified before acting on it.
+    bucket_by_author = {}
+    for item in evidence:
+        name = (item.get("author") or "").strip().lower()
+        if name and name not in bucket_by_author:
+            bucket_by_author[name] = item.get("voice")
+    for entry in voices:
+        entry["voice"] = bucket_by_author.get(entry["author"].strip().lower())
+    return voices
+
+
 def build_prompt(question: str, evidence: list[dict], audience: str | None,
-                 voice_note: str) -> str:
+                 voice_note: str, voices: list[dict] | None = None) -> str:
     """The answering prompt. Section markers, not JSON — long JSON gets truncated
     mid-string and silently fails to parse, which is why every other long-output
     endpoint here uses markers."""
@@ -136,6 +173,20 @@ def build_prompt(question: str, evidence: list[dict], audience: str | None,
         "as [n]. Lead with the answer, not with context.\n"
     )
 
+    # Give the model the speakers explicitly. Without this it can only cite [n],
+    # and the client asked for the PEOPLE, not just the evidence indices.
+    speakers = ""
+    if voices:
+        listed = ", ".join(
+            f"{v['author']} ({v.get('voice') or 'unclassified'}, {v['mentions']} posts"
+            f"{', not currently tracked' if not v.get('tracked') else ''})"
+            for v in voices[:8])
+        speakers = (
+            f"\nThe most active speakers in these posts are: {listed}.\n"
+            "Name the people behind each point where the posts support it. Use "
+            "the names exactly as given, and never attribute a point to someone "
+            "whose posts do not support it.\n")
+
     audience_rule = (
         f"\nThe question asks about {audience}s. Say plainly when a point comes "
         f"from an organisation's own messaging rather than from {audience}s "
@@ -148,6 +199,7 @@ def build_prompt(question: str, evidence: list[dict], audience: str | None,
         "use outside knowledge, and do not pad the answer with what you already "
         "know about the disease.\n\n"
         f"QUESTION: {question}\n"
+        f"{speakers}"
         f"{audience_rule}"
         f"{('EVIDENCE CAVEAT: ' + voice_note) if voice_note else ''}\n\n"
         "Output EXACTLY these sections, each starting with its marker:\n\n"

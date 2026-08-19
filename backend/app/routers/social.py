@@ -854,9 +854,16 @@ async def answer_question(body: AnswerRequest,
     audience = sa.asks_about(question)
     fits, voice_note = sa.evidence_matches_audience(audience, voices)
 
+    # Who is driving this conversation. The client asks for answers with people
+    # in them — "the top 5 topics and give me the name of the people" — and the
+    # authors are already on every matched post.
+    from app.services.market_report import _tracked_names
+    speakers = sa.main_voices(evidence, await _tracked_names(db))
+
     raw = await call_llm_async(
         [{"role": "user",
-          "content": sa.build_prompt(question, evidence, audience, voice_note)}],
+          "content": sa.build_prompt(question, evidence, audience, voice_note,
+                                     voices=speakers)}],
         # 8192, not 4096: this emits three sections and the model reasons before
         # writing them. At 4096 the first live run stopped mid-sentence with
         # ##SO_WHAT## and ##CONFIDENCE## never reached. Same reason
@@ -874,6 +881,9 @@ async def answer_question(body: AnswerRequest,
         "posts_used": len(evidence),
         "duplicates_removed": len(posts) - len(sa.dedupe_evidence(posts)),
         "voices": voices,
+        # Named speakers, with `tracked` so an untracked name near the top reads
+        # as a candidate KOL rather than just a citation.
+        "speakers": speakers,
         "cached": False,
         **parsed,
     }
