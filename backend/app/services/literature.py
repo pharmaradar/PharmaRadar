@@ -34,9 +34,16 @@ _UA = "PharmaRadar/1.0 (pharma intelligence; contact via platform administrator)
 
 
 def _get_json(url: str) -> dict:
-    request = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
-        return json.load(response)
+    """Fetch with retry. Raises SourceUnavailable when the API cannot be reached.
+
+    Europe PMC and ClinicalTrials.gov are free shared services and do return
+    transient 503s — verified on 2026-08-18, when EPMC answered 503 to every
+    query including `query=cancer`. A single bare request lost the whole call,
+    and the caller returned [] for it, so an outage looked like a quiet week.
+    """
+    from app.services.http_retry import fetch_json
+
+    return fetch_json(url, timeout=_TIMEOUT, user_agent=_UA)
 
 
 def _fold(value: str) -> str:
@@ -173,7 +180,14 @@ def search_publications(author_name: str, *, since_days: int = 365,
     try:
         payload = _get_json(url)
     except Exception as exc:                        # noqa: BLE001 - never fail a run
+        # Still never fails the run, but the caller can now tell the two apart:
+        # an unreachable source is re-raised as SourceUnavailable, while a real
+        # empty result is an ordinary [].
+        from app.services.http_retry import SourceUnavailable
+
         logger.warning("literature.epmc_failed", author=author_name, error=str(exc)[:160])
+        if isinstance(exc, SourceUnavailable):
+            raise
         return []
 
     out: list[dict] = []
