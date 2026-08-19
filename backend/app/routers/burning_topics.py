@@ -172,7 +172,9 @@ async def list_topics(db: AsyncSession = Depends(get_db),
     out = []
     for t in topics:
         try:
-            momentum = (await topic_momentum(t)).as_dict()
+            # Reuse the request session: this loops over every tracked topic
+            # on a page that polls, and a connection per topic churned the pool.
+            momentum = (await topic_momentum(t, session=db)).as_dict()
         except Exception as exc:                      # noqa: BLE001
             # A counting failure must not take the topic list down with it.
             logger.warning("burning_topics.momentum_failed", topic=t.id, exc=str(exc)[:160])

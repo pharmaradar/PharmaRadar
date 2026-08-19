@@ -894,6 +894,13 @@ export interface SocialAnswer {
   posts_used?: number;
   duplicates_removed?: number;
   voices?: Record<string, number>;
+  /** Who is driving the conversation, loudest first. `tracked: false` is the
+   *  actionable half — an untracked name near the top is a candidate KOL nobody
+   *  is following yet, which is the spec's stakeholder-identification ask. */
+  speakers?: {
+    author: string; mentions: number; engagement: number;
+    platforms: string[]; tracked: boolean; voice: string | null;
+  }[];
   points: string[];
   answer_text?: string;
   so_what?: string;

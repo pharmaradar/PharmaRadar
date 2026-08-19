@@ -76,9 +76,16 @@ def classify(current: int, previous: int) -> tuple[float | None, str]:
     return (round(change, 1), "rising" if change > 0 else "falling")
 
 
-async def topic_momentum(topic, *, window_days: int | None = None) -> Momentum:
-    """Count this topic's posts now versus the window immediately before."""
-    from sqlalchemy import func, select
+async def topic_momentum(topic, *, window_days: int | None = None,
+                         session=None) -> Momentum:
+    """Count this topic's posts now versus the window immediately before.
+
+    `session` is the caller's — the topic list renders every tracked topic and
+    polls, so opening a fresh connection per topic churned the pool for no
+    reason. Both windows are counted in ONE query per table using conditional
+    aggregation rather than four separate round trips.
+    """
+    from sqlalchemy import case, func, select
 
     from app.database import CelerySessionLocal
     from app.models import ScrapedPost, SocialPost
@@ -94,32 +101,37 @@ async def topic_momentum(topic, *, window_days: int | None = None) -> Momentum:
     if not terms:
         return Momentum(0, 0, None, "unknown", days)
 
-    async with CelerySessionLocal() as sess:
-        async def count_between(start: datetime, end: datetime) -> int:
-            scraped = (
-                select(func.count())
-                .select_from(ScrapedPost)
-                .where(ScrapedPost.scraped_at >= start, ScrapedPost.scraped_at < end)
-                .where(_match_any(terms, ScrapedPost.raw_content, ScrapedPost.title))
-                .where(post_not_ae())
-            )
-            scraped = _exclude(scraped, exclusions, ScrapedPost.raw_content, ScrapedPost.title)
+    def _windowed(model, stamp, *text_columns):
+        """One row: (current_window_count, previous_window_count)."""
+        current_case = func.count(case((stamp >= current_start, 1)))
+        previous_case = func.count(
+            case(((stamp >= previous_start) & (stamp < current_start), 1)))
+        q = (select(current_case, previous_case)
+             .select_from(model)
+             .where(stamp >= previous_start, stamp < now)
+             .where(_match_any(terms, *text_columns)))
+        return q
 
-            social = (
-                select(func.count())
-                .select_from(SocialPost)
-                .where(SocialPost.scraped_at >= start, SocialPost.scraped_at < end)
-                .where(_match_any(terms, SocialPost.text, SocialPost.topic, SocialPost.hashtags))
-                .where(social_not_ae())
-            )
-            social = _exclude(social, exclusions,
-                              SocialPost.text, SocialPost.topic, SocialPost.hashtags)
+    async def _run(sess) -> tuple[int, int]:
+        scraped = _windowed(ScrapedPost, ScrapedPost.scraped_at,
+                            ScrapedPost.raw_content, ScrapedPost.title).where(post_not_ae())
+        scraped = _exclude(scraped, exclusions, ScrapedPost.raw_content, ScrapedPost.title)
 
-            return (((await sess.execute(scraped)).scalar() or 0)
-                    + ((await sess.execute(social)).scalar() or 0))
+        social = _windowed(SocialPost, SocialPost.scraped_at,
+                           SocialPost.text, SocialPost.topic,
+                           SocialPost.hashtags).where(social_not_ae())
+        social = _exclude(social, exclusions,
+                          SocialPost.text, SocialPost.topic, SocialPost.hashtags)
 
-        current = await count_between(current_start, now)
-        previous = await count_between(previous_start, current_start)
+        s_cur, s_prev = (await sess.execute(scraped)).one()
+        o_cur, o_prev = (await sess.execute(social)).one()
+        return (s_cur or 0) + (o_cur or 0), (s_prev or 0) + (o_prev or 0)
+
+    if session is not None:
+        current, previous = await _run(session)
+    else:
+        async with CelerySessionLocal() as sess:
+            current, previous = await _run(sess)
 
     change_pct, direction = classify(current, previous)
     return Momentum(current, previous, change_pct, direction, days)

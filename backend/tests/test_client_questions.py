@@ -254,3 +254,73 @@ def test_an_open_question_reply_is_kept_as_prose():
     out = sa.parse_answer(reply, _evidence(), ranked=False)
     assert out["points"] == []
     assert "subcutaneous" in out["answer_text"]
+
+
+# ── Naming the people ─────────────────────────────────────
+#
+# "what are the top 5 topics and give me the name of the people" — the client
+# wants answers with people in them, not just themes. Every matched post already
+# carries an author, so this costs nothing beyond using what is there.
+
+def _authored(author, platform="twitter", voice="organisation", n=1):
+    return [{"author": author, "platform": platform, "voice": voice,
+             "likes": 5, "comments": 1, "text": f"post by {author}"} for _ in range(n)]
+
+
+def test_the_loudest_speakers_are_identified():
+    evidence = _authored("@GustaveRoussy", n=4) + _authored("@institut_curie", n=2)
+    voices = sa.main_voices(evidence, tracked_names=set())
+    assert voices[0]["author"] == "@GustaveRoussy"
+    assert voices[0]["mentions"] == 4
+
+
+def test_an_untracked_speaker_is_flagged_as_such():
+    """The actionable half: a name near the top that nobody follows yet is a
+    candidate KOL, which is the spec's stakeholder-identification ask."""
+    from app.services.term_expansion import fold_accents
+
+    evidence = _authored("@GustaveRoussy", n=3) + _authored("dr-unknown-person", n=2)
+    tracked = {fold_accents("@GustaveRoussy").lower().lstrip("@")}
+    voices = {v["author"]: v for v in sa.main_voices(evidence, tracked_names=tracked)}
+    assert voices["dr-unknown-person"]["tracked"] is False
+
+
+def test_each_speaker_carries_its_voice_bucket():
+    """A name is only actionable once you know whether it is a clinician, an
+    organisation, or unclassified."""
+    evidence = _authored("@laliguecancer", voice="patient", n=2)
+    assert sa.main_voices(evidence)[0]["voice"] == "patient"
+
+
+def test_unattributed_posts_do_not_become_a_speaker():
+    """"unknown" is not a person, and listing it as the top voice would be
+    absurd on a page the client reads."""
+    evidence = _authored("unknown", n=9) + _authored("@institut_curie", n=1)
+    names = [v["author"] for v in sa.main_voices(evidence)]
+    assert "unknown" not in names
+
+
+def test_the_prompt_lists_the_speakers_and_asks_the_model_to_name_them():
+    voices = [{"author": "@GustaveRoussy", "mentions": 4, "voice": "organisation",
+               "tracked": True},
+              {"author": "dr-new-voice-12345", "mentions": 2, "voice": "other",
+               "tracked": False}]
+    prompt = sa.build_prompt("top 5 topics and who is talking about them",
+                             [{"text": "x"}], None, "", voices=voices)
+    assert "@GustaveRoussy" in prompt and "dr-new-voice-12345" in prompt
+    assert "not currently tracked" in prompt
+    assert "Name the people" in prompt
+
+
+def test_the_prompt_forbids_attributing_a_point_to_the_wrong_person():
+    """Naming people raises the cost of a hallucination: a fabricated quote
+    attributed to a real French clinician is the worst output this can produce."""
+    prompt = sa.build_prompt("who is talking about immunotherapy", [{"text": "x"}],
+                             None, "", voices=[{"author": "@X", "mentions": 1,
+                                                "voice": "kol", "tracked": True}])
+    assert "never attribute" in prompt.lower()
+
+
+def test_no_speakers_leaves_the_prompt_valid():
+    prompt = sa.build_prompt("what is being said", [{"text": "x"}], None, "", voices=[])
+    assert "##ANSWER##" in prompt

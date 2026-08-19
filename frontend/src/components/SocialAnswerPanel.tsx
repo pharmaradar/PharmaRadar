@@ -169,6 +169,36 @@ export default function SocialAnswerPanel({ question }: { question: string }) {
             </p>
           )}
 
+          {/* The people behind the answer. The client asks for topics AND names;
+              `tracked: false` is what makes a name worth acting on rather than
+              just reading. */}
+          {(data.speakers?.length ?? 0) > 0 && (
+            <div>
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-2">
+                Who is driving this
+              </h3>
+              <div className="flex flex-wrap gap-1.5">
+                {data.speakers!.slice(0, 10).map((s) => (
+                  <span key={s.author}
+                    className={cn(
+                      "px-2 py-1 rounded-lg text-xs border",
+                      s.tracked
+                        ? "border-slate-200/60 dark:border-white/10 text-gray-700 dark:text-[#e2e8f0]"
+                        : "border-pharma-blue/40 bg-pharma-blue/5 text-pharma-blue dark:text-blue-300",
+                    )}
+                    title={s.tracked ? "Already tracked" : "Not tracked — possible KOL to follow"}>
+                    {s.author}
+                    <span className="text-gray-400 ml-1.5">{s.mentions}</span>
+                    {!s.tracked && <span className="ml-1.5 text-[10px] font-medium">new</span>}
+                  </span>
+                ))}
+              </div>
+              <p className="text-[11px] text-gray-400 mt-1.5">
+                Highlighted names are not in your tracked list yet.
+              </p>
+            </div>
+          )}
+
           {data.citations.length > 0 && (
             <details>
               <summary className="text-xs font-semibold text-gray-500 cursor-pointer hover:text-pharma-blue">
